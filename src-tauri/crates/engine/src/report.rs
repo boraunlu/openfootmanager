@@ -56,7 +56,7 @@ pub struct PlayerMatchStats {
     pub fouls_committed: u8,
     pub yellow_cards: u8,
     pub red_cards: u8,
-    /// Match rating 0.0–10.0, computed after the match.
+    /// Match rating 1.0–10.0, computed after the match; 0.0 means unrated.
     pub rating: f32,
 }
 
@@ -342,6 +342,7 @@ impl MatchReport {
             &tracked_player_ids,
             &mut player_stats,
         );
+        calculate_match_ratings(&events, &mut player_stats);
 
         let total_poss = home_possession_ticks + away_possession_ticks;
         let home_possession = if total_poss > 0 {
@@ -363,6 +364,94 @@ impl MatchReport {
             home_penalties: None,
             away_penalties: None,
         }
+    }
+}
+
+/// Deterministic v1 assessment of recorded contributions. Zero is an unrated
+/// sentinel, never a bad performance. No ability, reputation or random inputs.
+fn calculate_match_ratings(events: &[MatchEvent], players: &mut HashMap<String, PlayerMatchStats>) {
+    use crate::event::{DangerBand, EventDetail, SaveQuality};
+    #[derive(Default)]
+    struct Extra {
+        carrying: f32,
+        clearances: f32,
+        saves: f32,
+        misses: f32,
+        penalties: f32,
+        dismissal: f32,
+    }
+    let mut extras: HashMap<&str, Extra> = HashMap::new();
+    for event in events {
+        if let Some(id) = event.player_id.as_deref() {
+            let extra = extras.entry(id).or_default();
+            match event.event_type {
+                EventType::Dribble => extra.carrying += 0.04,
+                EventType::DribbleTackled => extra.carrying -= 0.05,
+                EventType::Clearance => extra.clearances += 0.06,
+                EventType::PenaltyGoal => extra.penalties += 0.35,
+                EventType::PenaltyMiss => extra.misses += 0.65,
+                EventType::SecondYellow => extra.dismissal += 1.2,
+                EventType::ShotOffTarget | EventType::ShotBlocked => {
+                    extra.misses += if matches!(
+                        event.detail,
+                        Some(EventDetail::Shot {
+                            danger: DangerBand::BigChance
+                        })
+                    ) {
+                        0.20
+                    } else {
+                        0.03
+                    }
+                }
+                _ => {}
+            }
+        }
+        // ShotSaved's primary player is the shooter. New events explicitly
+        // identify the saving goalkeeper as secondary; never guess for old logs.
+        if event.event_type == EventType::ShotSaved
+            && let Some(keeper) = event.secondary_player_id.as_deref()
+        {
+            extras.entry(keeper).or_default().saves += match event.detail {
+                Some(EventDetail::Save {
+                    quality: SaveQuality::WorldClass,
+                }) => 0.35,
+                Some(EventDetail::Save {
+                    quality: SaveQuality::Strong,
+                }) => 0.25,
+                _ => 0.18,
+            };
+        }
+    }
+    for (id, stats) in players {
+        // A same-minute cameo has too little recorded playing time to rate.
+        if stats.minutes_played == 0 {
+            stats.rating = 0.0;
+            continue;
+        }
+        let extra = extras.get(id.as_str());
+        let failed_passes = stats
+            .passes_attempted
+            .saturating_sub(stats.passes_completed);
+        let passing = (f32::from(stats.passes_completed) * 0.025 - f32::from(failed_passes) * 0.04)
+            .clamp(-0.7, 0.6);
+        let defending = (f32::from(stats.tackles_won) * 0.1
+            + f32::from(stats.interceptions) * 0.12
+            + extra.map_or(0.0, |e| e.clearances))
+        .min(1.2);
+        let discipline = (f32::from(stats.fouls_committed) * 0.05).min(0.4)
+            + f32::from(stats.yellow_cards) * 0.2
+            + f32::from(stats.red_cards) * 1.4
+            + extra.map_or(0.0, |e| e.dismissal);
+        let value = 6.3
+            + f32::from(stats.goals)
+            + f32::from(stats.assists) * 0.6
+            + passing
+            + defending
+            + extra.map_or(0.0, |e| {
+                e.carrying.clamp(-0.6, 0.4) + e.saves.min(2.2) - e.misses.min(1.5) - e.penalties
+            })
+            - discipline;
+        stats.rating = (value.clamp(1.0, 10.0) * 10.0).round() / 10.0;
     }
 }
 
@@ -413,6 +502,68 @@ fn populate_minutes_played(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ratings_reward_contributions_and_penalize_discipline_without_ability_input() {
+        let events = vec![
+            event(10, EventType::Goal, Side::Home, "scorer").with_secondary("creator"),
+            event(20, EventType::Tackle, Side::Home, "defender"),
+            event(30, EventType::Interception, Side::Home, "defender"),
+            event(40, EventType::Clearance, Side::Home, "defender"),
+            event(50, EventType::RedCard, Side::Home, "dismissed"),
+        ];
+        let ids = ["quiet", "scorer", "creator", "defender", "dismissed"]
+            .map(String::from)
+            .to_vec();
+        let report = MatchReport::from_events_with_players(events, 50, 50, 90, ids);
+        let rating = |id: &str| report.player_stats[id].rating;
+        assert!((6.0..=7.0).contains(&rating("quiet")));
+        for id in ["scorer", "creator", "defender"] {
+            assert!(rating(id) > rating("quiet"));
+        }
+        assert!(rating("dismissed") < rating("quiet"));
+    }
+
+    #[test]
+    fn ratings_credit_recorded_keeper_and_ignore_shootouts() {
+        let ids = ["shooter", "keeper", "quiet"].map(String::from).to_vec();
+        let save = event(10, EventType::ShotSaved, Side::Home, "shooter").with_secondary("keeper");
+        let before =
+            MatchReport::from_events_with_players(vec![save.clone()], 50, 50, 90, ids.clone());
+        let after = MatchReport::from_events_with_players(
+            vec![
+                save,
+                event(120, EventType::ShootoutGoal, Side::Home, "shooter"),
+            ],
+            50,
+            50,
+            90,
+            ids,
+        );
+        assert!(before.player_stats["keeper"].rating > before.player_stats["quiet"].rating);
+        assert!(before.player_stats["shooter"].rating <= before.player_stats["quiet"].rating);
+        assert_eq!(
+            before.player_stats["shooter"].rating,
+            after.player_stats["shooter"].rating
+        );
+    }
+
+    #[test]
+    fn ratings_are_bounded_deterministic_and_zero_minutes_remain_unrated() {
+        let events = (1..40)
+            .map(|minute| event(minute, EventType::Goal, Side::Home, "scorer"))
+            .collect::<Vec<_>>();
+        let ids = vec!["scorer".into()];
+        let a = MatchReport::from_events_with_players(events.clone(), 50, 50, 90, ids.clone());
+        let b = MatchReport::from_events_with_players(events, 50, 50, 90, ids);
+        assert!((1.0..=10.0).contains(&a.player_stats["scorer"].rating));
+        assert_eq!(
+            a.player_stats["scorer"].rating,
+            b.player_stats["scorer"].rating
+        );
+        let empty = MatchReport::from_events_with_players(vec![], 0, 0, 0, vec!["unused".into()]);
+        assert_eq!(empty.player_stats["unused"].rating, 0.0);
+    }
 
     fn event(minute: u8, event_type: EventType, side: Side, player: &str) -> MatchEvent {
         MatchEvent::new(minute, event_type, side, Zone::attacking_box(side)).with_player(player)

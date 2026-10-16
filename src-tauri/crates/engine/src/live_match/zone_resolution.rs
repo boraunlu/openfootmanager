@@ -383,6 +383,7 @@ impl LiveMatchState {
         } else {
             let evt = MatchEvent::new(minute, EventType::ShotSaved, att_side, zone)
                 .with_player(&shooter.id)
+                .with_secondary(&goalkeeper.id)
                 .with_detail(EventDetail::Save {
                     quality: save_quality(gk_rating),
                 });

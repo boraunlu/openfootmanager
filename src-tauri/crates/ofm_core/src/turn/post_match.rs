@@ -572,16 +572,38 @@ fn update_post_match_morale(
                 individual_delta -= 8;
             }
             // Poor rating lowers morale
-            if ps.rating < 5.5 {
-                individual_delta -= 3;
-            } else if ps.rating > 7.5 {
-                individual_delta += 2;
-            }
+            individual_delta += rating_morale_effect(ps.rating);
         }
 
         let total_delta = capped_positive_recovery(result_delta + individual_delta, player);
         let new_morale = (base_morale + total_delta).clamp(10, 100) as u8;
         player.morale = new_morale;
+    }
+}
+
+fn rating_morale_effect(rating: f32) -> i16 {
+    if !rating.is_finite() || !(1.0..=10.0).contains(&rating) {
+        return 0;
+    }
+    if rating < 5.5 {
+        -3
+    } else if rating > 7.5 {
+        2
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod rating_tests {
+    use super::rating_morale_effect;
+    #[test]
+    fn unavailable_ratings_do_not_penalize_morale() {
+        assert_eq!(rating_morale_effect(0.0), 0);
+        assert_eq!(rating_morale_effect(f32::NAN), 0);
+        assert_eq!(rating_morale_effect(5.0), -3);
+        assert_eq!(rating_morale_effect(8.0), 2);
+        assert_eq!(rating_morale_effect(6.3), 0);
     }
 }
 

@@ -366,7 +366,9 @@ fn resolve_shot<R: Rng>(ctx: &mut MatchContext, minute: u8, att_side: Side, rng:
         ctx.ball_zone = Zone::Midfield;
     } else {
         ctx.emit(
-            MatchEvent::new(minute, EventType::ShotSaved, att_side, zone).with_player(&shooter.id),
+            MatchEvent::new(minute, EventType::ShotSaved, att_side, zone)
+                .with_player(&shooter.id)
+                .with_secondary(&goalkeeper.id),
         );
         // 40% of saves → corner (keeper parries wide), 60% → goal kick (keeper catches)
         if rng.random_range(0.0..1.0f64) < 0.40 {
