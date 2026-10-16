@@ -148,6 +148,17 @@ pub fn process_day_with_capture<F>(game: &mut Game, on_capture: &mut F)
 where
     F: FnMut(StatsState),
 {
+    process_day_with_matchday(game, on_capture, &mut simulate_competition_day_with_capture);
+}
+
+/// Hosts can present or delegate managed matches while retaining the entire
+/// daily lifecycle. The handler must resolve the scheduled competition day;
+/// it must not advance the clock or run daily processing a second time.
+pub fn process_day_with_matchday<F, M>(game: &mut Game, on_capture: &mut F, on_matchday: &mut M)
+where
+    F: FnMut(StatsState),
+    M: FnMut(&mut Game, usize, &str, &mut F),
+{
     let today = game.clock.current_date.format("%Y-%m-%d").to_string();
     transfers::process_loan_development_reports(game);
     transfers::process_loan_returns(game);
@@ -158,7 +169,7 @@ where
     if has_match_today {
         info!("[turn] process_day {}: matchday", today);
         for competition_index in due_competitions {
-            simulate_competition_day_with_capture(game, competition_index, &today, on_capture);
+            on_matchday(game, competition_index, &today, on_capture);
         }
     } else {
         let weekday_num = game.clock.current_date.weekday().num_days_from_monday();

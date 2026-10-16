@@ -72,7 +72,9 @@ impl GamePersistenceWriter {
     }
 }
 
-fn write_game_to_connection(
+/// Write into a caller-owned transaction. The caller must commit or roll back
+/// game state together with any companion records (for example match lineups).
+pub fn write_game_to_connection(
     conn: &Connection,
     game: &Game,
     save_id: &str,
