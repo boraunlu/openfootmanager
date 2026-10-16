@@ -1,4 +1,4 @@
-use domain::player::{Player, PlayerAttributes, Position};
+use domain::player::{Footedness, Player, PlayerAttributes, Position};
 use domain::staff::{Staff, StaffAttributes, StaffRole};
 use domain::team::PlayStyle;
 use rand::{Rng, RngExt};
@@ -14,36 +14,30 @@ use crate::player_rating::{generate_potential, refresh_player_derived};
 
 /// Compute a sensible alternate position based on primary position and attributes.
 fn compute_alternate_position(primary: &Position, attrs: &PlayerAttributes) -> Option<Position> {
-    match primary.to_group_position() {
-        Position::Goalkeeper => None,
-        Position::Defender => {
-            // Defenders with good passing/vision → Midfielder
-            if attrs.passing >= 65 && attrs.vision >= 60 {
-                Some(Position::Midfielder)
-            } else {
-                None
-            }
+    use Position::*;
+    match primary {
+        Goalkeeper => None,
+        LeftBack => Some(LeftWingBack),
+        RightBack => Some(RightWingBack),
+        LeftWingBack => Some(LeftBack),
+        RightWingBack => Some(RightBack),
+        LeftMidfielder => Some(LeftWinger),
+        RightMidfielder => Some(RightWinger),
+        LeftWinger => Some(LeftMidfielder),
+        RightWinger => Some(RightMidfielder),
+        CenterBack | Defender if attrs.passing >= 65 && attrs.vision >= 60 => {
+            Some(DefensiveMidfielder)
         }
-        Position::Midfielder => {
-            // Midfielders with strong defending/tackling → Defender
-            if attrs.defending >= 65 && attrs.tackling >= 60 {
-                Some(Position::Defender)
-            }
-            // Midfielders with good shooting/dribbling → Forward
-            else if attrs.shooting >= 65 && attrs.dribbling >= 60 {
-                Some(Position::Forward)
-            } else {
-                None
-            }
+        DefensiveMidfielder if attrs.defending >= 65 && attrs.tackling >= 60 => Some(CenterBack),
+        DefensiveMidfielder => Some(CentralMidfielder),
+        CentralMidfielder | Midfielder if attrs.defending >= 65 && attrs.tackling >= 60 => {
+            Some(DefensiveMidfielder)
         }
-        Position::Forward => {
-            // Forwards with good passing/vision → Midfielder
-            if attrs.passing >= 65 && attrs.vision >= 60 {
-                Some(Position::Midfielder)
-            } else {
-                None
-            }
+        CentralMidfielder | Midfielder if attrs.shooting >= 65 && attrs.dribbling >= 60 => {
+            Some(AttackingMidfielder)
         }
+        AttackingMidfielder => Some(CentralMidfielder),
+        Striker | Forward if attrs.passing >= 65 && attrs.vision >= 60 => Some(AttackingMidfielder),
         _ => None,
     }
 }
@@ -437,15 +431,24 @@ pub(super) fn generate_random_player_from_def(
     let full_name = format!("{} {}", first_name, last_name);
     let match_name = last_name.clone();
 
-    // Distribute positions: GK:0-1, DEF:2-8, MID:9-15, FWD:16-21
-    let position = if index < 2 {
-        Position::Goalkeeper
-    } else if index < 9 {
-        Position::Defender
-    } else if index < 16 {
-        Position::Midfielder
-    } else {
-        Position::Forward
+    // Keep the original GK/DEF/MID/FWD group counts and youth-reserved slots,
+    // but generate actual natural positions so wide roles exist in the market.
+    // Authored players use their definitions and are not reassigned here.
+    let position = match index % SQUAD_SLOTS {
+        0 | 1 => Position::Goalkeeper,
+        2 => Position::LeftBack,
+        3 | 4 | 7 => Position::CenterBack,
+        5 => Position::RightBack,
+        6 => Position::LeftWingBack,
+        8 => Position::RightWingBack,
+        9 => Position::LeftMidfielder,
+        10 | 14 | 15 => Position::CentralMidfielder,
+        11 => Position::DefensiveMidfielder,
+        12 => Position::AttackingMidfielder,
+        13 => Position::RightMidfielder,
+        16 => Position::LeftWinger,
+        18 | 21 => Position::RightWinger,
+        _ => Position::Striker,
     };
 
     let p_id = Uuid::new_v4().to_string();
@@ -564,6 +567,30 @@ pub(super) fn generate_random_player_from_def(
         position,
         attributes,
     );
+    // Avoid giving every generated left-sided specialist the default right foot.
+    player.footedness = if rng.random_range(0..10) == 0 {
+        Footedness::Both
+    } else if matches!(
+        player.natural_position,
+        Position::LeftBack
+            | Position::LeftWingBack
+            | Position::LeftMidfielder
+            | Position::LeftWinger
+    ) {
+        Footedness::Left
+    } else if matches!(
+        player.natural_position,
+        Position::RightBack
+            | Position::RightWingBack
+            | Position::RightMidfielder
+            | Position::RightWinger
+    ) {
+        Footedness::Right
+    } else if rng.random_range(0..4) == 0 {
+        Footedness::Left
+    } else {
+        Footedness::Right
+    };
     player.team_id = Some(team_id.to_string());
     player.market_value = market_value;
     player.wage = wage;
@@ -1116,6 +1143,90 @@ pub(super) fn generate_random_unemployed_manager(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_squads_have_specific_positions_and_same_flank_cover() {
+        use rand::{SeedableRng, rngs::StdRng};
+        let names = super::super::definitions::default_names_definition();
+        let mut rng = StdRng::seed_from_u64(42);
+        for _ in 0..8 {
+            let squad: Vec<_> = (0..SQUAD_SLOTS)
+                .map(|slot| {
+                    generate_random_player_from_def("club", slot, "ENG", 2026, &names, &mut rng)
+                })
+                .collect();
+            for position in [
+                Position::Goalkeeper,
+                Position::LeftBack,
+                Position::CenterBack,
+                Position::RightBack,
+                Position::LeftWingBack,
+                Position::RightWingBack,
+                Position::DefensiveMidfielder,
+                Position::CentralMidfielder,
+                Position::AttackingMidfielder,
+                Position::LeftMidfielder,
+                Position::RightMidfielder,
+                Position::LeftWinger,
+                Position::RightWinger,
+                Position::Striker,
+            ] {
+                assert!(
+                    squad.iter().any(|p| p.natural_position == position),
+                    "Missing {position:?}"
+                );
+            }
+            let counts: Vec<_> = [
+                Position::Goalkeeper,
+                Position::Defender,
+                Position::Midfielder,
+                Position::Forward,
+            ]
+            .iter()
+            .map(|group| {
+                squad
+                    .iter()
+                    .filter(|p| p.position.to_group_position() == *group)
+                    .count()
+            })
+            .collect();
+            assert_eq!(counts, vec![2, 7, 7, 6]);
+            for player in &squad {
+                assert_eq!(player.position, player.natural_position);
+                assert!(
+                    player
+                        .alternate_positions
+                        .iter()
+                        .all(|p| !p.is_legacy_bucket() && p != &player.natural_position)
+                );
+                if matches!(
+                    player.natural_position,
+                    Position::LeftBack
+                        | Position::LeftWingBack
+                        | Position::LeftMidfielder
+                        | Position::LeftWinger
+                ) {
+                    assert_ne!(player.footedness, domain::player::Footedness::Right);
+                }
+            }
+        }
+        let mut attrs =
+            generate_random_player_from_def("club", 9, "ENG", 2026, &names, &mut rng).attributes;
+        attrs.passing = 80;
+        attrs.vision = 80;
+        attrs.defending = 80;
+        attrs.tackling = 80;
+        attrs.shooting = 80;
+        attrs.dribbling = 80;
+        assert_eq!(
+            compute_alternate_position(&Position::LeftMidfielder, &attrs),
+            Some(Position::LeftWinger)
+        );
+        assert_eq!(
+            compute_alternate_position(&Position::RightBack, &attrs),
+            Some(Position::RightWingBack)
+        );
+    }
 
     /// Build a `PlayerDef` from JSON rather than a struct literal.
     ///

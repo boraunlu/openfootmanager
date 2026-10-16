@@ -1883,7 +1883,11 @@ mod tests {
             "national-pool players belong to no club"
         );
         assert_eq!(player.contract_end, None);
-        assert_eq!(player.position, Position::Defender, "slot 5 is a defender");
+        assert_eq!(
+            player.position.to_group_position(),
+            Position::Defender,
+            "slot 5 is a defender"
+        );
         assert!(player.ovr > 0, "derived ratings must be computed");
         assert_eq!(player.squad_role, SquadRole::Senior);
     }
