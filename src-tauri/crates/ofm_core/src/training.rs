@@ -133,7 +133,6 @@ pub fn process_training(game: &mut Game, weekday_num: u32) {
 
     // Index each team's plan by id so players are visited once (O(teams + players))
     // instead of rescanning every player for every team (O(teams * players)).
-    let user_team_id = game.manager.team_id.clone();
     let plans: std::collections::HashMap<String, TeamTrainingPlan> = game
         .teams
         .iter()
@@ -156,7 +155,7 @@ pub fn process_training(game: &mut Game, weekday_num: u32) {
                     bonus,
                     medical_facility_mult,
                     group_overrides,
-                    is_user_team: user_team_id.as_deref() == Some(t.id.as_str()),
+                    is_user_team: game.is_controlled(&t.id),
                 },
             )
         })

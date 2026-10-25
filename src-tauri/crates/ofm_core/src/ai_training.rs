@@ -184,13 +184,11 @@ fn snapshot_team(game: &Game, team_id: &str, weekday_num: u32) -> TeamSnapshot {
 /// Must be called BEFORE `training::process_training` so that the planner's
 /// chosen focus and intensity are in effect when training effects are applied.
 pub fn apply_ai_training_policies(game: &mut Game, weekday_num: u32) {
-    let user_team_id = game.manager.team_id.clone();
-
     // Collect AI team IDs up front to avoid borrow conflicts.
     let team_ids: Vec<String> = game
         .teams
         .iter()
-        .filter(|t| Some(&t.id) != user_team_id.as_ref())
+        .filter(|t| !game.is_controlled(&t.id))
         .map(|t| t.id.clone())
         .collect();
 

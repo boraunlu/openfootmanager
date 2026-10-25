@@ -8,6 +8,7 @@ pub mod clock;
 pub mod club;
 pub mod contract_wage_policy;
 pub mod contracts;
+pub mod controlled;
 pub mod currency;
 pub mod delegated_renewals;
 pub mod end_of_season;

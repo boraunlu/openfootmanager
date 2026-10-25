@@ -173,95 +173,97 @@ pub fn apply_match_report_with_capture<F>(
         update_team_form(game, report, home_team_id, away_team_id);
     }
 
-    // Update board satisfaction based on match result
-    if counts_for_standings
-        && let Some(user_team_id) = &game.manager.team_id
-        && (*user_team_id == home_team_id || *user_team_id == away_team_id)
-    {
-        let user_goals = if *user_team_id == home_team_id {
-            report.home_goals
-        } else {
-            report.away_goals
-        };
-        let opp_goals = if *user_team_id == home_team_id {
-            report.away_goals
-        } else {
-            report.home_goals
-        };
-        let sat_delta: i8 = if user_goals > opp_goals {
-            2
-        }
-        // win: +2
-        else if user_goals == opp_goals {
-            -1
-        }
-        // draw: -1
-        else {
-            -3
-        }; // loss: -3
-        let new_sat = (game.manager.satisfaction as i16 + sat_delta as i16).clamp(0, 100) as u8;
-        game.manager.satisfaction = new_sat;
+    game.for_each_controlled(|game| {
+        // Update board satisfaction based on match result
+        if counts_for_standings
+            && let Some(user_team_id) = &game.manager.team_id
+            && (*user_team_id == home_team_id || *user_team_id == away_team_id)
+        {
+            let user_goals = if *user_team_id == home_team_id {
+                report.home_goals
+            } else {
+                report.away_goals
+            };
+            let opp_goals = if *user_team_id == home_team_id {
+                report.away_goals
+            } else {
+                report.home_goals
+            };
+            let sat_delta: i8 = if user_goals > opp_goals {
+                2
+            }
+            // win: +2
+            else if user_goals == opp_goals {
+                -1
+            }
+            // draw: -1
+            else {
+                -3
+            }; // loss: -3
+            let new_sat = (game.manager.satisfaction as i16 + sat_delta as i16).clamp(0, 100) as u8;
+            game.manager.satisfaction = new_sat;
 
-        // Fan approval — fans react more emotionally
-        let fan_delta: i8 = if user_goals > opp_goals {
-            5
+            // Fan approval — fans react more emotionally
+            let fan_delta: i8 = if user_goals > opp_goals {
+                5
+            }
+            // win: +5
+            else if user_goals == opp_goals {
+                -2
+            }
+            // draw: -2
+            else {
+                -8
+            }; // loss: -8
+            // Extra bonus for big wins, extra penalty for heavy losses
+            let goal_diff = (user_goals as i8) - (opp_goals as i8);
+            let fan_bonus: i8 = if goal_diff >= 3 {
+                3
+            } else if goal_diff <= -3 {
+                -3
+            } else {
+                0
+            };
+            let new_fan = (game.manager.fan_approval as i16 + fan_delta as i16 + fan_bonus as i16)
+                .clamp(0, 100) as u8;
+            game.manager.fan_approval = new_fan;
         }
-        // win: +5
-        else if user_goals == opp_goals {
-            -2
+
+        // Generate match result message for user's team
+        if counts_for_standings
+            && let Some(user_team_id) = &game.manager.team_id
+            && (*user_team_id == home_team_id || *user_team_id == away_team_id)
+        {
+            let fixture = &game.league.as_ref().unwrap().fixtures[fixture_index];
+            let res = fixture.result.as_ref().unwrap();
+            let home_name = game
+                .teams
+                .iter()
+                .find(|t| t.id == home_team_id)
+                .map(|t| t.name.as_str())
+                .unwrap_or("Home");
+            let away_name = game
+                .teams
+                .iter()
+                .find(|t| t.id == away_team_id)
+                .map(|t| t.name.as_str())
+                .unwrap_or("Away");
+
+            let msg = messages::match_result_message(
+                &fixture.id,
+                home_name,
+                away_name,
+                res.home_goals,
+                res.away_goals,
+                home_team_id,
+                away_team_id,
+                user_team_id,
+                fixture.matchday,
+                &game.clock.current_date.to_rfc3339(),
+            );
+            game.messages.push(msg);
         }
-        // draw: -2
-        else {
-            -8
-        }; // loss: -8
-        // Extra bonus for big wins, extra penalty for heavy losses
-        let goal_diff = (user_goals as i8) - (opp_goals as i8);
-        let fan_bonus: i8 = if goal_diff >= 3 {
-            3
-        } else if goal_diff <= -3 {
-            -3
-        } else {
-            0
-        };
-        let new_fan = (game.manager.fan_approval as i16 + fan_delta as i16 + fan_bonus as i16)
-            .clamp(0, 100) as u8;
-        game.manager.fan_approval = new_fan;
-    }
-
-    // Generate match result message for user's team
-    if counts_for_standings
-        && let Some(user_team_id) = &game.manager.team_id
-        && (*user_team_id == home_team_id || *user_team_id == away_team_id)
-    {
-        let fixture = &game.league.as_ref().unwrap().fixtures[fixture_index];
-        let res = fixture.result.as_ref().unwrap();
-        let home_name = game
-            .teams
-            .iter()
-            .find(|t| t.id == home_team_id)
-            .map(|t| t.name.as_str())
-            .unwrap_or("Home");
-        let away_name = game
-            .teams
-            .iter()
-            .find(|t| t.id == away_team_id)
-            .map(|t| t.name.as_str())
-            .unwrap_or("Away");
-
-        let msg = messages::match_result_message(
-            &fixture.id,
-            home_name,
-            away_name,
-            res.home_goals,
-            res.away_goals,
-            home_team_id,
-            away_team_id,
-            user_team_id,
-            fixture.matchday,
-            &game.clock.current_date.to_rfc3339(),
-        );
-        game.messages.push(msg);
-    }
+    });
 
     // Generate match report news article
     if generates_match_news {

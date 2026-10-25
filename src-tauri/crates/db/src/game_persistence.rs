@@ -80,6 +80,8 @@ pub fn write_game_to_connection(
     save_id: &str,
     save_name: &str,
 ) -> Result<(), String> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS controlled_clubs (id INTEGER PRIMARY KEY CHECK(id=1), data_json TEXT NOT NULL)").map_err(|_| game_persistence_write_error())?;
+    conn.execute("INSERT INTO controlled_clubs VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json", [serde_json::to_string(&game.controlled).map_err(|_| game_persistence_write_error())?]).map_err(|_| game_persistence_write_error())?;
     let now = Utc::now().to_rfc3339();
     let vacant_team_days_json = serde_json::to_string(&game.vacant_team_days)
         .map_err(|_| game_persistence_write_error())?;
@@ -312,6 +314,23 @@ impl GamePersistenceReader {
 
         let mut game = Game {
             clock,
+            controlled: {
+                let present: bool = db.conn().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='controlled_clubs')", [], |r| r.get(0)).map_err(|_| "be.error.gamePersistence.loadFailed".to_string())?;
+                if present {
+                    let text: String = db
+                        .conn()
+                        .query_row(
+                            "SELECT data_json FROM controlled_clubs WHERE id=1",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .map_err(|_| "be.error.gamePersistence.loadFailed".to_string())?;
+                    serde_json::from_str(&text)
+                        .map_err(|_| "be.error.gamePersistence.loadFailed".to_string())?
+                } else {
+                    Default::default()
+                }
+            },
             manager_id: meta.manager_id.clone(),
             managers,
             manager,

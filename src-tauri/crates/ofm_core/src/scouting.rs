@@ -154,11 +154,13 @@ pub fn send_scout(game: &mut Game, scout_id: &str, player_id: &str) -> Result<()
     }
 
     // Check if player is already being scouted
-    if game
-        .scouting_assignments
-        .iter()
-        .any(|a| a.player_id == player_id)
-    {
+    if game.scouting_assignments.iter().any(|a| {
+        a.player_id == player_id
+            && game
+                .staff
+                .iter()
+                .any(|s| s.id == a.scout_id && s.team_id.as_ref() == Some(user_team_id))
+    }) {
         return Err(ERR_PLAYER_ALREADY_SCOUTED.to_string());
     }
 
@@ -328,12 +330,26 @@ pub fn process_scouting(game: &mut Game) {
                 team_name.as_deref(),
                 &today,
             );
-            game.messages.push(msg);
+            if let Some(club) = scout.team_id.clone() {
+                game.deliver_to_club(&club, msg);
+            }
         }
     }
 
     for assignment in &completed_youth {
-        complete_youth_scouting_assignment(game, assignment, &today);
+        let original = game.manager.team_id.clone();
+        let club = game
+            .staff
+            .iter()
+            .find(|s| s.id == assignment.scout_id)
+            .and_then(|s| s.team_id.clone());
+        if let Some(club) = club.filter(|id| game.is_controlled(id)) {
+            game.swap_controlled(&club);
+            complete_youth_scouting_assignment(game, assignment, &today);
+            if let Some(original) = original {
+                game.swap_controlled(&original);
+            }
+        }
     }
 }
 

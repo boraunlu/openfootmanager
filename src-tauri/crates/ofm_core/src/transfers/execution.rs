@@ -333,13 +333,19 @@ pub(super) fn execute_transfer(
     }
 
     if let Some(league) = &mut game.league {
-        league.transfer_log.push(CompletedTransfer {
+        let movement = CompletedTransfer {
             date: today,
             from_team_id: from_team_id.to_string(),
             to_team_id: to_team_id.to_string(),
             player_id: player_id.to_string(),
             fee,
-        });
+        };
+        league.transfer_log.push(movement.clone());
+        // Competitions are authoritative; refreshing the legacy mirror must not
+        // discard a market transfer committed outside match simulation.
+        if let Some(competition) = game.competitions.iter_mut().find(|c| c.id == league.id) {
+            competition.transfer_log.push(movement);
+        }
     }
 
     Ok(())

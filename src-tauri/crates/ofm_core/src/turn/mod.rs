@@ -159,6 +159,25 @@ where
     F: FnMut(StatsState),
     M: FnMut(&mut Game, usize, &str, &mut F),
 {
+    process_day_with_market(
+        game,
+        on_capture,
+        on_matchday,
+        &mut transfers::generate_incoming_transfer_offers,
+    );
+}
+
+/// A host may supply a market policy while retaining the single daily lifecycle.
+pub fn process_day_with_market<F, M, T>(
+    game: &mut Game,
+    on_capture: &mut F,
+    on_matchday: &mut M,
+    on_market: &mut T,
+) where
+    F: FnMut(StatsState),
+    M: FnMut(&mut Game, usize, &str, &mut F),
+    T: FnMut(&mut Game),
+{
     let today = game.clock.current_date.format("%Y-%m-%d").to_string();
     transfers::process_loan_development_reports(game);
     transfers::process_loan_returns(game);
@@ -175,7 +194,7 @@ where
         let weekday_num = game.clock.current_date.weekday().num_days_from_monday();
         crate::ai_training::apply_ai_training_policies(game, weekday_num);
         training::process_training(game, weekday_num);
-        training::check_squad_fitness_warnings(game);
+        game.for_each_controlled(training::check_squad_fitness_warnings);
     }
 
     // Tiered simulation: competitions outside the active scope are resolved by
@@ -199,26 +218,28 @@ where
     crate::finances::process_weekly_finances(game);
 
     // Board objectives (generate if missing, update progress)
-    board_objectives::generate_objectives(game);
-    board_objectives::update_objective_progress(game);
+    game.for_each_controlled(board_objectives::generate_objectives);
+    game.for_each_controlled(board_objectives::update_objective_progress);
 
     // Player conversations, random events, and scouting
-    player_events::check_player_events(game);
+    game.for_each_controlled(player_events::check_player_events);
     progress_injury_recovery(game);
-    random_events::check_random_events(game);
+    game.for_each_controlled(random_events::check_random_events);
     scouting::process_scouting(game);
     transfers::process_pending_transfer_registrations(game);
     transfers::process_pending_loan_registrations(game);
-    transfers::generate_incoming_transfer_offers(game);
+    on_market(game);
     crate::generator::process_available_staff_market(game);
     crate::ai_hiring::update_ai_manager_satisfaction(game);
 
     news::generate_weekly_digest_news(game, &today);
-    news::generate_pre_match_messages(game, &today);
+    game.for_each_controlled(|game| news::generate_pre_match_messages(game, &today));
 
     crate::firing::check_manager_firing(game);
     crate::ai_hiring::process_vacant_ai_clubs(game);
-    crate::job_offers::check_job_offers(game);
+    if game.controlled.clubs.is_empty() {
+        crate::job_offers::check_job_offers(game);
+    }
 
     debug!("[turn] process_day {}: complete, advancing clock", today);
     game.clock.advance_days(1);
@@ -237,12 +258,12 @@ pub fn finish_live_match_day(game: &mut Game) {
     crate::contracts::process_contract_expiries(game);
     crate::finances::process_weekly_finances(game);
 
-    board_objectives::generate_objectives(game);
-    board_objectives::update_objective_progress(game);
+    game.for_each_controlled(board_objectives::generate_objectives);
+    game.for_each_controlled(board_objectives::update_objective_progress);
 
-    player_events::check_player_events(game);
+    game.for_each_controlled(player_events::check_player_events);
     progress_injury_recovery(game);
-    random_events::check_random_events(game);
+    game.for_each_controlled(random_events::check_random_events);
     scouting::process_scouting(game);
     transfers::process_pending_transfer_registrations(game);
     transfers::process_pending_loan_registrations(game);
@@ -250,11 +271,13 @@ pub fn finish_live_match_day(game: &mut Game) {
     crate::generator::process_available_staff_market(game);
     crate::ai_hiring::update_ai_manager_satisfaction(game);
     news::generate_weekly_digest_news(game, &today);
-    news::generate_pre_match_messages(game, &today);
+    game.for_each_controlled(|game| news::generate_pre_match_messages(game, &today));
 
     crate::firing::check_manager_firing(game);
     crate::ai_hiring::process_vacant_ai_clubs(game);
-    crate::job_offers::check_job_offers(game);
+    if game.controlled.clubs.is_empty() {
+        crate::job_offers::check_job_offers(game);
+    }
 
     game.clock.advance_days(1);
     game.sync_legacy_league();

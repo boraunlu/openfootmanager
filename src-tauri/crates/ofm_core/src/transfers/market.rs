@@ -178,6 +178,15 @@ pub(crate) fn award_leaderboard_player_ids(game: &Game) -> HashSet<String> {
         .collect()
 }
 pub fn evaluate_transfer_market(game: &mut Game) {
+    evaluate_transfer_market_with_reservations(game, &mut std::collections::HashMap::new());
+}
+
+/// Host-owned live proposals reserve spending without changing the bank balance.
+/// Newly generated bids also consume availability for the remainder of this sweep.
+pub fn evaluate_transfer_market_with_reservations(
+    game: &mut Game,
+    reserved: &mut std::collections::HashMap<String, u64>,
+) {
     expire_stale_transfer_offers(game);
     expire_stale_loan_offers(game);
     prune_closed_offers(game);
@@ -205,7 +214,7 @@ pub fn evaluate_transfer_market(game: &mut Game) {
     let buyer_ids: Vec<String> = game
         .teams
         .iter()
-        .filter(|team| Some(team.id.as_str()) != user_team_id.as_deref())
+        .filter(|team| !game.is_controlled(&team.id))
         .filter(|team| {
             active_team_ids
                 .as_ref()
@@ -229,7 +238,12 @@ pub fn evaluate_transfer_market(game: &mut Game) {
     let mut approach_clubs: std::collections::HashMap<String, HashSet<String>> = game
         .players
         .iter()
-        .filter(|player| player.team_id.as_deref() == user_team_id.as_deref())
+        .filter(|player| {
+            player
+                .team_id
+                .as_deref()
+                .is_some_and(|id| game.is_controlled(id))
+        })
         .map(|player| (player.id.clone(), pending_approach_clubs(player)))
         .collect();
     // Clubs turned away recently. Unlike the queue above this is fixed for the day: a rejection
@@ -237,7 +251,12 @@ pub fn evaluate_transfer_market(game: &mut Game) {
     let cooled_clubs: std::collections::HashMap<String, HashSet<String>> = game
         .players
         .iter()
-        .filter(|player| player.team_id.as_deref() == user_team_id.as_deref())
+        .filter(|player| {
+            player
+                .team_id
+                .as_deref()
+                .is_some_and(|id| game.is_controlled(id))
+        })
         .map(|player| {
             (
                 player.id.clone(),
@@ -265,7 +284,7 @@ pub fn evaluate_transfer_market(game: &mut Game) {
         if score < 35 {
             continue;
         }
-        let is_user_owned = Some(owner_team_id) == user_team_id.as_deref();
+        let is_user_owned = game.is_controlled(owner_team_id);
         shortlist.push(MarketTarget {
             player_id: player.id.clone(),
             owner_team_id: owner_team_id.to_string(),
@@ -287,7 +306,9 @@ pub fn evaluate_transfer_market(game: &mut Game) {
         let buyer_depths = position_depths.get(&buyer_id).copied().unwrap_or([0; 4]);
 
         let loan_offer_player_id = if let Some(user_team_id) = user_team_id.as_deref() {
-            if new_user_loan_offers_today < MAX_NEW_INCOMING_USER_OFFERS_PER_DAY {
+            if game.controlled.clubs.is_empty()
+                && new_user_loan_offers_today < MAX_NEW_INCOMING_USER_OFFERS_PER_DAY
+            {
                 create_incoming_user_loan_offer_if_any(
                     game,
                     user_team_id,
@@ -353,8 +374,9 @@ pub fn evaluate_transfer_market(game: &mut Game) {
             ) {
                 return false;
             }
-            buyer_team.transfer_budget >= target.fee as i64
-                && buyer_team.finance >= target.fee as i64
+            let held = reserved.get(&buyer_id).copied().unwrap_or(0);
+            (buyer_team.transfer_budget.max(0) as u64).saturating_sub(held) >= target.fee
+                && (buyer_team.finance.max(0) as u64).saturating_sub(held) >= target.fee
         });
 
         let Some(target) = chosen else {
@@ -367,8 +389,13 @@ pub fn evaluate_transfer_market(game: &mut Game) {
             fee: target.fee,
         };
 
-        if Some(candidate.owner_team_id.as_str()) == user_team_id.as_deref() {
+        if game.is_controlled(&candidate.owner_team_id) {
+            let original = game.manager.team_id.clone().expect("managed club");
+            game.swap_controlled(&candidate.owner_team_id);
             create_incoming_user_offer(game, &candidate, &buyer_id, &buyer_team.name, &today);
+            game.swap_controlled(&original);
+            let held = reserved.entry(buyer_id.clone()).or_default();
+            *held = held.saturating_add(candidate.fee);
             *new_offers_per_player
                 .entry(candidate.player_id.clone())
                 .or_insert(0) += 1;

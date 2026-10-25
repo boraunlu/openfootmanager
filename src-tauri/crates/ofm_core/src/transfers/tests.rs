@@ -92,6 +92,33 @@ fn make_game() -> Game {
 }
 
 #[test]
+fn host_market_respects_money_promised_in_other_negotiations() {
+    let mut game = make_game();
+    game.players[0].transfer_listed = true;
+    let mut reserved = std::collections::HashMap::from([("team2".to_string(), 5_000_000)]);
+    super::evaluate_transfer_market_with_reservations(&mut game, &mut reserved);
+    assert!(game.players[0].transfer_offers.is_empty());
+}
+
+#[test]
+fn agreed_transfer_rejects_a_changed_owner_without_spending() {
+    let mut game = make_game();
+    let before = serde_json::to_value(&game).unwrap();
+    assert!(
+        super::complete_negotiated_transfer(
+            &mut game,
+            "player-award",
+            "team2",
+            "team2",
+            "offer",
+            500_000
+        )
+        .is_err()
+    );
+    assert_eq!(serde_json::to_value(&game).unwrap(), before);
+}
+
+#[test]
 fn evaluate_transfer_market_targets_award_leaderboard_user_player() {
     let mut game = make_game();
 

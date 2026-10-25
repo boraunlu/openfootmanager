@@ -18,10 +18,12 @@ use uuid::Uuid;
 mod bids;
 mod consts;
 mod execution;
+mod hosted;
 mod lifecycle;
 mod loans;
 mod market;
 mod registration;
+pub use hosted::*;
 
 pub use bids::*;
 use consts::*;

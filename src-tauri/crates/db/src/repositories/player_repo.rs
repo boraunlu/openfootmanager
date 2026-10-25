@@ -134,10 +134,31 @@ pub fn upsert_player(conn: &Connection, p: &Player) -> Result<(), String> {
 
 /// Insert or replace multiple players.
 pub fn upsert_players(conn: &Connection, players: &[Player]) -> Result<(), String> {
-    for p in players {
-        upsert_player(conn, p)?;
+    // A day can move several players before saving. Free changing allocations
+    // first, so a number reused by a later departure is not a transient UNIQUE
+    // violation. A savepoint preserves the old rows on any invalid final batch,
+    // including callers already inside the world's daily transaction.
+    conn.execute_batch("SAVEPOINT player_batch")
+        .map_err(|_| GAME_PERSISTENCE_WRITE_ERROR.to_string())?;
+    let result = (|| {
+        for player in players {
+            conn.execute("UPDATE players SET jersey_number=NULL WHERE id=?1 AND (team_id IS NOT ?2 OR jersey_number IS NOT ?3)",
+                params![player.id, player.team_id, player.jersey_number.map(i64::from)])
+                .map_err(|_| GAME_PERSISTENCE_WRITE_ERROR.to_string())?;
+        }
+        for player in players {
+            upsert_player(conn, player)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        conn.execute_batch("ROLLBACK TO player_batch; RELEASE player_batch")
+            .map_err(|_| GAME_PERSISTENCE_WRITE_ERROR.to_string())?;
+    } else {
+        conn.execute_batch("RELEASE player_batch")
+            .map_err(|_| GAME_PERSISTENCE_WRITE_ERROR.to_string())?;
     }
-    Ok(())
+    result
 }
 
 fn parse_position(s: &str) -> Position {
@@ -763,6 +784,33 @@ mod tests {
         assert!(
             ids.contains("p-original"),
             "original #6 wearer must still exist in the DB"
+        );
+    }
+
+    #[test]
+    fn batch_transfers_can_reuse_numbers_freed_by_later_rows_and_roll_back_conflicts() {
+        let db = test_db();
+        let mut first = sample_player("first", Some("team-a"));
+        first.jersey_number = Some(9);
+        let mut second = sample_player("second", Some("team-b"));
+        second.jersey_number = Some(9);
+        upsert_players(db.conn(), &[first.clone(), second.clone()]).unwrap();
+        first.team_id = Some("team-b".into());
+        second.team_id = Some("team-a".into());
+        upsert_players(db.conn(), &[first.clone(), second.clone()])
+            .expect("valid final squad numbers must not depend on row order");
+        let saved = load_all_players(db.conn()).unwrap();
+        assert_eq!(
+            saved.iter().find(|p| p.id == "first").unwrap().team_id,
+            first.team_id
+        );
+        let before = serde_json::to_value(&saved).unwrap();
+        second.team_id = first.team_id.clone();
+        assert!(upsert_players(db.conn(), &[first, second]).is_err());
+        assert_eq!(
+            serde_json::to_value(load_all_players(db.conn()).unwrap()).unwrap(),
+            before,
+            "invalid batches restore every old number and owner"
         );
     }
 

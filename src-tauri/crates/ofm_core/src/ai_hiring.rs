@@ -233,12 +233,10 @@ pub fn seed_ai_managers(game: &mut Game) {
     }
     game.sync_user_manager_record();
 
-    let user_team_id = game.manager.team_id.clone();
-
     let team_ids_to_seed: Vec<String> = game
         .teams
         .iter()
-        .filter(|team| Some(team.id.clone()) != user_team_id)
+        .filter(|team| !game.is_controlled(&team.id))
         .filter(|team| {
             team.manager_id
                 .as_ref()
@@ -268,8 +266,6 @@ pub fn seed_ai_managers(game: &mut Game) {
 }
 
 pub fn process_vacant_ai_clubs(game: &mut Game) {
-    let user_team_id = game.manager.team_id.clone();
-
     let occupied_team_ids: Vec<String> = game
         .teams
         .iter()
@@ -283,7 +279,7 @@ pub fn process_vacant_ai_clubs(game: &mut Game) {
     let vacant_team_ids: Vec<String> = game
         .teams
         .iter()
-        .filter(|team| Some(team.id.clone()) != user_team_id)
+        .filter(|team| !game.is_controlled(&team.id))
         .filter(|team| team.manager_id.is_none())
         .map(|team| team.id.clone())
         .collect();
@@ -344,7 +340,12 @@ pub fn update_ai_manager_satisfaction(game: &mut Game) {
     };
 
     for index in 0..game.managers.len() {
-        if game.managers[index].id == user_manager_id {
+        if game.managers[index].id == user_manager_id
+            || game.managers[index]
+                .team_id
+                .as_deref()
+                .is_some_and(|id| game.is_controlled(id))
+        {
             continue;
         }
 

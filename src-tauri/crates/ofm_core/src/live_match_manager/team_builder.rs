@@ -44,7 +44,7 @@ pub(super) fn build_team_with_bench(game: &Game, team_id: &str) -> (TeamData, Ve
     let available_players: Vec<&domain::player::Player> = game
         .players
         .iter()
-        .filter(|p| p.team_id.as_deref() == Some(team_id) && p.injury.is_none())
+        .filter(|p| p.team_id.as_deref() == Some(team_id) && p.injury.is_none() && !p.retired)
         .collect();
     let player_roles = team.map(|t| &t.player_roles);
     // `deployed` is the granular slot the player occupies; `None` for the bench,
@@ -63,7 +63,7 @@ pub(super) fn build_team_with_bench(game: &Game, team_id: &str) -> (TeamData, Ve
     // by a reputation-driven policy that picks a first-choice XI and rotates for
     // load management. Gate on the user team explicitly, NOT on "saved XI empty",
     // so the human's early-career auto-built XI stays reputation-independent.
-    let is_user_team = game.manager.team_id.as_deref() == Some(team_id);
+    let is_user_team = game.is_controlled(team_id);
     let starting_players = if is_user_team {
         select_starting_xi(saved_xi_ids, &available_players, &formation)
     } else {

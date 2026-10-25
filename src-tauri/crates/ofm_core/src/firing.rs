@@ -35,7 +35,7 @@ fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
 pub fn check_manager_firing(game: &mut Game) -> bool {
     game.sync_user_manager_record();
 
-    let user_fired = check_user_manager_firing(game);
+    let user_fired = game.controlled.clubs.is_empty() && check_user_manager_firing(game);
     check_ai_manager_firings(game);
     game.sync_user_manager_record();
 
@@ -95,7 +95,13 @@ fn check_ai_manager_firings(game: &mut Game) {
     let ai_manager_ids: Vec<String> = game
         .managers
         .iter()
-        .filter(|manager| manager.id != user_manager_id && manager.team_id.is_some())
+        .filter(|manager| {
+            manager.id != user_manager_id
+                && manager
+                    .team_id
+                    .as_deref()
+                    .is_some_and(|id| !game.is_controlled(id))
+        })
         .map(|manager| manager.id.clone())
         .collect();
 

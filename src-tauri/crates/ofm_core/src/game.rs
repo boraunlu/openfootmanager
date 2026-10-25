@@ -69,6 +69,9 @@ pub struct YouthScoutingAssignment {
 pub struct Game {
     pub clock: GameClock,
     pub manager: Manager,
+    /// Explicit saved human seats; empty retains the legacy single-player lifecycle.
+    #[serde(default)]
+    pub controlled: crate::controlled::ControlledClubs,
     #[serde(default)]
     pub manager_id: String,
     #[serde(default)]
@@ -146,6 +149,7 @@ impl Game {
         let mut game = Self {
             clock,
             manager,
+            controlled: Default::default(),
             manager_id,
             managers,
             teams,
