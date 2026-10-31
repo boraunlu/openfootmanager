@@ -554,7 +554,18 @@ pub fn respond_to_offer(
     offer_id: &str,
     accept: bool,
 ) -> Result<(), String> {
-    expire_stale_transfer_offers(game);
+    respond_to_offer_with_protection(game, player_id, offer_id, accept, &HashSet::new())
+}
+
+/// Hosts may retain their own proposal expiry while reusing rejection effects.
+pub fn respond_to_offer_with_protection(
+    game: &mut Game,
+    player_id: &str,
+    offer_id: &str,
+    accept: bool,
+    protected: &HashSet<String>,
+) -> Result<(), String> {
+    expire_stale_transfer_offers_except(game, protected);
 
     let user_team_id = game
         .manager

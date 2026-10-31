@@ -167,12 +167,39 @@ where
     );
 }
 
+/// Explicit host ownership; default callers retain native daily behavior.
+#[derive(Default)]
+pub struct DayPolicy {
+    pub external_scouting: std::collections::HashSet<String>,
+    pub staff_managed: std::collections::HashSet<String>,
+}
+
 /// A host may supply a market policy while retaining the single daily lifecycle.
 pub fn process_day_with_market<F, M, T>(
     game: &mut Game,
     on_capture: &mut F,
     on_matchday: &mut M,
     on_market: &mut T,
+) where
+    F: FnMut(StatsState),
+    M: FnMut(&mut Game, usize, &str, &mut F),
+    T: FnMut(&mut Game),
+{
+    process_day_with_policy(
+        game,
+        on_capture,
+        on_matchday,
+        on_market,
+        &DayPolicy::default(),
+    );
+}
+
+pub fn process_day_with_policy<F, M, T>(
+    game: &mut Game,
+    on_capture: &mut F,
+    on_matchday: &mut M,
+    on_market: &mut T,
+    policy: &DayPolicy,
 ) where
     F: FnMut(StatsState),
     M: FnMut(&mut Game, usize, &str, &mut F),
@@ -193,7 +220,7 @@ pub fn process_day_with_market<F, M, T>(
     } else {
         let weekday_num = game.clock.current_date.weekday().num_days_from_monday();
         crate::ai_training::apply_ai_training_policies(game, weekday_num);
-        training::process_training(game, weekday_num);
+        training::process_training_with_staff(game, weekday_num, &policy.staff_managed);
         game.for_each_controlled(training::check_squad_fitness_warnings);
     }
 
@@ -225,7 +252,7 @@ pub fn process_day_with_market<F, M, T>(
     game.for_each_controlled(player_events::check_player_events);
     progress_injury_recovery(game);
     game.for_each_controlled(random_events::check_random_events);
-    scouting::process_scouting(game);
+    scouting::process_scouting_excluding(game, &policy.external_scouting);
     transfers::process_pending_transfer_registrations(game);
     transfers::process_pending_loan_registrations(game);
     on_market(game);

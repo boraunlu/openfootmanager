@@ -596,19 +596,6 @@ fn rating_morale_effect(rating: f32) -> i16 {
     }
 }
 
-#[cfg(test)]
-mod rating_tests {
-    use super::rating_morale_effect;
-    #[test]
-    fn unavailable_ratings_do_not_penalize_morale() {
-        assert_eq!(rating_morale_effect(0.0), 0);
-        assert_eq!(rating_morale_effect(f32::NAN), 0);
-        assert_eq!(rating_morale_effect(5.0), -3);
-        assert_eq!(rating_morale_effect(8.0), 2);
-        assert_eq!(rating_morale_effect(6.3), 0);
-    }
-}
-
 /// Update team form vectors after a match result. Keeps last 5 results.
 /// Also applies streak-based morale bonus/penalty to all players on teams with streaks.
 fn update_team_form(
@@ -689,5 +676,18 @@ fn deplete_match_stamina(game: &mut Game, team_id: &str, report: &engine::MatchR
             // identically to club fixtures.
             crate::player_wear::apply_match_wear(player, minutes, &mut rand::rng());
         }
+    }
+}
+
+#[cfg(test)]
+mod rating_tests {
+    use super::rating_morale_effect;
+    #[test]
+    fn unavailable_ratings_do_not_penalize_morale() {
+        assert_eq!(rating_morale_effect(0.0), 0);
+        assert_eq!(rating_morale_effect(f32::NAN), 0);
+        assert_eq!(rating_morale_effect(5.0), -3);
+        assert_eq!(rating_morale_effect(8.0), 2);
+        assert_eq!(rating_morale_effect(6.3), 0);
     }
 }
