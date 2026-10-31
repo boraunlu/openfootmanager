@@ -270,11 +270,19 @@ pub fn reassign_youth_scouting(
 /// Process scouting assignments daily. Called from process_day().
 /// Decrements days, delivers reports when complete.
 pub fn process_scouting(game: &mut Game) {
+    process_scouting_excluding(game, &std::collections::HashSet::new());
+}
+
+/// Hosts own only the specified first-team assignment clocks; youth is unchanged.
+pub fn process_scouting_excluding(game: &mut Game, external: &std::collections::HashSet<String>) {
     let today = game.clock.current_date.format("%Y-%m-%d").to_string();
     let mut completed: Vec<ScoutingAssignment> = Vec::new();
     let mut completed_youth: Vec<YouthScoutingAssignment> = Vec::new();
 
     for assignment in game.scouting_assignments.iter_mut() {
+        if external.contains(&assignment.id) {
+            continue;
+        }
         if assignment.days_remaining > 0 {
             assignment.days_remaining -= 1;
         }
@@ -293,47 +301,13 @@ pub fn process_scouting(game: &mut Game) {
     }
 
     // Remove completed assignments
-    game.scouting_assignments.retain(|a| a.days_remaining > 0);
+    game.scouting_assignments
+        .retain(|a| a.days_remaining > 0 || external.contains(&a.id));
     game.youth_scouting_assignments
         .retain(|assignment| assignment.days_remaining > 0);
 
-    // Generate reports for completed assignments
     for assignment in &completed {
-        let scout = game.staff.iter().find(|s| s.id == assignment.scout_id);
-        let player = game.players.iter().find(|p| p.id == assignment.player_id);
-
-        if let (Some(scout), Some(player)) = (scout, player) {
-            let scout_name = format!("{} {}", scout.first_name, scout.last_name);
-            let judging_ability = scout.attributes.judging_ability;
-            let judging_potential = scout.attributes.judging_potential;
-            let team_name = player
-                .team_id
-                .as_ref()
-                .and_then(|tid| game.teams.iter().find(|t| &t.id == tid))
-                .map(|t| t.name.clone());
-
-            let msg = build_scout_report(
-                &assignment.id,
-                &scout_name,
-                &player.id,
-                &player.match_name,
-                &player.nationality,
-                &player.date_of_birth,
-                &format!("{:?}", player.position),
-                &player.attributes,
-                player.morale,
-                player.condition,
-                player.ovr,
-                player.potential,
-                judging_ability,
-                judging_potential,
-                team_name.as_deref(),
-                &today,
-            );
-            if let Some(club) = scout.team_id.clone() {
-                game.deliver_to_club(&club, msg);
-            }
-        }
+        deliver_player_report(game, assignment, &today);
     }
 
     for assignment in &completed_youth {
@@ -349,6 +323,56 @@ pub fn process_scouting(game: &mut Game) {
             if let Some(original) = original {
                 game.swap_controlled(&original);
             }
+        }
+    }
+}
+
+/// Complete exactly one assignment using the ordinary private native report path.
+/// A repeated completion is a no-op and never rerolls an existing report.
+pub fn complete_player_scouting_assignment(game: &mut Game, id: &str) -> bool {
+    let Some(index) = game.scouting_assignments.iter().position(|a| a.id == id) else {
+        return false;
+    };
+    let assignment = game.scouting_assignments.remove(index);
+    let today = game.clock.current_date.format("%Y-%m-%d").to_string();
+    deliver_player_report(game, &assignment, &today);
+    true
+}
+
+fn deliver_player_report(game: &mut Game, assignment: &ScoutingAssignment, today: &str) {
+    let scout = game.staff.iter().find(|s| s.id == assignment.scout_id);
+    let player = game.players.iter().find(|p| p.id == assignment.player_id);
+
+    if let (Some(scout), Some(player)) = (scout, player) {
+        let scout_name = format!("{} {}", scout.first_name, scout.last_name);
+        let judging_ability = scout.attributes.judging_ability;
+        let judging_potential = scout.attributes.judging_potential;
+        let team_name = player
+            .team_id
+            .as_ref()
+            .and_then(|tid| game.teams.iter().find(|t| &t.id == tid))
+            .map(|t| t.name.clone());
+
+        let msg = build_scout_report(
+            &assignment.id,
+            &scout_name,
+            &player.id,
+            &player.match_name,
+            &player.nationality,
+            &player.date_of_birth,
+            &format!("{:?}", player.position),
+            &player.attributes,
+            player.morale,
+            player.condition,
+            player.ovr,
+            player.potential,
+            judging_ability,
+            judging_potential,
+            team_name.as_deref(),
+            today,
+        );
+        if let Some(club) = scout.team_id.clone() {
+            game.deliver_to_club(&club, msg);
         }
     }
 }

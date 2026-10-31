@@ -193,69 +193,74 @@ pub fn apply_ai_training_policies(game: &mut Game, weekday_num: u32) {
         .collect();
 
     for team_id in team_ids {
-        // Snapshot reads immutably and returns owned data — no borrow retained.
-        let snap = snapshot_team(game, &team_id, weekday_num);
+        apply_training_policy_for_team(game, &team_id, weekday_num);
+    }
+}
 
-        // Rest day: no-op.
-        if !snap.is_training_day {
-            continue;
-        }
+/// Apply the existing training planner to one explicitly delegated club.
+/// This grants no lineup, transfer or club-management authority.
+pub fn apply_training_policy_for_team(game: &mut Game, team_id: &str, weekday_num: u32) {
+    // Snapshot reads immutably and returns owned data — no borrow retained.
+    let snap = snapshot_team(game, team_id, weekday_num);
 
-        // Recovery crisis: full recovery day, cycle does NOT advance.
-        if snap.avg_condition < RECOVERY_CRISIS_THRESHOLD {
-            if let Some(team) = game.teams.iter_mut().find(|t| t.id == team_id) {
-                team.training_focus = TrainingFocus::Recovery;
-                team.training_intensity = TrainingIntensity::Low;
-            }
-            continue;
-        }
+    // Rest day: no-op.
+    if !snap.is_training_day {
+        return;
+    }
 
-        // Base intensity from condition band.
-        let base_intensity = if snap.avg_condition < LOW_INTENSITY_MAX {
-            TrainingIntensity::Low
-        } else if snap.avg_condition <= HIGH_INTENSITY_MIN {
-            TrainingIntensity::Medium
-        } else {
-            TrainingIntensity::High
-        };
-
-        let near_match = snap.days_to_next_fixture <= NEAR_MATCH_DAYS;
-        let congested = snap.fixtures_in_next_7 >= CONGESTION_FIXTURE_THRESHOLD;
-        let congestion_active = near_match || congested;
-
-        let intensity = if congestion_active {
-            downgrade_intensity(base_intensity)
-        } else {
-            base_intensity
-        };
-
-        // Style-biased weekly cycle; slot is based on weekday mod 5.
-        let cycle = style_weekly_cycle(&snap.play_style);
-        let slot = (weekday_num as usize) % 5;
-        let rotation_focus = cycle[slot].clone();
-
-        // Focus override based on effective intensity / congestion.
-        let focus = match &intensity {
-            // Low intensity (fatigue or congestion-downgraded) → recovery-first.
-            TrainingIntensity::Low => TrainingFocus::Recovery,
-            // Medium + congestion active → pre-match tactical work.
-            TrainingIntensity::Medium if congestion_active => TrainingFocus::Tactical,
-            // Healthy band → follow style-biased rotation.
-            _ => rotation_focus,
-        };
-
-        // V1 safety rule: Physical + High is the most punishing combination.
-        let intensity = if focus == TrainingFocus::Physical && intensity == TrainingIntensity::High
-        {
-            TrainingIntensity::Medium
-        } else {
-            intensity
-        };
-
+    // Recovery crisis: full recovery day, cycle does NOT advance.
+    if snap.avg_condition < RECOVERY_CRISIS_THRESHOLD {
         if let Some(team) = game.teams.iter_mut().find(|t| t.id == team_id) {
-            team.training_focus = focus;
-            team.training_intensity = intensity;
+            team.training_focus = TrainingFocus::Recovery;
+            team.training_intensity = TrainingIntensity::Low;
         }
+        return;
+    }
+
+    // Base intensity from condition band.
+    let base_intensity = if snap.avg_condition < LOW_INTENSITY_MAX {
+        TrainingIntensity::Low
+    } else if snap.avg_condition <= HIGH_INTENSITY_MIN {
+        TrainingIntensity::Medium
+    } else {
+        TrainingIntensity::High
+    };
+
+    let near_match = snap.days_to_next_fixture <= NEAR_MATCH_DAYS;
+    let congested = snap.fixtures_in_next_7 >= CONGESTION_FIXTURE_THRESHOLD;
+    let congestion_active = near_match || congested;
+
+    let intensity = if congestion_active {
+        downgrade_intensity(base_intensity)
+    } else {
+        base_intensity
+    };
+
+    // Style-biased weekly cycle; slot is based on weekday mod 5.
+    let cycle = style_weekly_cycle(&snap.play_style);
+    let slot = (weekday_num as usize) % 5;
+    let rotation_focus = cycle[slot].clone();
+
+    // Focus override based on effective intensity / congestion.
+    let focus = match &intensity {
+        // Low intensity (fatigue or congestion-downgraded) → recovery-first.
+        TrainingIntensity::Low => TrainingFocus::Recovery,
+        // Medium + congestion active → pre-match tactical work.
+        TrainingIntensity::Medium if congestion_active => TrainingFocus::Tactical,
+        // Healthy band → follow style-biased rotation.
+        _ => rotation_focus,
+    };
+
+    // V1 safety rule: Physical + High is the most punishing combination.
+    let intensity = if focus == TrainingFocus::Physical && intensity == TrainingIntensity::High {
+        TrainingIntensity::Medium
+    } else {
+        intensity
+    };
+
+    if let Some(team) = game.teams.iter_mut().find(|t| t.id == team_id) {
+        team.training_focus = focus;
+        team.training_intensity = intensity;
     }
 }
 
@@ -377,6 +382,20 @@ mod tests {
             vec![],
             vec![],
         )
+    }
+
+    #[test]
+    fn explicit_staff_planning_can_handle_a_human_without_touching_the_other_team() {
+        let mut game = make_game_with_two_teams("user", "ai", PlayStyle::Balanced, 80);
+        for p in &mut game.players {
+            if p.team_id.as_deref() == Some("user") {
+                p.condition = 5;
+            }
+        }
+        apply_training_policy_for_team(&mut game, "user", 0);
+        assert_eq!(game.teams[0].training_focus, TrainingFocus::Recovery);
+        assert_eq!(game.teams[1].training_focus, TrainingFocus::Physical);
+        assert!(game.is_controlled("user"));
     }
 
     // -----------------------------------------------------------------------

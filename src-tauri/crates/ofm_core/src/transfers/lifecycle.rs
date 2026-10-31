@@ -151,12 +151,15 @@ pub(crate) fn close_loan_offer(
     offer.closed_on = Some(today.to_string());
 }
 pub(crate) fn expire_stale_transfer_offers(game: &mut Game) {
+    expire_stale_transfer_offers_except(game, &HashSet::new());
+}
+pub(crate) fn expire_stale_transfer_offers_except(game: &mut Game, protected: &HashSet<String>) {
     let current_date = game.clock.current_date.date_naive();
     let today = current_date.format("%Y-%m-%d").to_string();
 
     for player in &mut game.players {
         for offer in &mut player.transfer_offers {
-            if offer_is_stale(current_date, offer) {
+            if !protected.contains(&offer.id) && offer_is_stale(current_date, offer) {
                 close_transfer_offer(offer, TransferOfferStatus::Withdrawn, &today);
             }
         }

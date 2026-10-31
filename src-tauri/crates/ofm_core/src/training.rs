@@ -122,6 +122,15 @@ struct TeamTrainingPlan {
 /// the team default.
 /// `weekday_num` is 0=Mon .. 6=Sun (chrono Weekday::num_days_from_monday()).
 pub fn process_training(game: &mut Game, weekday_num: u32) {
+    process_training_with_staff(game, weekday_num, &std::collections::HashSet::new());
+}
+
+/// Explicit staff delegation enables the existing individual fatigue guard.
+pub fn process_training_with_staff(
+    game: &mut Game,
+    weekday_num: u32,
+    staff_managed: &std::collections::HashSet<String>,
+) {
     // Derive the current year from the game clock for accurate age calculations.
     let current_year = game
         .clock
@@ -155,7 +164,7 @@ pub fn process_training(game: &mut Game, weekday_num: u32) {
                     bonus,
                     medical_facility_mult,
                     group_overrides,
-                    is_user_team: game.is_controlled(&t.id),
+                    is_user_team: game.is_controlled(&t.id) && !staff_managed.contains(&t.id),
                 },
             )
         })

@@ -187,7 +187,16 @@ pub fn evaluate_transfer_market_with_reservations(
     game: &mut Game,
     reserved: &mut std::collections::HashMap<String, u64>,
 ) {
-    expire_stale_transfer_offers(game);
+    evaluate_transfer_market_with_policy(game, reserved, &HashSet::new());
+}
+
+/// Protect host-owned proposals from the native game-date expiry authority.
+pub fn evaluate_transfer_market_with_policy(
+    game: &mut Game,
+    reserved: &mut std::collections::HashMap<String, u64>,
+    protected: &HashSet<String>,
+) {
+    expire_stale_transfer_offers_except(game, protected);
     expire_stale_loan_offers(game);
     prune_closed_offers(game);
 
