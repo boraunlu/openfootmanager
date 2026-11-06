@@ -1,5 +1,7 @@
 mod match_report;
-pub use match_report::match_report_article;
+pub use match_report::{
+    MatchReportFacts, ReportCompetition, ReportScorer, ReportSide, match_report_article,
+};
 
 use crate::season_awards::SeasonAwards;
 use domain::news::*;
@@ -167,13 +169,32 @@ fn preseason_unbeaten_data(unbeaten_teams: &[String]) -> String {
     serde_json::to_string(unbeaten_teams).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Generate a league roundup article summarising all matchday results.
+/// The calendar day of an RFC 3339 timestamp or plain date.
+pub(crate) fn day_of(date: &str) -> &str {
+    date.get(..10).unwrap_or(date)
+}
+
+/// One roundup per competition and day: a round postponed in part gets a roundup for each day its
+/// matches are played. The matchday is not part of the id, because the day's lowest matchday can
+/// change while the day is still being played, and the second pass of the day must find the first
+/// pass's article instead of writing another.
+pub(crate) fn roundup_article_id(competition_id: &str, day: &str) -> String {
+    format!("roundup_{competition_id}_{day}")
+}
+
+pub(crate) fn standings_article_id(competition_id: &str, day: &str) -> String {
+    format!("standings_{competition_id}_{day}")
+}
+
+/// Generate a league roundup article summarising the results of one day of a matchday.
 pub fn league_roundup_article(
+    competition_id: &str,
     matchday: u32,
     results: &[(String, u8, String, u8)], // (home_name, home_goals, away_name, away_goals)
     date: &str,
 ) -> NewsArticle {
-    let mut rng = rand::rng();
+    let mut rng =
+        crate::seed::rng_from_key(&format!("news/roundup/{competition_id}/{matchday}/{date}"));
     let results_data = roundup_results_data(results);
     let biggest_winner = biggest_winner_name(results);
 
@@ -188,7 +209,7 @@ pub fn league_roundup_article(
     let headline_idx = rng.random_range(0..3);
 
     NewsArticle::new(
-        format!("roundup_md{}", matchday),
+        roundup_article_id(competition_id, day_of(date)),
         String::new(),
         String::new(),
         String::new(),
@@ -212,11 +233,14 @@ pub fn league_roundup_article(
 
 /// Generate a standings update article after a matchday.
 pub fn standings_update_article(
+    competition_id: &str,
     matchday: u32,
     top_teams: &[(String, u32, i16)], // (team_name, points, goal_diff)
     date: &str,
 ) -> NewsArticle {
-    let mut rng = rand::rng();
+    let mut rng = crate::seed::rng_from_key(&format!(
+        "news/standings/{competition_id}/{matchday}/{date}"
+    ));
 
     let leader = top_teams
         .first()
@@ -233,7 +257,7 @@ pub fn standings_update_article(
     let headline_idx = rng.random_range(0..3);
 
     NewsArticle::new(
-        format!("standings_md{}", matchday),
+        standings_article_id(competition_id, day_of(date)),
         String::new(),
         String::new(),
         String::new(),
@@ -279,7 +303,8 @@ fn preview_contenders<'a>(team_names: &'a [String], rng: &mut impl Rng) -> (&'a 
 
 /// Generate a season preview article at the start of the season.
 pub fn season_preview_article(team_names: &[String], date: &str) -> NewsArticle {
-    let mut rng = rand::rng();
+    let mut rng =
+        crate::seed::rng_from_key(&format!("news/preview/{date}/{}", team_names.join(",")));
 
     let (favourite, dark_horse) = preview_contenders(team_names, &mut rng);
     let headline_idx = rng.random_range(0..3);
@@ -352,7 +377,7 @@ pub fn transfer_roundup_article(
                     "player": player,
                     "fromTeam": from_team,
                     "toTeam": to_team,
-                    "fee": format_transfer_fee(*fee),
+                    "fee": fee.to_string(),
                 })
             })
             .collect::<Vec<_>>(),
@@ -502,7 +527,7 @@ pub fn major_transfer_article(
     fee: u64,
     date: &str,
 ) -> NewsArticle {
-    let fee_display = format_transfer_fee(fee);
+    let fee_display = fee.to_string();
 
     NewsArticle::new(
         id.to_string(),
@@ -562,20 +587,41 @@ pub fn loan_move_article(
     )
 }
 
+/// The division's leading scorer, as the weekly digest names and links them.
+pub struct DigestTopScorer<'a> {
+    pub player_id: &'a str,
+    pub name: &'a str,
+    pub goals: u32,
+}
+
+/// The weekly digest of a division.
+///
+/// It says only what it carries: the storyline sentence appears when `storyline_count`
+/// storylines were published with it, and the scorer clause when the division has a scorer.
 pub fn weekly_digest_article(
     id: &str,
     week_start: &str,
+    leader_team_id: &str,
     leader: &str,
-    top_scorer: &str,
-    top_scorer_goals: u32,
+    top_scorer: Option<&DigestTopScorer<'_>>,
     storyline_count: usize,
     date: &str,
 ) -> NewsArticle {
-    let body_key = if top_scorer.is_empty() {
-        "be.news.weeklyDigest.bodyNoTopScorer"
-    } else {
-        "be.news.weeklyDigest.bodyWithTopScorer"
+    let body_key = match (top_scorer.is_some(), storyline_count > 0) {
+        (false, true) => "be.news.weeklyDigest.bodyNoTopScorer",
+        (true, true) => "be.news.weeklyDigest.bodyWithTopScorer",
+        (false, false) => "be.news.weeklyDigest.bodyNoTopScorerNoStorylines",
+        (true, false) => "be.news.weeklyDigest.bodyWithTopScorerNoStorylines",
     };
+
+    let mut i18n_params = params(&[("weekStart", week_start), ("leader", leader)]);
+    if let Some(scorer) = top_scorer {
+        i18n_params.insert("topScorer".to_string(), scorer.name.to_string());
+        i18n_params.insert("topScorerGoals".to_string(), scorer.goals.to_string());
+    }
+    if storyline_count > 0 {
+        i18n_params.insert("storylineCount".to_string(), storyline_count.to_string());
+    }
 
     NewsArticle::new(
         id.to_string(),
@@ -585,17 +631,17 @@ pub fn weekly_digest_article(
         date.to_string(),
         NewsCategory::Editorial,
     )
+    .with_teams(vec![leader_team_id.to_string()])
+    .with_players(
+        top_scorer
+            .map(|scorer| vec![scorer.player_id.to_string()])
+            .unwrap_or_default(),
+    )
     .with_i18n(
         "be.news.weeklyDigest.headline",
         body_key,
         "be.source.leagueChronicle",
-        params(&[
-            ("weekStart", week_start),
-            ("leader", leader),
-            ("topScorer", top_scorer),
-            ("topScorerGoals", &top_scorer_goals.to_string()),
-            ("storylineCount", &storyline_count.to_string()),
-        ]),
+        i18n_params,
     )
 }
 
@@ -714,7 +760,7 @@ pub fn transfer_rumour_gossip_article(
     from_team_name: &str,
     date: &str,
 ) -> NewsArticle {
-    let mut rng = rand::rng();
+    let mut rng = crate::seed::rng_from_key(id);
     let headline_idx = rng.random_range(0..3);
     let body_idx = rng.random_range(0..3);
 
@@ -753,7 +799,7 @@ pub fn injury_news_article(
     days_out: u32,
     date: &str,
 ) -> NewsArticle {
-    let mut rng = rand::rng();
+    let mut rng = crate::seed::rng_from_key(id);
 
     let is_short = days_out <= 7;
     let weeks = days_out.div_ceil(7);
@@ -841,9 +887,9 @@ mod tests {
             ("Gamma FC".to_string(), 1, "Delta FC".to_string(), 1),
         ];
 
-        let article = league_roundup_article(4, &results, "2025-08-12");
+        let article = league_roundup_article("league1", 4, &results, "2025-08-12");
 
-        assert_eq!(article.id, "roundup_md4");
+        assert_eq!(article.id, "roundup_league1_2025-08-12");
         assert_eq!(article.category, NewsCategory::LeagueRoundup);
         assert_eq!(article.headline, "");
         assert_eq!(article.body, "");
@@ -896,7 +942,7 @@ mod tests {
             ("Gamma FC".to_string(), 0, "Delta FC".to_string(), 0),
         ];
 
-        let article = league_roundup_article(5, &results, "2025-08-19");
+        let article = league_roundup_article("league1", 5, &results, "2025-08-19");
 
         assert_eq!(article.body, "");
         assert_eq!(
@@ -913,9 +959,9 @@ mod tests {
             ("Gamma FC".to_string(), 9, -3),
         ];
 
-        let article = standings_update_article(4, &standings, "2025-08-12");
+        let article = standings_update_article("league1", 4, &standings, "2025-08-12");
 
-        assert_eq!(article.id, "standings_md4");
+        assert_eq!(article.id, "standings_league1_2025-08-12");
         assert_eq!(article.category, NewsCategory::StandingsUpdate);
         assert_eq!(article.headline, "");
         assert_eq!(article.body, "");
@@ -954,7 +1000,7 @@ mod tests {
 
     #[test]
     fn standings_update_article_handles_empty_table_with_unknown_leader() {
-        let article = standings_update_article(1, &[], "2025-08-01");
+        let article = standings_update_article("league1", 1, &[], "2025-08-01");
 
         assert_eq!(article.body, "");
         assert_eq!(

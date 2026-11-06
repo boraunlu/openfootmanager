@@ -1,9 +1,13 @@
 pub mod competitions;
 pub mod inbox;
+pub mod managers;
 pub mod news;
 pub mod players;
 pub mod schedule;
+pub mod scouted_report;
+mod search_text;
 pub mod session;
 pub mod squad;
 pub mod staff;
+pub mod team_selection;
 pub mod teams;

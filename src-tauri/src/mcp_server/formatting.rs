@@ -6,6 +6,10 @@
 /// a human-readable message that helps agents self-correct.
 pub fn translate_error(key: &str) -> String {
     match key {
+        "be.error.liveMatch.inProgress" => {
+            "Finish the current match before saving, advancing, or starting another match."
+                .to_string()
+        }
         "be.error.noActiveGameSession" => {
             "No active game session. Start or load a game first.".to_string()
         }
@@ -15,7 +19,7 @@ pub fn translate_error(key: &str) -> String {
             "Player not found. Check the player ID and try again.".to_string()
         }
         "be.error.playerNotInSquad" => "Player is not in your squad.".to_string(),
-        "be.error.saveManagerUnavailable" => {
+        crate::SAVE_MANAGER_UNAVAILABLE_ERROR => {
             "Save manager is unavailable. This is an internal error.".to_string()
         }
         "be.error.noActiveSaveSession" => {
@@ -63,6 +67,10 @@ pub fn translate_error(key: &str) -> String {
             "Unknown facility type. Use 'training', 'medical', or 'scouting'.".to_string()
         }
         "be.error.saveNotFound" => "Save not found. Check the save ID.".to_string(),
+        "be.error.transfers.loanBorrowerCannotAffordWages" => {
+            "The borrowing club cannot afford this wage share: it would exceed its wage budget."
+                .to_string()
+        }
         "be.error.contracts.boardWagePolicy" => {
             "Board wage policy blocks this renewal: wage would exceed budget.".to_string()
         }
@@ -78,6 +86,13 @@ pub fn translate_error(key: &str) -> String {
         }
         "be.error.finance.facilityUpgradeInsufficientFunds" => {
             "Insufficient funds for facility upgrade.".to_string()
+        }
+        "be.error.finance.amountOverflow" => {
+            "This cash movement is too large to record.".to_string()
+        }
+        "be.error.finance.openingBalanceReserved" => {
+            "Opening balance posts are created automatically and cannot be submitted directly."
+                .to_string()
         }
         "be.error.finance.boardSupportAlreadyUsed" => {
             "Board support already used this season.".to_string()
@@ -101,11 +116,70 @@ pub fn translate_error(key: &str) -> String {
         "be.error.mcp.cannotDeleteActiveSave" => {
             "Cannot delete the save you are playing. Use `game_exit` first.".to_string()
         }
+        "be.error.mcp.missingParameter" => "A required parameter is missing.".to_string(),
+        "be.error.mcp.invalidParameter" => "A parameter has an invalid value.".to_string(),
         "be.error.liveMatch.pressConferenceAlreadyHeld" => {
             "A press conference has already been held today.".to_string()
         }
         "be.error.liveMatch.noCompletedMatch" => {
             "No completed match found for your team.".to_string()
+        }
+        "be.error.liveMatch.fixtureNotScheduled" => {
+            "This fixture is no longer scheduled and cannot be played.".to_string()
+        }
+        "be.error.noActiveLiveMatch" => {
+            "No live match is in progress. Start one with `match_start`.".to_string()
+        }
+        "be.error.liveMatch.shootoutOrderNotNow" => {
+            "The shootout order can only be set once the shootout has started, before its first \
+             kick."
+                .to_string()
+        }
+        "be.error.liveMatch.shootoutOrderNotYourSide" => {
+            "You can only set your own side's shootout order.".to_string()
+        }
+        "be.error.liveMatch.notYourSide" => {
+            "You can only give orders to your own team: that side is not yours.".to_string()
+        }
+        "be.error.liveMatch.shootoutOrderNotEligible" => {
+            "The order must list each player in your current shootout order exactly once \
+             (see `match_snapshot`)."
+                .to_string()
+        }
+        "be.error.liveMatch.noSubstitutionsForShootout" => {
+            "No substitutions once extra time is over: the shootout is taken by the players on \
+             the pitch at the final whistle."
+                .to_string()
+        }
+        "be.error.liveMatch.noLeague" => "No league data is available for this match.".to_string(),
+        "be.error.liveMatch.fixtureNotFound" => {
+            "The selected fixture could not be found. Check the fixture ID and try again."
+                .to_string()
+        }
+        "be.error.liveMatch.emptySquad" => {
+            "One of the teams has no available players, so the match cannot be played.".to_string()
+        }
+        "be.error.liveMatch.maxSubstitutionsReached" => {
+            "Maximum substitutions reached: no more changes are allowed in this match.".to_string()
+        }
+        "be.error.liveMatch.preMatchSwapTooLate" => {
+            "Pre-match swaps are only allowed before kick-off.".to_string()
+        }
+        "be.error.liveMatch.cannotSubstituteSentOffPlayer" => {
+            "A sent-off player cannot be substituted.".to_string()
+        }
+        "be.error.liveMatch.playerNotOnPitch" => {
+            "That player is not on the pitch; check `match_snapshot` for who is.".to_string()
+        }
+        "be.error.liveMatch.playerAlreadySubstitutedOff" => {
+            "That player has already been substituted off and cannot return.".to_string()
+        }
+        "be.error.liveMatch.playerNotOnBench" => {
+            "That player is not on the bench; check `match_snapshot` for the substitutes."
+                .to_string()
+        }
+        "be.error.liveMatch.playerNotInStartingXi" => {
+            "That player is not in the starting XI.".to_string()
         }
         _ => format!("Error: {}", key),
     }
@@ -114,6 +188,73 @@ pub fn translate_error(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::translate_error;
+
+    #[test]
+    fn completed_fixture_error_is_rendered_for_mcp() {
+        assert_eq!(
+            translate_error("be.error.liveMatch.fixtureNotScheduled"),
+            "This fixture is no longer scheduled and cannot be played."
+        );
+    }
+
+    /// Given the shared application's live-match refusal key, when rendered for an agent,
+    /// then it is a readable message rather than an untranslated key.
+    #[test]
+    fn the_live_match_refusal_is_renderable() {
+        let key = "be.error.liveMatch.inProgress";
+        assert!(!translate_error(key).contains(key));
+    }
+
+    /// Given the refusals an agent can meet when it sets its shootout order, substitutes after
+    /// extra time, or acts with no live match, when rendered for the agent, then each is a readable
+    /// message rather than a raw key.
+    #[test]
+    fn the_shootout_order_refusals_are_renderable() {
+        for key in [
+            "be.error.noActiveLiveMatch",
+            "be.error.liveMatch.shootoutOrderNotNow",
+            "be.error.liveMatch.shootoutOrderNotYourSide",
+            "be.error.liveMatch.notYourSide",
+            "be.error.liveMatch.shootoutOrderNotEligible",
+            "be.error.liveMatch.noSubstitutionsForShootout",
+        ] {
+            let rendered = translate_error(key);
+            assert!(!rendered.contains(key), "{key} renders as {rendered:?}");
+        }
+    }
+
+    /// Every live-match refusal key the screen can show (`be.error.liveMatch.*` in `en.json`, the
+    /// source of the locales) is a readable sentence for an agent, not a raw key: a key added
+    /// there without an arm here fails this test by name.
+    #[test]
+    fn every_live_match_refusal_key_has_a_message() {
+        fn leaves(node: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+            match node.as_object() {
+                Some(children) => {
+                    for (name, child) in children {
+                        leaves(child, &format!("{prefix}.{name}"), out);
+                    }
+                }
+                None => out.push(prefix.to_string()),
+            }
+        }
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../src/i18n/locales/en.json"))
+                .expect("en.json parses");
+        let mut keys = Vec::new();
+        leaves(
+            &en["be"]["error"]["liveMatch"],
+            "be.error.liveMatch",
+            &mut keys,
+        );
+
+        assert!(keys.len() > 10, "found only {keys:?}");
+        let raw: Vec<&String> = keys
+            .iter()
+            .filter(|key| translate_error(key).contains(key.as_str()))
+            .collect();
+        assert!(raw.is_empty(), "no message for {raw:?}");
+    }
 
     /// The wrapper renders a key exactly once.
     ///

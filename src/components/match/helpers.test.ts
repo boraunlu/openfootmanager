@@ -25,11 +25,25 @@ const makePlayer = (overrides: Partial<EnginePlayerData> = {}): EnginePlayerData
     position: "Midfielder",
     ovr,
     condition: 100,
-    pace: 70, stamina: 70, strength: 70, agility: 70,
-    passing: 70, shooting: 70, tackling: 70, dribbling: 70,
-    defending: 70, positioning: 70, vision: 70, decisions: 70,
-    composure: 50, aggression: 50, teamwork: 50,
-    leadership: 50, handling: 30, reflexes: 30, aerial: 50,
+    pace: 70,
+    stamina: 70,
+    strength: 70,
+    agility: 70,
+    passing: 70,
+    shooting: 70,
+    tackling: 70,
+    dribbling: 70,
+    defending: 70,
+    positioning: 70,
+    vision: 70,
+    decisions: 70,
+    composure: 50,
+    aggression: 50,
+    teamwork: 50,
+    leadership: 50,
+    handling: 30,
+    reflexes: 30,
+    aerial: 50,
     traits: [],
     role: "Standard",
     ...rest,
@@ -62,8 +76,18 @@ const makeSnapshot = (overrides: Partial<MatchSnapshot> = {}): MatchSnapshot => 
   home_subs_made: 0,
   away_subs_made: 0,
   max_subs: 3,
-  home_set_pieces: { free_kick_taker: null, corner_taker: null, penalty_taker: null, captain: null },
-  away_set_pieces: { free_kick_taker: null, corner_taker: null, penalty_taker: null, captain: null },
+  home_set_pieces: {
+    free_kick_taker: null,
+    corner_taker: null,
+    penalty_taker: null,
+    captain: null,
+  },
+  away_set_pieces: {
+    free_kick_taker: null,
+    corner_taker: null,
+    penalty_taker: null,
+    captain: null,
+  },
   substitutions: [],
   allows_extra_time: false,
   home_yellows: {},
@@ -135,37 +159,107 @@ describe("makeTeamFallback", () => {
 });
 
 describe("resolveMatchFixture", () => {
-  const gameState = {
-    league: {
-      id: "league-1",
-      name: "League",
-      season: 1,
-      fixtures: [
-        {
-          id: "fixture-1",
-          matchday: 3,
-          date: "2026-08-01",
-          home_team_id: "home1",
-          away_team_id: "away1",
-          competition: "League",
-          status: "Scheduled",
-          result: null,
-        },
+  const fixture = (id: string, competition: string, home: string, away: string) => ({
+    id,
+    matchday: 3,
+    date: "2026-08-01",
+    home_team_id: home,
+    away_team_id: away,
+    competition,
+    status: "Scheduled",
+    result: null,
+  });
+  const league = {
+    id: "league-1",
+    name: "League",
+    season: 1,
+    fixtures: [fixture("other-league-match", "League", "x1", "y1")],
+    standings: [],
+  };
+  const cup = {
+    id: "cup-1",
+    name: "Cup",
+    season: 1,
+    fixtures: [fixture("cup-tie", "Cup", "home1", "away1")],
+    standings: [],
+  };
+  const gameState = { league, competitions: [league, cup] } as unknown as GameStateData;
+
+  /**
+   * Given a cup tie, which lives in the cup's own competition and never in the league mirror
+   * When the match is resolved from the route's competition and fixture ids
+   * Then it is the cup tie, found across every competition, not whatever the index lands on in
+   *      the league (the index counts the user's competition, not the mirror).
+   */
+  it("resolves the fixture by its competition and id, across every competition", () => {
+    const route = { competitionId: "cup-1", fixtureId: "cup-tie" };
+
+    expect(resolveMatchFixture(gameState, makeSnapshot(), route)?.id).toBe("cup-tie");
+  });
+
+  /**
+   * Given two fixtures between the same two clubs (a league meeting weeks ago and today's cup tie)
+   * When the route names the league meeting
+   * Then it is the one named, not today's tie: the id decides, the pairing never overrules it.
+   */
+  it("resolves the fixture the route names even when another one pairs the same clubs", () => {
+    const earlier = fixture("league-meeting", "League", "home1", "away1");
+    earlier.date = "2026-03-01";
+    const todaysTie = fixture("cup-tie", "Cup", "home1", "away1");
+    todaysTie.date = "2026-08-01";
+    const game = {
+      clock: { current_date: "2026-08-01T12:00:00Z" },
+      league: { ...league, fixtures: [earlier] },
+      competitions: [
+        { ...league, fixtures: [earlier] },
+        { ...cup, fixtures: [todaysTie] },
       ],
-      standings: [],
-    },
-  } as unknown as GameStateData;
+    } as unknown as GameStateData;
 
-  it("resolves the fixture by index when available", () => {
-    expect(resolveMatchFixture(gameState, makeSnapshot(), 0)?.id).toBe("fixture-1");
+    expect(
+      resolveMatchFixture(game, makeSnapshot(), {
+        competitionId: "league-1",
+        fixtureId: "league-meeting",
+      })?.id,
+    ).toBe("league-meeting");
   });
 
-  it("falls back to matching the snapshot teams", () => {
-    expect(resolveMatchFixture(gameState, makeSnapshot())?.id).toBe("fixture-1");
+  /**
+   * Given the same two fixtures and a route that carries no ids
+   * When the match is resolved from the two clubs
+   * Then it is the one dated today, not the earlier league meeting that happens to come first.
+   */
+  it("prefers the pairing played today when the route carries no ids", () => {
+    const earlier = fixture("league-meeting", "League", "home1", "away1");
+    earlier.date = "2026-03-01";
+    const todaysTie = fixture("cup-tie", "Cup", "home1", "away1");
+    todaysTie.date = "2026-08-01";
+    const game = {
+      clock: { current_date: "2026-08-01T12:00:00Z" },
+      league: { ...league, fixtures: [earlier] },
+      competitions: [
+        { ...league, fixtures: [earlier] },
+        { ...cup, fixtures: [todaysTie] },
+      ],
+    } as unknown as GameStateData;
+
+    expect(resolveMatchFixture(game, makeSnapshot())?.id).toBe("cup-tie");
   });
 
-  it("returns null when no league fixtures are available", () => {
-    expect(resolveMatchFixture({ league: null } as unknown as GameStateData, makeSnapshot())).toBeNull();
+  it("falls back to matching the snapshot teams when the route carries no ids", () => {
+    expect(resolveMatchFixture(gameState, makeSnapshot())?.id).toBe("cup-tie");
+  });
+
+  it("returns null when the route names a fixture the game does not have", () => {
+    expect(
+      resolveMatchFixture(gameState, makeSnapshot(), { competitionId: "cup-1", fixtureId: "gone" }),
+    ).toBeNull();
+  });
+
+  it("returns null when there are no competitions at all", () => {
+    expect(
+      resolveMatchFixture({ league: null } as unknown as GameStateData, makeSnapshot()),
+    ).toBeNull();
   });
 });
 
@@ -222,25 +316,53 @@ describe("phaseLabel", () => {
 
 describe("getEventDisplay", () => {
   it("returns known display for Goal event", () => {
-    const display = getEventDisplay({ minute: 10, event_type: "Goal", side: "Home", zone: "Box", player_id: "p1", secondary_player_id: null });
+    const display = getEventDisplay({
+      minute: 10,
+      event_type: "Goal",
+      side: "Home",
+      zone: "Box",
+      player_id: "p1",
+      secondary_player_id: null,
+    });
     expect(display.color).toBe("text-accent-700 dark:text-accent-400");
     expect(display.important).toBe(true);
   });
 
   it("returns known display for YellowCard event", () => {
-    const display = getEventDisplay({ minute: 25, event_type: "YellowCard", side: "Away", zone: "Midfield", player_id: "p2", secondary_player_id: null });
+    const display = getEventDisplay({
+      minute: 25,
+      event_type: "YellowCard",
+      side: "Away",
+      zone: "Midfield",
+      player_id: "p2",
+      secondary_player_id: null,
+    });
     expect(display.color).toBe("text-yellow-400");
     expect(display.important).toBe(true);
   });
 
   it("returns known display for ShotSaved (non-important)", () => {
-    const display = getEventDisplay({ minute: 30, event_type: "ShotSaved", side: "Home", zone: "Box", player_id: "p1", secondary_player_id: null });
+    const display = getEventDisplay({
+      minute: 30,
+      event_type: "ShotSaved",
+      side: "Home",
+      zone: "Box",
+      player_id: "p1",
+      secondary_player_id: null,
+    });
     expect(display.color).toBe("text-green-700 dark:text-green-400");
     expect(display.important).toBe(false);
   });
 
   it("returns default display for unknown event type", () => {
-    const display = getEventDisplay({ minute: 1, event_type: "UnknownEvent", side: "Home", zone: "Midfield", player_id: null, secondary_player_id: null });
+    const display = getEventDisplay({
+      minute: 1,
+      event_type: "UnknownEvent",
+      side: "Home",
+      zone: "Midfield",
+      player_id: null,
+      secondary_player_id: null,
+    });
     expect(display.color).toBe("text-gray-700 dark:text-gray-400");
     expect(display.important).toBe(false);
   });

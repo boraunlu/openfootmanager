@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Player {
     pub id: String,
     pub match_name: String,
@@ -61,8 +62,12 @@ pub struct Player {
     pub potential: u8,
 
     // Contract & value
-    pub contract_end: Option<String>,
-    pub wage: u32, // weekly wage
+    //
+    // A player's contract is not a field. It is the latest entry in `movement_history`
+    // (see `contract_ledger`): read it with `wage()`, `contract_start()` and
+    // `contract_end()`, and change it by recording a movement. The ledger still writes
+    // `wage`, `contract_start` and `contract_end` when a player is serialized, so the
+    // frontend and the save columns keep the shape they always had.
     pub market_value: u64,
 
     // Season stats
@@ -70,8 +75,11 @@ pub struct Player {
 
     // Career history
     pub career: Vec<CareerEntry>,
-    #[serde(default)]
-    pub movement_history: Vec<PlayerMovementEntry>,
+    /// Every move and every contract. Flattened so the wire and the saves keep their
+    /// keys: it reads and writes `movement_history`, `wage`, `contract_start` and
+    /// `contract_end` itself.
+    #[serde(flatten)]
+    pub movement_history: crate::contract_ledger::MovementLedger,
 
     // Individual training focus override (takes priority over group and team default)
     #[serde(default)]
@@ -96,13 +104,13 @@ pub struct Player {
     pub jersey_number: Option<u8>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
 pub struct PlayerMedia {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, TS)]
 pub enum Position {
     #[default]
     Goalkeeper,
@@ -125,11 +133,179 @@ pub enum Position {
 }
 
 impl Position {
+    /// Every position, so a table over positions cannot miss one. A new variant breaks the
+    /// exhaustive match in `position_all_lists_every_variant_once`; add it to that match, to its
+    /// `VARIANTS` constant and to this list.
+    pub const ALL: [Position; 17] = [
+        Position::Goalkeeper,
+        Position::Defender,
+        Position::Midfielder,
+        Position::Forward,
+        Position::RightBack,
+        Position::CenterBack,
+        Position::LeftBack,
+        Position::RightWingBack,
+        Position::LeftWingBack,
+        Position::DefensiveMidfielder,
+        Position::CentralMidfielder,
+        Position::AttackingMidfielder,
+        Position::RightMidfielder,
+        Position::LeftMidfielder,
+        Position::RightWinger,
+        Position::LeftWinger,
+        Position::Striker,
+    ];
+
+    /// Every role a player in this position may be given, `Standard` first.
+    ///
+    /// This is the canonical backend table. It lived in the Tauri command layer,
+    /// which put it out of reach of anything below the commands — so a second
+    /// backend copy was the only way for `ofm_core` to assign a role, and there
+    /// were already two more (the engine's own mirror, which the crate-boundary
+    /// rule requires, and `src/lib/playerRoles.ts` on the front end). Which
+    /// roles a position admits is a property of the two types, in the same way
+    /// `TrainingSchedule::is_training_day` is a property of a schedule, so it
+    /// belongs here where every layer can reach it.
+    ///
+    /// **The front-end mirror must stay in lock-step, and nothing checks that
+    /// mechanically.** `role_valid_for_position_matches_canonical_table` in
+    /// `commands/squad.rs` pins this table to a literal copy of it, and
+    /// `src/lib/playerRoles.test.ts` pins the TypeScript mirror to its own; no
+    /// test compares the two. Change one side, change the other.
+    ///
+    /// The four coarse buckets are the legacy position groups, and they admit
+    /// every role of every granular position beneath them — a squad generated
+    /// today is entirely coarse (`generation.rs` hands out `Goalkeeper`,
+    /// `Defender`, `Midfielder`, `Forward` and nothing finer), so these are the
+    /// arms that get the most use, not the least.
+    pub fn valid_roles(&self) -> &'static [crate::team::PlayerRole] {
+        use crate::team::PlayerRole as R;
+        match self {
+            Position::Goalkeeper => &[R::Standard, R::BallPlayingKeeper, R::SweeperKeeper],
+            Position::CenterBack => &[R::Standard, R::Stopper, R::CoverCB, R::BallPlayingCB],
+            Position::RightBack
+            | Position::LeftBack
+            | Position::RightWingBack
+            | Position::LeftWingBack => &[
+                R::Standard,
+                R::AttackingFB,
+                R::DefensiveFB,
+                R::InvertedFB,
+                R::WingBack,
+            ],
+            Position::DefensiveMidfielder => &[
+                R::Standard,
+                R::AnchorMan,
+                R::BallWinner,
+                R::DeepLyingPlaymaker,
+            ],
+            Position::CentralMidfielder => &[R::Standard, R::BoxToBox, R::Carrilero, R::Mezzala],
+            Position::AttackingMidfielder => &[R::Standard, R::AdvancedPlaymaker, R::ShadowStriker],
+            Position::RightMidfielder
+            | Position::LeftMidfielder
+            | Position::RightWinger
+            | Position::LeftWinger => &[
+                R::Standard,
+                R::WideForward,
+                R::InsideForward,
+                R::InvertedWinger,
+            ],
+            Position::Striker => &[
+                R::Standard,
+                R::Poacher,
+                R::TargetMan,
+                R::DeepLyingForward,
+                R::False9,
+                R::PressingForward,
+                R::CompleteForward,
+            ],
+            // Coarse buckets: the union of the granular positions they cover.
+            Position::Defender => &[
+                R::Standard,
+                R::Stopper,
+                R::CoverCB,
+                R::BallPlayingCB,
+                R::AttackingFB,
+                R::DefensiveFB,
+                R::InvertedFB,
+                R::WingBack,
+            ],
+            Position::Midfielder => &[
+                R::Standard,
+                R::AnchorMan,
+                R::BallWinner,
+                R::DeepLyingPlaymaker,
+                R::BoxToBox,
+                R::Carrilero,
+                R::Mezzala,
+                R::AdvancedPlaymaker,
+                R::ShadowStriker,
+                R::WideForward,
+                R::InsideForward,
+                R::InvertedWinger,
+            ],
+            Position::Forward => &[
+                R::Standard,
+                R::WideForward,
+                R::InsideForward,
+                R::InvertedWinger,
+                R::Poacher,
+                R::TargetMan,
+                R::DeepLyingForward,
+                R::False9,
+                R::PressingForward,
+                R::CompleteForward,
+            ],
+        }
+    }
+
+    /// Whether this position admits that role. See [`Position::valid_roles`].
+    pub fn admits_role(&self, role: &crate::team::PlayerRole) -> bool {
+        self.valid_roles().contains(role)
+    }
+
+    /// Whether this is one of the four coarse positions an older save wrote (`Defender`,
+    /// `Midfielder`, `Forward`) or `Goalkeeper`, which is in the set on purpose although a keeper
+    /// was never coarse.
+    ///
+    /// `Player::natural_position` is `#[serde(default)]` and `Position`'s default is `Goalkeeper`,
+    /// so a save from before the field existed loads every player as a natural goalkeeper. Counting
+    /// `Goalkeeper` here is what makes the load-time identity upgrade
+    /// (`ofm_core::player_identity::needs_identity_upgrade`) and `primary_position` read his
+    /// `position` instead of trusting that default. Dropping it would turn those players into
+    /// keepers, so a caller that wants only the three outfield buckets must say so (match them
+    /// explicitly, as `critical_penalty` does), not reuse this.
     pub fn is_legacy_bucket(&self) -> bool {
         matches!(
             self,
             Position::Goalkeeper | Position::Defender | Position::Midfielder | Position::Forward
         )
+    }
+
+    /// Where the position sits in a squad list: goalkeeper first, then the back line, midfield and
+    /// attack, so a list sorted by it reads in pitch order. Each legacy bucket takes the round
+    /// number at the start of its line (Defender 20, CenterBack 21 ...), so an unmigrated player
+    /// stays next to his granular teammates instead of scattering to the end.
+    pub fn sort_rank(&self) -> u32 {
+        match self {
+            Position::Goalkeeper => 10,
+            Position::Defender => 20,
+            Position::CenterBack => 21,
+            Position::LeftBack => 22,
+            Position::RightBack => 23,
+            Position::LeftWingBack => 24,
+            Position::RightWingBack => 25,
+            Position::Midfielder => 30,
+            Position::DefensiveMidfielder => 31,
+            Position::CentralMidfielder => 32,
+            Position::AttackingMidfielder => 33,
+            Position::LeftMidfielder => 34,
+            Position::RightMidfielder => 35,
+            Position::Forward => 40,
+            Position::LeftWinger => 41,
+            Position::RightWinger => 42,
+            Position::Striker => 43,
+        }
     }
 
     pub fn to_group_position(&self) -> Position {
@@ -155,7 +331,7 @@ impl Position {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 pub enum Footedness {
     Left,
     #[default]
@@ -163,14 +339,14 @@ pub enum Footedness {
     Both,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 pub enum SquadRole {
     #[default]
     Senior,
     Youth,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct PlayerAttributes {
     // Physical
     pub pace: u8,
@@ -208,9 +384,91 @@ pub struct PlayerAttributes {
     pub aerial: u8,
 }
 
+/// The name of one of a player's attributes: the [`PlayerAttributes`] field it reads, spelled as
+/// that field is (and so as the screens' `common.attributes.*` labels are).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributeKey {
+    Pace,
+    Stamina,
+    Strength,
+    Agility,
+    Passing,
+    Shooting,
+    Tackling,
+    Dribbling,
+    Defending,
+    Positioning,
+    Vision,
+    Decisions,
+    Composure,
+    Aggression,
+    Teamwork,
+    Leadership,
+    Handling,
+    Reflexes,
+    Aerial,
+}
+
+impl AttributeKey {
+    /// Every attribute, in the order `PlayerAttributes` declares them.
+    pub const ALL: [AttributeKey; 19] = [
+        AttributeKey::Pace,
+        AttributeKey::Stamina,
+        AttributeKey::Strength,
+        AttributeKey::Agility,
+        AttributeKey::Passing,
+        AttributeKey::Shooting,
+        AttributeKey::Tackling,
+        AttributeKey::Dribbling,
+        AttributeKey::Defending,
+        AttributeKey::Positioning,
+        AttributeKey::Vision,
+        AttributeKey::Decisions,
+        AttributeKey::Composure,
+        AttributeKey::Aggression,
+        AttributeKey::Teamwork,
+        AttributeKey::Leadership,
+        AttributeKey::Handling,
+        AttributeKey::Reflexes,
+        AttributeKey::Aerial,
+    ];
+
+    /// This attribute's value in `attributes`.
+    pub fn value_in(self, attributes: &PlayerAttributes) -> u8 {
+        match self {
+            AttributeKey::Pace => attributes.pace,
+            AttributeKey::Stamina => attributes.stamina,
+            AttributeKey::Strength => attributes.strength,
+            AttributeKey::Agility => attributes.agility,
+            AttributeKey::Passing => attributes.passing,
+            AttributeKey::Shooting => attributes.shooting,
+            AttributeKey::Tackling => attributes.tackling,
+            AttributeKey::Dribbling => attributes.dribbling,
+            AttributeKey::Defending => attributes.defending,
+            AttributeKey::Positioning => attributes.positioning,
+            AttributeKey::Vision => attributes.vision,
+            AttributeKey::Decisions => attributes.decisions,
+            AttributeKey::Composure => attributes.composure,
+            AttributeKey::Aggression => attributes.aggression,
+            AttributeKey::Teamwork => attributes.teamwork,
+            AttributeKey::Leadership => attributes.leadership,
+            AttributeKey::Handling => attributes.handling,
+            AttributeKey::Reflexes => attributes.reflexes,
+            AttributeKey::Aerial => attributes.aerial,
+        }
+    }
+}
+
 fn default_attr() -> u8 {
     50
 }
+
+/// The range a weak-foot skill is held to. `Player::weak_foot` is a bare `u8`, so
+/// nothing in the type stops a 0 or a 200; the rating clamps to this, and package
+/// validation refuses a value outside it, from the one definition.
+pub const WEAK_FOOT_MIN: u8 = 1;
+pub const WEAK_FOOT_MAX: u8 = 5;
 
 fn default_weak_foot() -> u8 {
     2
@@ -220,38 +478,38 @@ fn default_fitness() -> u8 {
     75
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Injury {
     pub name: String,
     pub days_remaining: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub enum PlayerIssueCategory {
     Contract,
     PlayingTime,
     Morale,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct PlayerIssue {
     pub category: PlayerIssueCategory,
     pub severity: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, TS)]
 #[serde(default)]
 pub struct RecentTreatmentMemory {
     pub action_key: String,
     pub times_recently_used: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub enum PlayerPromiseKind {
     PlayingTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, TS)]
 pub enum RenewalSessionStatus {
     #[default]
     Idle,
@@ -261,7 +519,7 @@ pub enum RenewalSessionStatus {
     Stalled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, TS)]
 pub enum RenewalSessionOutcome {
     #[default]
     None,
@@ -272,7 +530,7 @@ pub enum RenewalSessionOutcome {
     Stalled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContractExitIntent {
     LetExpire {
@@ -282,7 +540,7 @@ pub enum ContractExitIntent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(default)]
 pub struct ContractRenewalState {
     pub status: RenewalSessionStatus,
@@ -308,7 +566,7 @@ impl Default for ContractRenewalState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(default)]
 pub struct PlayerPromise {
     pub kind: PlayerPromiseKind,
@@ -324,7 +582,7 @@ impl Default for PlayerPromise {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(default)]
 pub struct PlayerMoraleCore {
     pub manager_trust: u8,
@@ -372,7 +630,7 @@ fn default_loan_offer_date() -> String {
     String::new()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 #[serde(default)]
 pub struct PlayerSeasonStats {
     pub appearances: u32,
@@ -382,6 +640,9 @@ pub struct PlayerSeasonStats {
     pub yellow_cards: u32,
     pub red_cards: u32,
     pub avg_rating: f32,
+    /// Matches that fed `avg_rating`; appearances below the rating threshold
+    /// and matches from before ratings existed are not among them.
+    pub rated_appearances: u32,
     pub minutes_played: u32,
     pub shots: u32,
     pub shots_on_target: u32,
@@ -392,7 +653,7 @@ pub struct PlayerSeasonStats {
     pub fouls_committed: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct CareerEntry {
     pub season: u32,
     pub team_id: String,
@@ -402,7 +663,7 @@ pub struct CareerEntry {
     pub assists: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum PlayerMovementKind {
     PermanentTransfer,
@@ -411,9 +672,15 @@ pub enum PlayerMovementKind {
     LoanToBuy,
     FreeAgentSigning,
     Released,
+    /// A new agreement with the club he is already at.
+    Renewal,
+    Retired,
+    /// The contract in force when a career opened, or made from a save that
+    /// predates the ledger.
+    InitialContract,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct PlayerMovementEntry {
     pub date: String,
     pub kind: PlayerMovementKind,
@@ -429,9 +696,34 @@ pub struct PlayerMovementEntry {
     pub fee: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loan_end_date: Option<String>,
+    /// Present when this entry establishes a contract. See `contract_ledger`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<crate::contract_ledger::ContractRecord>,
+    /// Present on a `Released` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_reason: Option<crate::contract_ledger::ReleaseReason>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl PlayerMovementEntry {
+    /// An entry with nothing but its date and kind; the rest is filled by struct
+    /// update at the call site, so a new optional field does not touch every caller.
+    pub fn new(date: impl Into<String>, kind: PlayerMovementKind) -> Self {
+        Self {
+            date: date.into(),
+            kind,
+            from_team_id: None,
+            from_team_name: None,
+            to_team_id: None,
+            to_team_name: None,
+            fee: None,
+            loan_end_date: None,
+            contract: None,
+            release_reason: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct TransferOffer {
     pub id: String,
     pub from_team_id: String,
@@ -449,6 +741,9 @@ pub struct TransferOffer {
     pub date: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registration_date: Option<String>,
+    /// Why an agreed transfer was voided at registration, rather than abandoned during talks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_failure_reason: Option<TransferRegistrationFailureReason>,
     /// When talks ended, for offers that were rejected or withdrawn.
     ///
     /// Distinct from `date`, which is when the offer *arrived* and is rewritten whenever a club
@@ -457,7 +752,7 @@ pub struct TransferOffer {
     pub closed_on: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub enum TransferOfferStatus {
     Pending,
     PendingRegistration,
@@ -466,7 +761,15 @@ pub enum TransferOfferStatus {
     Withdrawn,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub enum TransferRegistrationFailureReason {
+    InsufficientFunds,
+    LoanConflict,
+    PlayerUnavailable,
+    RegistrationBlocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct LoanOffer {
     pub id: String,
     pub from_team_id: String,
@@ -500,7 +803,7 @@ pub struct LoanOffer {
     pub closed_on: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub enum LoanOfferStatus {
     Pending,
     PendingRegistration,
@@ -509,7 +812,7 @@ pub enum LoanOfferStatus {
     Withdrawn,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ActiveLoan {
     pub parent_team_id: String,
     pub loan_team_id: String,
@@ -528,7 +831,7 @@ pub struct ActiveLoan {
     pub development_reported_appearances: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 pub enum PlayerTrait {
     // Physical
     Speedster, // pace >= 85
@@ -556,7 +859,7 @@ pub enum PlayerTrait {
     Engine,          // MID: stamina >= 85 && pace >= 70 && teamwork >= 75
     SetPieceSpecialist, // passing >= 80 && shooting >= 75 && vision >= 75
     // Potential / Star
-    Wonderkid, // age <= 21 && potential >= 85 && (potential - ovr) >= 10
+    Wonderkid, // age <= 20 && an S-tier ceiling (potential >= 81) && (potential - ovr) >= 14; see ofm_core::player_rating::qualifies_for_wonderkid
 }
 
 /// Derive traits purely from a player's attributes (position-independent).
@@ -674,12 +977,10 @@ impl Player {
             traits,
             ovr: 0,
             potential: 0,
-            contract_end: None,
-            wage: 0,
             market_value: 0,
             stats: PlayerSeasonStats::default(),
             career: Vec::new(),
-            movement_history: Vec::new(),
+            movement_history: Default::default(),
             training_focus: None,
             transfer_listed: false,
             loan_listed: false,
@@ -695,6 +996,107 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Given an attribute block whose nineteen values all differ
+    /// When each attribute name is written and read from it
+    /// Then the names are exactly the block's own field names, each once, and each reads its own
+    ///      field: a name the screens look up as a label always names a real attribute
+    #[test]
+    fn every_attribute_name_is_a_field_of_the_attribute_block_and_reads_it() {
+        let names: Vec<String> = AttributeKey::ALL
+            .iter()
+            .map(|key| {
+                serde_json::to_value(key)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let values: serde_json::Map<String, serde_json::Value> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), serde_json::Value::from(index as u8 + 1)))
+            .collect();
+        let attributes: PlayerAttributes =
+            serde_json::from_value(serde_json::Value::Object(values.clone())).unwrap();
+        let fields = serde_json::to_value(&attributes).unwrap();
+        let mut field_names: Vec<&String> = fields.as_object().unwrap().keys().collect();
+        let mut sorted_names: Vec<&String> = names.iter().collect();
+        field_names.sort();
+        sorted_names.sort();
+
+        assert_eq!(sorted_names, field_names);
+        for (key, name) in AttributeKey::ALL.iter().zip(&names) {
+            assert_eq!(
+                serde_json::Value::from(key.value_in(&attributes)),
+                values[name],
+                "{name}"
+            );
+        }
+    }
+
+    /// Given every position,
+    /// When its sort rank is read,
+    /// Then the ranks are all different, a position ranks inside the band of its group (the bucket's
+    ///      round number up to nine more), and the keeper is first and the striker last.
+    #[test]
+    fn sort_rank_puts_each_position_in_its_groups_band_in_pitch_order() {
+        let mut ranks: Vec<u32> = Position::ALL.iter().map(Position::sort_rank).collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+        assert_eq!(ranks.len(), Position::ALL.len());
+
+        for position in Position::ALL {
+            let band_start = position.to_group_position().sort_rank();
+            assert!(
+                (band_start..band_start + 10).contains(&position.sort_rank()),
+                "{position:?}"
+            );
+        }
+        assert_eq!(Position::Goalkeeper.sort_rank(), 10);
+        assert_eq!(
+            Position::ALL.iter().map(Position::sort_rank).max(),
+            Some(43)
+        );
+        assert!(Position::Defender.sort_rank() < Position::Midfielder.sort_rank());
+        assert!(Position::Midfielder.sort_rank() < Position::Forward.sort_rank());
+    }
+
+    /// Given the list of every position and an exhaustive numbering of the enum's variants,
+    /// When the list is checked against it,
+    /// Then the list has one entry per number: a variant added to the enum breaks the numbering
+    ///      until it gets one, and the list is short until it is added to it too.
+    #[test]
+    fn position_all_lists_every_variant_once() {
+        const VARIANTS: usize = 17;
+        fn number(position: &Position) -> usize {
+            match position {
+                Position::Goalkeeper => 0,
+                Position::Defender => 1,
+                Position::Midfielder => 2,
+                Position::Forward => 3,
+                Position::RightBack => 4,
+                Position::CenterBack => 5,
+                Position::LeftBack => 6,
+                Position::RightWingBack => 7,
+                Position::LeftWingBack => 8,
+                Position::DefensiveMidfielder => 9,
+                Position::CentralMidfielder => 10,
+                Position::AttackingMidfielder => 11,
+                Position::RightMidfielder => 12,
+                Position::LeftMidfielder => 13,
+                Position::RightWinger => 14,
+                Position::LeftWinger => 15,
+                Position::Striker => 16,
+            }
+        }
+
+        let mut numbers: Vec<usize> = Position::ALL.iter().map(number).collect();
+        numbers.sort_unstable();
+
+        assert_eq!(numbers, (0..VARIANTS).collect::<Vec<_>>());
+    }
 
     fn sample_attributes() -> PlayerAttributes {
         PlayerAttributes {

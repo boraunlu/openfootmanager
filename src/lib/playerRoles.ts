@@ -1,7 +1,8 @@
 import type { PlayerRole } from "../store/types";
 
-// IMPORTANT: this table is the front-end mirror of the backend role validator
-// `role_valid_for_position` (src-tauri/src/commands/squad.rs). The backend is the
+// IMPORTANT: this table is the front-end mirror of the backend role table
+// `domain::Position::valid_roles()` (src-tauri/crates/domain/src/player.rs).
+// The backend command validates against that table and is the
 // authority — it rejects an out-of-position role with `be.error.roleNotValidForPosition`
 // — so every role offered here MUST be one the backend accepts for that position,
 // or the dropdown selection silently reverts. The cross-language parity is pinned
@@ -20,34 +21,84 @@ export const ROLE_OPTIONS_BY_POSITION: Record<string, PlayerRole[]> = {
   LeftMidfielder: ["Standard", "WideForward", "InsideForward", "InvertedWinger"],
   RightWinger: ["Standard", "WideForward", "InsideForward", "InvertedWinger"],
   LeftWinger: ["Standard", "WideForward", "InsideForward", "InvertedWinger"],
-  Striker: ["Standard", "Poacher", "TargetMan", "DeepLyingForward", "False9", "PressingForward", "CompleteForward"],
+  Striker: [
+    "Standard",
+    "Poacher",
+    "TargetMan",
+    "DeepLyingForward",
+    "False9",
+    "PressingForward",
+    "CompleteForward",
+  ],
   // Broad outfield categories (reached via canonicalised/legacy positions like
   // "Defender"/"Midfielder"/"Forward") map to the union of their detailed roles,
   // matching the backend's legacy-bucket branches.
   Defender: [
-    "Standard", "Stopper", "CoverCB", "BallPlayingCB",
-    "AttackingFB", "DefensiveFB", "InvertedFB", "WingBack",
+    "Standard",
+    "Stopper",
+    "CoverCB",
+    "BallPlayingCB",
+    "AttackingFB",
+    "DefensiveFB",
+    "InvertedFB",
+    "WingBack",
   ],
   Midfielder: [
-    "Standard", "AnchorMan", "BallWinner", "DeepLyingPlaymaker",
-    "BoxToBox", "Carrilero", "Mezzala", "AdvancedPlaymaker", "ShadowStriker",
-    "WideForward", "InsideForward", "InvertedWinger",
+    "Standard",
+    "AnchorMan",
+    "BallWinner",
+    "DeepLyingPlaymaker",
+    "BoxToBox",
+    "Carrilero",
+    "Mezzala",
+    "AdvancedPlaymaker",
+    "ShadowStriker",
+    "WideForward",
+    "InsideForward",
+    "InvertedWinger",
   ],
   Forward: [
-    "Standard", "WideForward", "InsideForward", "InvertedWinger",
-    "Poacher", "TargetMan", "DeepLyingForward", "False9", "PressingForward", "CompleteForward",
+    "Standard",
+    "WideForward",
+    "InsideForward",
+    "InvertedWinger",
+    "Poacher",
+    "TargetMan",
+    "DeepLyingForward",
+    "False9",
+    "PressingForward",
+    "CompleteForward",
   ],
 };
 
 const ALL_ROLES: PlayerRole[] = [
-  "Standard", "BallPlayingKeeper", "SweeperKeeper",
-  "Stopper", "CoverCB", "BallPlayingCB",
-  "AttackingFB", "DefensiveFB", "InvertedFB", "WingBack",
-  "AnchorMan", "BallWinner", "DeepLyingPlaymaker",
-  "BoxToBox", "Carrilero", "Mezzala",
-  "AdvancedPlaymaker", "ShadowStriker",
-  "WideForward", "InsideForward", "InvertedWinger",
-  "Poacher", "TargetMan", "DeepLyingForward", "False9", "PressingForward", "CompleteForward",
+  "Standard",
+  "BallPlayingKeeper",
+  "SweeperKeeper",
+  "Stopper",
+  "CoverCB",
+  "BallPlayingCB",
+  "AttackingFB",
+  "DefensiveFB",
+  "InvertedFB",
+  "WingBack",
+  "AnchorMan",
+  "BallWinner",
+  "DeepLyingPlaymaker",
+  "BoxToBox",
+  "Carrilero",
+  "Mezzala",
+  "AdvancedPlaymaker",
+  "ShadowStriker",
+  "WideForward",
+  "InsideForward",
+  "InvertedWinger",
+  "Poacher",
+  "TargetMan",
+  "DeepLyingForward",
+  "False9",
+  "PressingForward",
+  "CompleteForward",
 ];
 
 export function getRolesForPosition(position: string): PlayerRole[] {

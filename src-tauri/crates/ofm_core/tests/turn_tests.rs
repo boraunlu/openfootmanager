@@ -18,201 +18,26 @@ use ofm_core::game::Game;
 use ofm_core::turn;
 use std::collections::HashMap;
 
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
+#[path = "turn_tests/determinism.rs"]
+mod determinism;
+#[path = "turn_tests/fixtures.rs"]
+mod fixtures;
+#[path = "turn_tests/live_match_day.rs"]
+mod live_match_day;
+#[path = "turn_tests/match_injuries.rs"]
+mod match_injuries;
+#[path = "turn_tests/post_match_reactions.rs"]
+mod post_match_reactions;
+#[path = "turn_tests/squad_floor.rs"]
+mod squad_floor;
+#[path = "turn_tests/training_ground.rs"]
+mod training_ground;
+#[path = "turn_tests/unwatched.rs"]
+mod unwatched;
+#[path = "turn_tests/user_matchday.rs"]
+mod user_matchday;
 
-fn default_attrs() -> PlayerAttributes {
-    PlayerAttributes {
-        pace: 60,
-        stamina: 60,
-        strength: 60,
-        agility: 60,
-        passing: 60,
-        shooting: 60,
-        tackling: 60,
-        dribbling: 60,
-        defending: 60,
-        positioning: 60,
-        vision: 60,
-        decisions: 60,
-        composure: 60,
-        aggression: 60,
-        teamwork: 60,
-        leadership: 60,
-        handling: 30,
-        reflexes: 30,
-        aerial: 60,
-    }
-}
-
-fn gk_attrs() -> PlayerAttributes {
-    PlayerAttributes {
-        pace: 40,
-        stamina: 50,
-        strength: 60,
-        agility: 70,
-        passing: 40,
-        shooting: 20,
-        tackling: 20,
-        dribbling: 20,
-        defending: 30,
-        positioning: 70,
-        vision: 50,
-        decisions: 60,
-        composure: 70,
-        aggression: 30,
-        teamwork: 60,
-        leadership: 50,
-        handling: 80,
-        reflexes: 80,
-        aerial: 70,
-    }
-}
-
-fn make_player(id: &str, name: &str, team_id: &str, pos: Position) -> Player {
-    let attrs = if pos == Position::Goalkeeper {
-        gk_attrs()
-    } else {
-        default_attrs()
-    };
-    let mut p = Player::new(
-        id.to_string(),
-        name.to_string(),
-        name.to_string(),
-        "1995-01-01".to_string(),
-        "England".to_string(),
-        pos,
-        attrs,
-    );
-    p.team_id = Some(team_id.to_string());
-    p.morale = 70;
-    p.condition = 100;
-    p
-}
-
-fn make_team(id: &str, name: &str) -> Team {
-    Team::new(
-        id.to_string(),
-        name.to_string(),
-        name[..3].to_string(),
-        "England".to_string(),
-        "London".to_string(),
-        "Stadium".to_string(),
-        40_000,
-    )
-}
-
-fn make_staff(
-    id: &str,
-    team_id: &str,
-    role: StaffRole,
-    first_name: &str,
-    last_name: &str,
-) -> Staff {
-    let mut staff = Staff::new(
-        id.to_string(),
-        first_name.to_string(),
-        last_name.to_string(),
-        "1980-01-01".to_string(),
-        role,
-        StaffAttributes {
-            coaching: 60,
-            judging_ability: 60,
-            judging_potential: 60,
-            physiotherapy: 20,
-        },
-    );
-    staff.nationality = "England".to_string();
-    staff.team_id = Some(team_id.to_string());
-    staff
-}
-
-fn make_squad(team_id: &str, prefix: &str) -> Vec<Player> {
-    let mut players = Vec::new();
-    // 1 GK
-    players.push(make_player(
-        &format!("{}_gk", prefix),
-        &format!("{} GK", prefix),
-        team_id,
-        Position::Goalkeeper,
-    ));
-    // 4 DEF
-    for i in 0..4 {
-        players.push(make_player(
-            &format!("{}_def{}", prefix, i),
-            &format!("{} Def{}", prefix, i),
-            team_id,
-            Position::Defender,
-        ));
-    }
-    // 4 MID
-    for i in 0..4 {
-        players.push(make_player(
-            &format!("{}_mid{}", prefix, i),
-            &format!("{} Mid{}", prefix, i),
-            team_id,
-            Position::Midfielder,
-        ));
-    }
-    // 2 FWD
-    for i in 0..2 {
-        players.push(make_player(
-            &format!("{}_fwd{}", prefix, i),
-            &format!("{} Fwd{}", prefix, i),
-            team_id,
-            Position::Forward,
-        ));
-    }
-    players
-}
-
-fn make_game_with_match() -> Game {
-    let date = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-    let clock = GameClock::new(date);
-    let mut manager = Manager::new(
-        "mgr1".to_string(),
-        "Test".to_string(),
-        "Manager".to_string(),
-        "1980-01-01".to_string(),
-        "England".to_string(),
-    );
-    manager.hire("team1".to_string());
-
-    let team1 = make_team("team1", "Test FC");
-    let team2 = make_team("team2", "Rival FC");
-    let mut players = make_squad("team1", "t1");
-    players.extend(make_squad("team2", "t2"));
-
-    let today = date.format("%Y-%m-%d").to_string();
-    let league = League {
-        id: "league1".to_string(),
-        name: "Test League".to_string(),
-        season: 1,
-        fixtures: vec![Fixture {
-            id: "fix1".to_string(),
-            matchday: 1,
-            date: today,
-            home_team_id: "team1".to_string(),
-            away_team_id: "team2".to_string(),
-            competition: FixtureCompetition::League,
-            status: FixtureStatus::Scheduled,
-            result: None,
-            ..Default::default()
-        }],
-        standings: vec![
-            StandingEntry::new("team1".to_string()),
-            StandingEntry::new("team2".to_string()),
-        ],
-        transfer_log: vec![],
-        transfer_rumours: vec![],
-        ..Default::default()
-    };
-
-    let mut game = Game::new(clock, manager, vec![team1, team2], players, vec![], vec![]);
-    game.league = Some(league);
-    game
-}
+use fixtures::*;
 
 #[test]
 fn process_day_simulates_due_national_team_fixture() {
@@ -228,6 +53,7 @@ fn process_day_simulates_due_national_team_fixture() {
     let mut home = NationalTeam::new("nt-eng".into(), "England".into(), "ENG".into(), None);
     home.squad_player_ids = home_squad;
     home.fixtures.push(Fixture {
+        postponement: None,
         id: "ntf-x".into(),
         competition_id: "international-friendlies".into(),
         matchday: 1,
@@ -277,6 +103,7 @@ fn process_day_routes_world_cup_fixtures_to_the_national_team_engine() {
     cup.rules.format = domain::league::CompetitionFormat::Knockout;
     cup.standings.clear();
     cup.fixtures.push(Fixture {
+        postponement: None,
         id: "wc-final".to_string(),
         competition_id: "wc".to_string(),
         matchday: 1,
@@ -314,94 +141,6 @@ fn process_day_routes_world_cup_fixtures_to_the_national_team_engine() {
             .all(|f| f.status == FixtureStatus::Scheduled),
         "club fixtures must not be dragged into the national-team matchday"
     );
-}
-
-fn make_game_without_match_today() -> Game {
-    let mut game = make_game_with_match();
-    if let Some(league) = &mut game.league {
-        league.fixtures[0].date = "2025-06-16".to_string();
-    }
-    game
-}
-
-fn empty_report(home_goals: u8, away_goals: u8) -> MatchReport {
-    MatchReport {
-        home_goals,
-        away_goals,
-        home_stats: TeamStats::default(),
-        away_stats: TeamStats::default(),
-        events: vec![],
-        goals: vec![],
-        player_stats: HashMap::new(),
-        home_possession: 50.0,
-        total_minutes: 90,
-        home_penalties: None,
-        away_penalties: None,
-    }
-}
-
-fn report_with_scorer(home_goals: u8, away_goals: u8, scorer_id: &str, side: Side) -> MatchReport {
-    let mut player_stats = HashMap::new();
-    player_stats.insert(
-        scorer_id.to_string(),
-        PlayerMatchStats {
-            minutes_played: 90,
-            goals: if side == Side::Home {
-                home_goals
-            } else {
-                away_goals
-            },
-            assists: 0,
-            shots: 3,
-            shots_on_target: 2,
-            passes_completed: 30,
-            passes_attempted: 35,
-            tackles_won: 2,
-            interceptions: 1,
-            fouls_committed: 1,
-            yellow_cards: 0,
-            red_cards: 0,
-            rating: 7.5,
-        },
-    );
-    let goals = (0..home_goals)
-        .map(|i| GoalDetail {
-            minute: 10 + i * 20,
-            scorer_id: if side == Side::Home {
-                scorer_id.to_string()
-            } else {
-                "other".to_string()
-            },
-            assist_id: None,
-            goal_source: engine::report::GoalSource::OpenPlay,
-            side: Side::Home,
-        })
-        .chain((0..away_goals).map(|i| GoalDetail {
-            minute: 15 + i * 20,
-            scorer_id: if side == Side::Away {
-                scorer_id.to_string()
-            } else {
-                "other".to_string()
-            },
-            assist_id: None,
-            goal_source: engine::report::GoalSource::OpenPlay,
-            side: Side::Away,
-        }))
-        .collect();
-
-    MatchReport {
-        home_goals,
-        away_goals,
-        home_stats: TeamStats::default(),
-        away_stats: TeamStats::default(),
-        events: vec![],
-        goals,
-        player_stats,
-        home_possession: 55.0,
-        total_minutes: 90,
-        home_penalties: None,
-        away_penalties: None,
-    }
 }
 
 #[test]
@@ -488,63 +227,62 @@ fn process_day_hires_replacement_for_long_vacant_ai_club() {
     assert!(!game.vacant_team_days.contains_key("team2"));
 }
 
-/// Creates a match report where all 22 players played the full 90 minutes.
-/// Use this for stamina depletion tests.
-fn full_squad_report(home_goals: u8, away_goals: u8) -> MatchReport {
-    let prefixes = ["t1_gk", "t2_gk"];
-    let mut player_stats: HashMap<String, PlayerMatchStats> = HashMap::new();
-    // Add GKs
-    for prefix in &prefixes {
-        player_stats.insert(
-            prefix.to_string(),
-            PlayerMatchStats {
-                minutes_played: 90,
-                ..Default::default()
-            },
-        );
-    }
-    // Add outfield players
-    for prefix in ["t1", "t2"] {
-        for i in 0..4 {
-            player_stats.insert(
-                format!("{}_def{}", prefix, i),
-                PlayerMatchStats {
-                    minutes_played: 90,
-                    ..Default::default()
-                },
-            );
-            player_stats.insert(
-                format!("{}_mid{}", prefix, i),
-                PlayerMatchStats {
-                    minutes_played: 90,
-                    ..Default::default()
-                },
-            );
-        }
-        for i in 0..2 {
-            player_stats.insert(
-                format!("{}_fwd{}", prefix, i),
-                PlayerMatchStats {
-                    minutes_played: 90,
-                    ..Default::default()
-                },
-            );
-        }
-    }
-    MatchReport {
-        home_goals,
-        away_goals,
-        home_stats: TeamStats::default(),
-        away_stats: TeamStats::default(),
-        events: vec![],
-        goals: vec![],
-        player_stats,
-        home_possession: 50.0,
-        total_minutes: 90,
-        home_penalties: None,
-        away_penalties: None,
-    }
+/// Given an AI club covered for two months by an interim and an unemployed manager of matching standing
+/// When a day is processed
+/// Then the unemployed manager takes the club and the interim leaves the active pool.
+#[test]
+fn process_day_replaces_a_long_serving_interim_from_the_unemployed_market() {
+    let mut game = make_game_without_match_today();
+    let reputation = game
+        .teams
+        .iter()
+        .find(|t| t.id == "team2")
+        .unwrap()
+        .reputation;
+    let mut stand_in = Manager::new(
+        "mgr_team2_assistant".to_string(),
+        "Stand".to_string(),
+        "In".to_string(),
+        "1975-01-01".to_string(),
+        "England".to_string(),
+    );
+    stand_in.interim = true;
+    stand_in.hire("team2".to_string());
+    stand_in.satisfaction = 80;
+    stand_in
+        .career_history
+        .push(domain::manager::ManagerCareerEntry::open(
+            "team2".to_string(),
+            "Rival FC".to_string(),
+            "2020-01-01".to_string(),
+        ));
+    game.teams
+        .iter_mut()
+        .find(|t| t.id == "team2")
+        .unwrap()
+        .manager_id = Some(stand_in.id.clone());
+    game.managers.push(stand_in);
+    let mut free = Manager::new(
+        "free-agent".to_string(),
+        "Free".to_string(),
+        "Agent".to_string(),
+        "1975-01-01".to_string(),
+        "England".to_string(),
+    );
+    free.reputation = reputation;
+    game.managers.push(free);
+
+    turn::process_day(&mut game);
+
+    let team2 = game.teams.iter().find(|t| t.id == "team2").unwrap();
+    assert_eq!(team2.manager_id.as_deref(), Some("free-agent"));
+    assert!(
+        game.retired_managers
+            .iter()
+            .any(|m| m.id == "mgr_team2_assistant")
+    );
 }
+
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -640,22 +378,25 @@ fn process_day_generates_news() {
 fn process_day_releases_players_with_expired_contracts() {
     let mut game = make_game_with_match();
     game.league.as_mut().unwrap().fixtures[0].date = "2025-06-20".to_string();
+    // The AI rival is sound and at its planning target, so it has no reason to
+    // sign the player this release puts on the market.
+    deepen_squad(&mut game, "team2", "t2");
 
     let player = game.players.iter_mut().find(|p| p.id == "t1_fwd0").unwrap();
-    player.contract_end = Some("2025-06-15".to_string());
-    player.wage = 12_000;
+    player.stage_contract_end(Some("2025-06-15".to_string()));
+    player.stage_wage(12_000);
     player.morale = 70;
 
     turn::process_day(&mut game);
 
     let released_player = game.players.iter().find(|p| p.id == "t1_fwd0").unwrap();
     assert_eq!(released_player.team_id, None);
-    assert_eq!(released_player.contract_end, None);
-    assert_eq!(released_player.wage, 0);
+    assert_eq!(released_player.contract_end(), None);
+    assert_eq!(released_player.wage(), 0);
     let message = game
         .messages
         .iter()
-        .find(|message| message.id == "contract_expired_t1_fwd0")
+        .find(|message| message.id == "contract_expired_t1_fwd0_2025-06-15_1")
         .expect("An inbox message should explain that the player left on a free");
     assert_eq!(
         message.subject_key.as_deref(),
@@ -718,48 +459,6 @@ fn simulate_other_matches_skips_fixture() {
         FixtureStatus::Scheduled,
         "Skipped fixture should remain scheduled"
     );
-}
-
-#[test]
-fn simulate_other_matches_settles_knockout_draws_with_shootout() {
-    // Regression: an AI-simulated knockout tie that ended level persisted with
-    // no shootout score, so advance_knockout_competition_round always advanced
-    // the home team. The full-engine sim path must resolve level knockout
-    // ties with a simulated shootout.
-    let mut saw_draw = false;
-    for _attempt in 0..200 {
-        let mut game = make_game_with_match();
-        {
-            let league = game.league.as_mut().unwrap();
-            league.fixtures[0].competition = FixtureCompetition::Cup;
-            league.knockout_rounds = vec![KnockoutRoundState {
-                id: "round-1".to_string(),
-                name: "Final".to_string(),
-                fixture_ids: vec!["fix1".to_string()],
-                bye_team_ids: Vec::new(),
-                completed: false,
-            }];
-        }
-        let today = game.clock.current_date.format("%Y-%m-%d").to_string();
-        turn::simulate_other_matches(&mut game, &today, None);
-
-        let result = game.league.as_ref().unwrap().fixtures[0]
-            .result
-            .as_ref()
-            .expect("fixture should have a result");
-        if result.home_goals == result.away_goals {
-            saw_draw = true;
-            let home_pens = result.home_penalties.expect("level knockout needs pens");
-            let away_pens = result.away_penalties.expect("level knockout needs pens");
-            assert_ne!(home_pens, away_pens, "shootout must have a winner");
-            break;
-        }
-        assert!(
-            result.home_penalties.is_none() && result.away_penalties.is_none(),
-            "decisive results must not carry a shootout"
-        );
-    }
-    assert!(saw_draw, "expected at least one drawn knockout in 200 sims");
 }
 
 #[test]
@@ -1673,177 +1372,11 @@ fn process_day_full_integration() {
     assert!(game.manager.fan_approval <= 100);
 }
 
-fn make_round_summary_game() -> Game {
-    let date = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-    let clock = GameClock::new(date);
-    let mut manager = Manager::new(
-        "mgr1".to_string(),
-        "Test".to_string(),
-        "Manager".to_string(),
-        "1980-01-01".to_string(),
-        "England".to_string(),
-    );
-    manager.hire("team1".to_string());
-
-    let team1 = make_team("team1", "Leaders FC");
-    let team2 = make_team("team2", "Underdogs FC");
-    let team3 = make_team("team3", "Chargers FC");
-    let team4 = make_team("team4", "City FC");
-
-    let mut players = make_squad("team1", "t1");
-    players.extend(make_squad("team2", "t2"));
-    players.extend(make_squad("team3", "t3"));
-    players.extend(make_squad("team4", "t4"));
-
-    let today = date.format("%Y-%m-%d").to_string();
-    let league = League {
-        id: "league1".to_string(),
-        name: "Test League".to_string(),
-        season: 1,
-        fixtures: vec![
-            Fixture {
-                id: "fix1".to_string(),
-                matchday: 7,
-                date: today.clone(),
-                home_team_id: "team1".to_string(),
-                away_team_id: "team2".to_string(),
-                competition: FixtureCompetition::League,
-                status: FixtureStatus::Completed,
-                result: Some(domain::league::MatchResult {
-                    home_goals: 0,
-                    away_goals: 1,
-                    home_scorers: vec![],
-                    away_scorers: vec![domain::league::GoalEvent {
-                        player_id: "t2_fwd0".to_string(),
-                        minute: 77,
-                    }],
-                    report: None,
-                    home_penalties: None,
-                    away_penalties: None,
-                }),
-                ..Default::default()
-            },
-            Fixture {
-                id: "fix2".to_string(),
-                matchday: 7,
-                date: today,
-                home_team_id: "team3".to_string(),
-                away_team_id: "team4".to_string(),
-                competition: FixtureCompetition::League,
-                status: FixtureStatus::Completed,
-                result: Some(domain::league::MatchResult {
-                    home_goals: 2,
-                    away_goals: 0,
-                    home_scorers: vec![
-                        domain::league::GoalEvent {
-                            player_id: "t3_fwd0".to_string(),
-                            minute: 20,
-                        },
-                        domain::league::GoalEvent {
-                            player_id: "t3_fwd0".to_string(),
-                            minute: 72,
-                        },
-                    ],
-                    away_scorers: vec![],
-                    report: None,
-                    home_penalties: None,
-                    away_penalties: None,
-                }),
-                ..Default::default()
-            },
-        ],
-        standings: vec![
-            standing_entry("team1", 11, 30, 21, 11),
-            standing_entry("team2", 11, 23, 21, 11),
-            standing_entry("team3", 11, 31, 18, 8),
-            standing_entry("team4", 11, 27, 19, 14),
-        ],
-        transfer_log: vec![],
-        transfer_rumours: vec![],
-        ..Default::default()
-    };
-
-    let mut game = Game::new(
-        clock,
-        manager,
-        vec![team1, team2, team3, team4],
-        players,
-        vec![],
-        vec![],
-    );
-    game.league = Some(league);
-
-    set_team_overall(&mut game, "team1", 90);
-    set_team_overall(&mut game, "team2", 50);
-    set_team_overall(&mut game, "team3", 74);
-    set_team_overall(&mut game, "team4", 72);
-
-    game.players
-        .iter_mut()
-        .for_each(|player| match player.id.as_str() {
-            "t1_fwd0" => player.stats.goals = 5,
-            "t2_fwd0" => player.stats.goals = 3,
-            "t3_fwd0" => player.stats.goals = 6,
-            _ => {}
-        });
-
-    game
-}
-
-fn standing_entry(
-    team_id: &str,
-    played: u32,
-    points: u32,
-    goals_for: u32,
-    goals_against: u32,
-) -> StandingEntry {
-    StandingEntry {
-        team_id: team_id.to_string(),
-        played,
-        won: 0,
-        drawn: 0,
-        lost: 0,
-        goals_for,
-        goals_against,
-        points,
-    }
-}
-
-fn set_team_overall(game: &mut Game, team_id: &str, overall: u8) {
-    game.players
-        .iter_mut()
-        .filter(|player| player.team_id.as_deref() == Some(team_id))
-        .for_each(|player| set_player_overall(player, overall));
-}
-
-fn set_player_overall(player: &mut Player, overall: u8) {
-    player.attributes.pace = overall;
-    player.attributes.stamina = overall;
-    player.attributes.strength = overall;
-    player.attributes.passing = overall;
-    player.attributes.shooting = overall;
-    player.attributes.tackling = overall;
-    player.attributes.dribbling = overall;
-    player.attributes.defending = overall;
-    player.attributes.positioning = overall;
-    player.attributes.vision = overall;
-    player.attributes.decisions = overall;
-}
-
-fn previous_round_standings() -> Vec<StandingEntry> {
-    vec![
-        standing_entry("team1", 10, 30, 30, 20),
-        standing_entry("team3", 10, 28, 29, 18),
-        standing_entry("team4", 10, 27, 19, 12),
-        standing_entry("team2", 10, 20, 22, 21),
-    ]
-}
-
 #[test]
 fn build_round_summary_collects_results_and_deltas() {
     let game = make_round_summary_game();
-    let summary = turn::build_round_summary(&game, 7, &previous_round_standings())
-        .expect("expected round summary");
+    let summary =
+        turn::build_round_summary(&game, &round_context(7)).expect("expected round summary");
 
     assert_eq!(summary.matchday, 7);
     assert!(summary.is_complete);
@@ -1881,8 +1414,8 @@ fn build_round_summary_collects_results_and_deltas() {
 #[test]
 fn build_round_summary_picks_biggest_overall_gap_upset() {
     let game = make_round_summary_game();
-    let summary = turn::build_round_summary(&game, 7, &previous_round_standings())
-        .expect("expected round summary");
+    let summary =
+        turn::build_round_summary(&game, &round_context(7)).expect("expected round summary");
 
     let upset = summary.notable_upset.expect("expected notable upset");
     assert_eq!(upset.fixture_id, "fix1");
@@ -1919,8 +1452,8 @@ fn build_round_summary_detects_a_penalty_decided_upset() {
         });
     }
 
-    let summary = turn::build_round_summary(&game, 7, &previous_round_standings())
-        .expect("expected round summary");
+    let summary =
+        turn::build_round_summary(&game, &round_context(7)).expect("expected round summary");
     let upset = summary
         .notable_upset
         .expect("a penalty-decided upset is reported");
@@ -1936,7 +1469,7 @@ fn build_round_summary_handles_incomplete_rounds() {
     league.fixtures[1].status = FixtureStatus::Scheduled;
     league.fixtures[1].result = None;
 
-    let summary = turn::build_round_summary(&game, 7, &previous_round_standings())
+    let summary = turn::build_round_summary(&game, &round_context(7))
         .expect("expected partial round summary");
 
     assert!(!summary.is_complete);
@@ -1953,7 +1486,7 @@ fn build_round_summary_returns_none_when_round_has_no_completed_matches() {
         fixture.result = None;
     });
 
-    let summary = turn::build_round_summary(&game, 7, &previous_round_standings());
+    let summary = turn::build_round_summary(&game, &round_context(7));
 
     assert!(summary.is_none());
 }
@@ -1968,7 +1501,7 @@ fn build_round_summary_ignores_non_competitive_matchday_zero_fixtures() {
         fixture.competition = FixtureCompetition::Friendly;
     });
 
-    let summary = turn::build_round_summary(&game, 0, &previous_round_standings());
+    let summary = turn::build_round_summary(&game, &round_context(0));
 
     assert!(summary.is_none());
 }
@@ -2001,4 +1534,46 @@ fn no_generator_dates_a_message_ahead_of_the_clock() {
              when it is sent, not at the event it is about."
         );
     }
+}
+
+fn read_mail_from(id: &str, date: &str) -> domain::message::InboxMessage {
+    let mut message = domain::message::InboxMessage::new(
+        id.into(),
+        "Subject".into(),
+        "Body".into(),
+        "Board".into(),
+        date.into(),
+    );
+    message.read = true;
+    message
+}
+
+/// Given read mail from long ago
+/// When the day processed is the 1st of the month
+/// Then it leaves the live inbox for the archive.
+#[test]
+fn the_first_of_the_month_archives_old_read_mail() {
+    let mut game = make_game_without_match_today();
+    game.clock.current_date = Utc.with_ymd_and_hms(2025, 7, 1, 12, 0, 0).unwrap();
+    game.messages.push(read_mail_from("ancient", "2024-01-01"));
+
+    turn::process_day(&mut game);
+
+    assert!(game.messages.iter().all(|m| m.id != "ancient"));
+    assert!(game.archived_messages.iter().any(|m| m.id == "ancient"));
+}
+
+/// Given the same old read mail
+/// When the day processed is not the 1st
+/// Then the live inbox is left alone.
+#[test]
+fn another_day_of_the_month_leaves_old_mail_in_the_inbox() {
+    let mut game = make_game_without_match_today();
+    game.clock.current_date = Utc.with_ymd_and_hms(2025, 7, 2, 12, 0, 0).unwrap();
+    game.messages.push(read_mail_from("ancient", "2024-01-01"));
+
+    turn::process_day(&mut game);
+
+    assert!(game.messages.iter().any(|m| m.id == "ancient"));
+    assert!(game.archived_messages.is_empty());
 }

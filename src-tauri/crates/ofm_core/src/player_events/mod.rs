@@ -8,6 +8,7 @@ pub use responses::{
 
 use crate::contracts::{contract_warning_stage, has_let_expire_intent};
 use crate::game::Game;
+use crate::morale::apply_morale_change;
 use domain::message::InboxMessage;
 use rand::RngExt;
 
@@ -45,8 +46,7 @@ pub fn generate_takeover_contract_review_message(game: &mut Game) {
             continue;
         }
 
-        let Some(stage) = contract_warning_stage(player.contract_end.as_deref(), current_date)
-        else {
+        let Some(stage) = contract_warning_stage(player.contract_end(), current_date) else {
             continue;
         };
 
@@ -104,8 +104,7 @@ pub fn generate_contract_concern_messages(game: &mut Game, apply_morale_pressure
             continue;
         }
 
-        let Some(stage) = contract_warning_stage(player.contract_end.as_deref(), current_date)
-        else {
+        let Some(stage) = contract_warning_stage(player.contract_end(), current_date) else {
             continue;
         };
 
@@ -116,7 +115,10 @@ pub fn generate_contract_concern_messages(game: &mut Game, apply_morale_pressure
         // The contract itself is in the key. Keyed on player and stage alone, a
         // renewal would inherit the old deal's stages from the ledger and the
         // player would never be warned about the new one.
-        let contract_end = player.contract_end.clone().unwrap_or_default();
+        let contract_end = player
+            .contract_end()
+            .map(str::to_string)
+            .unwrap_or_default();
         let msg_id = format!(
             "contract_concern_{}_{}_{}",
             player.id,
@@ -136,7 +138,7 @@ pub fn generate_contract_concern_messages(game: &mut Game, apply_morale_pressure
         // to be applied before the message was built, so a player who deleted
         // the message took the hit again every time it regenerated.
         if apply_morale_pressure {
-            player.morale = (player.morale as i16 - stage.morale_pressure()).clamp(5, 100) as u8;
+            player.morale = apply_morale_change(player.morale, -stage.morale_pressure());
         }
 
         let days_remaining = (end_date - current_date).num_days();
@@ -171,7 +173,7 @@ pub fn check_player_events(game: &mut Game) {
 
     let mut new_messages: Vec<InboxMessage> = Vec::new();
 
-    let mut rng = rand::rng();
+    let mut rng = game.rng_today("player-events");
 
     // Global daily cap: at most 2 player-initiated messages per day
     let today_message_count = game

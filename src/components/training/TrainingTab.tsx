@@ -1,3 +1,4 @@
+import { useSquadFitness } from "../../hooks/useSquadFitness";
 import { useState, type ReactNode } from "react";
 import {
   AlertTriangle,
@@ -16,10 +17,11 @@ import { useTranslation } from "react-i18next";
 
 import type { GameStateData } from "../../store/gameStore";
 import { useGameStore } from "../../store/gameStore";
-import { isSeniorSquadPlayer } from "../../lib/playerSquad";
+import { isFirstTeamSquadPlayer } from "../../lib/playerSquad";
 import { useFetchedSquad } from "../../hooks/useFetchedSquad";
+import { useTrainingFocusAttributes } from "../../hooks/useTrainingFocusAttributes";
 import { setTraining, setTrainingSchedule } from "../../services/trainingService";
-import { Card, CardBody, CardHeader, ProgressBar } from "../ui";
+import { Card, CardBody, CardHeader, ProgressBar, TONE_TEXT } from "../ui";
 import TrainingGroupsCard from "./TrainingGroupsCard";
 import TrainingSettingsPanel from "./TrainingSettingsPanel";
 import { getTrainingStaffAdvice } from "./trainingAdvice";
@@ -45,15 +47,6 @@ const TRAINING_FOCUS_ICONS: Record<string, ReactNode> = {
   Defending: <Shield className="w-6 h-6" />,
   Attacking: <Zap className="w-6 h-6" />,
   Recovery: <BedDouble className="w-6 h-6" />,
-};
-
-const TRAINING_FOCUS_ATTRS: Record<string, string[]> = {
-  Physical: ["pace", "stamina", "strength", "agility"],
-  Technical: ["passing", "shooting", "dribbling"],
-  Tactical: ["positioning", "vision", "decisions", "composure"],
-  Defending: ["tackling", "defending", "strength", "positioning"],
-  Attacking: ["shooting", "dribbling", "pace"],
-  Recovery: [],
 };
 
 const INTENSITY_IDS = ["Low", "Medium", "High"] as const;
@@ -91,49 +84,46 @@ function getWeekdayFromDate(dateStr: string): number {
   return (date.getUTCDay() + 6) % 7;
 }
 
-export default function TrainingTab({
-  gameState,
-  onGameUpdate,
-}: TrainingTabProps) {
+export default function TrainingTab({ gameState, onGameUpdate }: TrainingTabProps) {
   const { t } = useTranslation();
   const { sessionState } = useGameStore();
   const [isSaving, setIsSaving] = useState(false);
   const teamId = sessionState?.manager?.team_id ?? gameState?.manager?.team_id ?? null;
   const clockDate = sessionState?.clock.current_date ?? gameState?.clock.current_date ?? "";
-  const [fetchedSquad, setFetchedSquad] = useFetchedSquad(teamId, clockDate);
+  const [fetchedSquad, setFetchedSquad] = useFetchedSquad(
+    teamId,
+    clockDate,
+    sessionState ?? gameState,
+  );
+  const focusAttributes = useTrainingFocusAttributes();
+  const fitness = useSquadFitness(sessionState ?? gameState);
 
   const team = sessionState?.team ?? gameState?.teams.find((t) => t.id === teamId) ?? null;
 
   if (!team) {
-    return (
-      <p className="text-gray-500 dark:text-gray-400">{t("common.noTeam")}</p>
-    );
+    return <p className="text-gray-500 dark:text-gray-400">{t("common.noTeam")}</p>;
   }
 
   const currentFocus = team.training_focus || "Physical";
   const currentIntensity = team.training_intensity || "Medium";
   const currentSchedule = team.training_schedule || "Balanced";
 
-  const allSquadPlayers = fetchedSquad ?? gameState?.players.filter((p) => p.team_id === teamId) ?? [];
-  const roster = allSquadPlayers.filter(isSeniorSquadPlayer);
+  const allSquadPlayers =
+    fetchedSquad ?? gameState?.players.filter((p) => p.team_id === teamId) ?? [];
+  const roster = allSquadPlayers.filter(isFirstTeamSquadPlayer);
+  // Fitness is the backend's: injured players are not in the squad that can play.
   const avgCondition =
-    roster.length > 0
-      ? Math.round(
-        roster.reduce((sum, player) => sum + player.condition, 0) / roster.length,
-      )
-      : 0;
+    fitness?.average_condition != null ? Math.round(fitness.average_condition) : null;
+  const averageTone = fitness?.average_status?.tone;
   const avgMorale =
     roster.length > 0
-      ? Math.round(
-        roster.reduce((sum, player) => sum + player.morale, 0) / roster.length,
-      )
+      ? Math.round(roster.reduce((sum, player) => sum + player.morale, 0) / roster.length)
       : 0;
-  const exhaustedCount = roster.filter((player) => player.condition < 40).length;
-  const criticalCount = roster.filter((player) => player.condition < 25).length;
+  const exhaustedCount = fitness?.exhausted_count ?? 0;
+  const criticalCount = fitness?.critical_count ?? 0;
 
   const todayWeekday = getWeekdayFromDate(clockDate);
-  const trainingDays =
-    SCHEDULE_TRAINING_DAYS[currentSchedule] || SCHEDULE_TRAINING_DAYS.Balanced;
+  const trainingDays = SCHEDULE_TRAINING_DAYS[currentSchedule] || SCHEDULE_TRAINING_DAYS.Balanced;
   const isTodayTraining = trainingDays.includes(todayWeekday);
 
   const handleSetTraining = async (focus: string, intensity: string) => {
@@ -160,26 +150,30 @@ export default function TrainingTab({
     }
   };
 
-  const activeFocusAttrs = TRAINING_FOCUS_ATTRS[currentFocus] || [];
-  const staffAdvice = getTrainingStaffAdvice(t, {
-    criticalCount,
-    avgCondition,
-    exhaustedCount,
-    currentSchedule,
-    currentFocus,
-  });
+  // No advice until the backend has said how fit the squad is: an unanswered 0% is not "tired".
+  const staffAdvice =
+    avgCondition !== null
+      ? getTrainingStaffAdvice(t, {
+          criticalCount,
+          avgCondition,
+          exhaustedCount,
+          currentSchedule,
+          currentFocus,
+        })
+      : null;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
       <div className="lg:col-span-2 flex flex-col gap-5">
         {staffAdvice ? (
           <div
-            className={`flex items-start gap-3 p-4 rounded-xl border-2 ${staffAdvice.level === "critical"
+            className={`flex items-start gap-3 p-4 rounded-xl border-2 ${
+              staffAdvice.level === "critical"
                 ? "bg-red-50 dark:bg-red-500/10 border-red-300 dark:border-red-500/40"
                 : staffAdvice.level === "warn"
                   ? "bg-amber-50 dark:bg-amber-500/10 border-amber-300 dark:border-amber-500/40"
                   : "bg-blue-50 dark:bg-blue-500/10 border-blue-300 dark:border-blue-500/40"
-              }`}
+            }`}
           >
             {staffAdvice.level === "critical" ? (
               <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
@@ -190,12 +184,13 @@ export default function TrainingTab({
             )}
             <div>
               <p
-                className={`text-xs font-heading font-bold uppercase tracking-wider mb-0.5 ${staffAdvice.level === "critical"
+                className={`text-xs font-heading font-bold uppercase tracking-wider mb-0.5 ${
+                  staffAdvice.level === "critical"
                     ? "text-red-600 dark:text-red-400"
                     : staffAdvice.level === "warn"
                       ? "text-amber-600 dark:text-amber-400"
                       : "text-blue-600 dark:text-blue-400"
-                  }`}
+                }`}
               >
                 {staffAdvice.level === "critical"
                   ? t("training.staffAlert")
@@ -203,9 +198,7 @@ export default function TrainingTab({
                     ? t("training.staffWarning")
                     : t("training.staffSuggestion")}
               </p>
-              <p className="text-sm text-gray-700 dark:text-gray-300">
-                {staffAdvice.message}
-              </p>
+              <p className="text-sm text-gray-700 dark:text-gray-300">{staffAdvice.message}</p>
             </div>
           </div>
         ) : null}
@@ -217,7 +210,6 @@ export default function TrainingTab({
           isSaving={isSaving}
           todayWeekday={todayWeekday}
           isTodayTraining={isTodayTraining}
-          activeFocusAttrs={activeFocusAttrs}
           onSetTraining={handleSetTraining}
           onSetSchedule={handleSetSchedule}
           scheduleIds={SCHEDULE_IDS}
@@ -226,7 +218,7 @@ export default function TrainingTab({
           dayKeys={DAY_KEYS}
           trainingFocusIds={TRAINING_FOCUS_IDS}
           trainingFocusIcons={TRAINING_FOCUS_ICONS}
-          trainingFocusAttrs={TRAINING_FOCUS_ATTRS}
+          focusAttributes={focusAttributes}
           intensityIds={INTENSITY_IDS}
           intensityColors={INTENSITY_COLORS}
         />
@@ -262,10 +254,18 @@ export default function TrainingTab({
                     {t("training.avgCondition")}
                   </span>
                   <span className="font-heading font-bold text-gray-800 dark:text-gray-100">
-                    {avgCondition}%
+                    {avgCondition !== null ? `${avgCondition}%` : "—"}
                   </span>
                 </div>
-                <ProgressBar value={avgCondition} variant="auto" size="md" />
+                {/* The backend's band for the average; neutral until it answers. */}
+                <ProgressBar
+                  value={avgCondition ?? 0}
+                  variant={averageTone ? undefined : "muted"}
+                  tone={averageTone}
+                  size="md"
+                  // No average, no progress bar: "0%" would be read out for a number that doesn't exist.
+                  label={avgCondition !== null ? t("training.avgCondition") : undefined}
+                />
               </div>
               <div>
                 <div className="flex justify-between text-sm mb-1">
@@ -301,31 +301,45 @@ export default function TrainingTab({
         <Card>
           <CardHeader>{t("training.playerFitness")}</CardHeader>
           <CardBody className="p-0 max-h-64 overflow-y-auto">
-            <div className="divide-y divide-gray-100 dark:divide-navy-600">
+            <ul className="divide-y divide-gray-100 dark:divide-navy-600">
               {[...roster]
                 .sort((left, right) => left.condition - right.condition)
-                .map((player) => (
-                  <div key={player.id} className="flex items-center px-4 py-2 gap-3">
-                    <span
-                      className={`text-sm font-medium flex-1 truncate ${player.condition < 25
-                          ? "text-red-600 dark:text-red-400"
-                          : player.condition < 40
-                            ? "text-amber-600 dark:text-amber-400"
-                            : "text-gray-800 dark:text-gray-200"
-                        }`}
+                .map((player) => {
+                  // The band, its word and its tone are the backend's; until it answers the bar
+                  // stays neutral rather than guessing from the number.
+                  const status = fitness?.statuses[player.id];
+                  const nameId = `fitness-name-${player.id}`;
+                  return (
+                    <li
+                      key={player.id}
+                      aria-labelledby={nameId}
+                      className="flex items-center px-4 py-2 gap-3"
                     >
-                      {player.match_name}{player.jersey_number != null ? ` (#${player.jersey_number})` : ""}
-                    </span>
-                    <ProgressBar
-                      value={player.condition}
-                      variant="auto"
-                      size="sm"
-                      showLabel
-                      className="w-24"
-                    />
-                  </div>
-                ))}
-            </div>
+                      <span
+                        id={nameId}
+                        className="text-sm font-medium flex-1 truncate text-gray-800 dark:text-gray-200"
+                      >
+                        {player.match_name}
+                        {player.jersey_number != null ? ` (#${player.jersey_number})` : ""}
+                      </span>
+                      {status ? (
+                        <span className={`text-caption font-semibold ${TONE_TEXT[status.tone]}`}>
+                          {t(status.label_key)}
+                        </span>
+                      ) : null}
+                      <ProgressBar
+                        value={player.condition}
+                        variant={status ? undefined : "muted"}
+                        tone={status?.tone}
+                        size="sm"
+                        showLabel
+                        label={t("common.condition")}
+                        className="w-24"
+                      />
+                    </li>
+                  );
+                })}
+            </ul>
           </CardBody>
         </Card>
       </div>

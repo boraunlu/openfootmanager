@@ -9,12 +9,7 @@ import {
   resolveNewsArticle,
   resolveBoardObjective,
 } from "./backendI18n";
-import type {
-  MessageData,
-  MessageAction,
-  NewsArticle,
-  BoardObjective,
-} from "../store/gameStore";
+import type { MessageData, MessageAction, NewsArticle, BoardObjective } from "../store/gameStore";
 
 const originalSettings = useSettingsStore.getState().settings;
 const originalCurrency = useSettingsStore.getState().currency;
@@ -46,22 +41,30 @@ afterEach(() => {
 
 beforeAll(async () => {
   await i18nReady;
-  i18n.addResourceBundle("en", "translation", {
-    "test.subject": "Resolved Subject",
-    "test.body": "Hello {{name}}, welcome!",
-    "test.sender": "The Board",
-    "test.senderRole": "Board of Directors",
-    "test.actionLabel": "Accept Offer",
-    "test.optionLabel": "Encourage them",
-    "test.optionDescription": "Show empathy and keep them motivated.",
-    "test.headline": "Breaking: {{team}} wins!",
-    "test.newsBody": "Match report for {{team}}.",
-    "test.source": "OFM Sports",
-    "boardObjectives.objective.LeaguePosition": "Finish in the top {{target}}",
-    "boardObjectives.objective.Wins": "Win at least {{target}} matches",
-    "boardObjectives.objective.GoalsScored": "Score at least {{target}} goals",
-    "boardObjectives.objective.FinancialStability": "Keep wage spending at or below {{target}}% of budget",
-  }, true, true);
+  i18n.addResourceBundle(
+    "en",
+    "translation",
+    {
+      "test.subject": "Resolved Subject",
+      "test.body": "Hello {{name}}, welcome!",
+      "test.bidBody": "Offer: {{fee}}",
+      "test.sender": "The Board",
+      "test.senderRole": "Board of Directors",
+      "test.actionLabel": "Accept Offer",
+      "test.optionLabel": "Encourage them",
+      "test.optionDescription": "Show empathy and keep them motivated.",
+      "test.headline": "Breaking: {{team}} wins!",
+      "test.newsBody": "Match report for {{team}}.",
+      "test.source": "OFM Sports",
+      "boardObjectives.objective.LeaguePosition": "Finish in the top {{target}}",
+      "boardObjectives.objective.Wins": "Win at least {{target}} matches",
+      "boardObjectives.objective.GoalsScored": "Score at least {{target}} goals",
+      "boardObjectives.objective.FinancialStability":
+        "Keep wage spending at or below {{target}}% of budget",
+    },
+    true,
+    true,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -105,9 +108,7 @@ const makeNewsArticle = (overrides: Partial<NewsArticle> = {}): NewsArticle => (
   ...overrides,
 });
 
-const makeBoardObjective = (
-  overrides: Partial<BoardObjective> = {},
-): BoardObjective => ({
+const makeBoardObjective = (overrides: Partial<BoardObjective> = {}): BoardObjective => ({
   id: "obj_1",
   description: "raw objective",
   target: 4,
@@ -157,44 +158,52 @@ describe("resolveAction", () => {
   });
 
   it("resolves explicit random-event option keys with message interpolation params", () => {
-    i18n.addResourceBundle("en", "translation", {
-      be: {
-        msg: {
-          sponsor: {
-            options: {
-              accept: {
-                label: "Accept the deal",
-                description: "Receive {{amount}} in sponsorship income.",
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        be: {
+          msg: {
+            sponsor: {
+              options: {
+                accept: {
+                  label: "Accept the deal",
+                  description: "Receive {{amount}} in sponsorship income.",
+                },
               },
             },
           },
         },
       },
-    }, true, true);
+      true,
+      true,
+    );
 
-    const result = resolveMessage(makeMessage({
-      id: "sponsor_2026-08-01",
-      i18n_params: { amount: "250000" },
-      actions: [
-        makeAction({
-          id: "respond",
-          label: "Respond",
-          action_type: {
-            ChooseOption: {
-              options: [
-                {
-                  id: "accept",
-                  label: "fallback option",
-                  description: "fallback description",
-                  label_key: "be.msg.sponsor.options.accept.label",
-                  description_key: "be.msg.sponsor.options.accept.description",
-                },
-              ],
+    const result = resolveMessage(
+      makeMessage({
+        id: "sponsor_2026-08-01",
+        i18n_params: { amount: "250000" },
+        actions: [
+          makeAction({
+            id: "respond",
+            label: "Respond",
+            action_type: {
+              ChooseOption: {
+                options: [
+                  {
+                    id: "accept",
+                    label: "fallback option",
+                    description: "fallback description",
+                    label_key: "be.msg.sponsor.options.accept.label",
+                    description_key: "be.msg.sponsor.options.accept.description",
+                  },
+                ],
+              },
             },
-          },
-        }),
-      ],
-    }));
+          }),
+        ],
+      }),
+    );
 
     const actionType = result.actions[0].action_type;
 
@@ -204,7 +213,7 @@ describe("resolveAction", () => {
 
     expect(actionType.ChooseOption.options[0].label).toBe("Accept the deal");
     expect(actionType.ChooseOption.options[0].description).toBe(
-      "Receive €250,000 in sponsorship income.",
+      "Receive €250K in sponsorship income.",
     );
   });
 
@@ -214,44 +223,52 @@ describe("resolveAction", () => {
       currency: { code: "GBP", symbol: "£", exchange_rate: 0.86 },
     });
 
-    i18n.addResourceBundle("en", "translation", {
-      be: {
-        msg: {
-          sponsor: {
-            options: {
-              accept: {
-                label: "Accept the deal",
-                description: "Receive {{amount}} in sponsorship income.",
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        be: {
+          msg: {
+            sponsor: {
+              options: {
+                accept: {
+                  label: "Accept the deal",
+                  description: "Receive {{amount}} in sponsorship income.",
+                },
               },
             },
           },
         },
       },
-    }, true, true);
+      true,
+      true,
+    );
 
-    const result = resolveMessage(makeMessage({
-      id: "sponsor_2026-08-01",
-      i18n_params: { amount: "250000" },
-      actions: [
-        makeAction({
-          id: "respond",
-          label: "Respond",
-          action_type: {
-            ChooseOption: {
-              options: [
-                {
-                  id: "accept",
-                  label: "fallback option",
-                  description: "fallback description",
-                  label_key: "be.msg.sponsor.options.accept.label",
-                  description_key: "be.msg.sponsor.options.accept.description",
-                },
-              ],
+    const result = resolveMessage(
+      makeMessage({
+        id: "sponsor_2026-08-01",
+        i18n_params: { amount: "250000" },
+        actions: [
+          makeAction({
+            id: "respond",
+            label: "Respond",
+            action_type: {
+              ChooseOption: {
+                options: [
+                  {
+                    id: "accept",
+                    label: "fallback option",
+                    description: "fallback description",
+                    label_key: "be.msg.sponsor.options.accept.label",
+                    description_key: "be.msg.sponsor.options.accept.description",
+                  },
+                ],
+              },
             },
-          },
-        }),
-      ],
-    }));
+          }),
+        ],
+      }),
+    );
 
     const actionType = result.actions[0].action_type;
 
@@ -260,7 +277,7 @@ describe("resolveAction", () => {
     }
 
     expect(actionType.ChooseOption.options[0].description).toBe(
-      "Receive £215,000 in sponsorship income.",
+      "Receive £215K in sponsorship income.",
     );
   });
 
@@ -272,24 +289,32 @@ describe("resolveAction", () => {
       settings: { ...previousSettings, language: "de" },
     });
 
-    i18n.addResourceBundle("de", "translation", {
-      "test.compactActionLabel": "Akzeptiere {{amount}}",
-    }, true, true);
+    i18n.addResourceBundle(
+      "de",
+      "translation",
+      {
+        "test.compactActionLabel": "Akzeptiere {{amount}}",
+      },
+      true,
+      true,
+    );
 
     try {
-      const result = resolveMessage(makeMessage({
-        id: "compact_money_message",
-        i18n_params: { amount: "€1.8M" },
-        actions: [
-          makeAction({
-            id: "accept",
-            label: "fallback option",
-            label_key: "test.compactActionLabel",
-          }),
-        ],
-      }));
+      const result = resolveMessage(
+        makeMessage({
+          id: "compact_money_message",
+          i18n_params: { amount: "€1.8M" },
+          actions: [
+            makeAction({
+              id: "accept",
+              label: "fallback option",
+              label_key: "test.compactActionLabel",
+            }),
+          ],
+        }),
+      );
 
-      expect(result.actions[0].label).toBe("Akzeptiere €1,8M");
+      expect(result.actions[0].label).toBe("Akzeptiere 1,8\u00a0Mio.\u00a0€");
     } finally {
       useSettingsStore.setState({ settings: previousSettings });
       await i18n.changeLanguage(previousLanguage);
@@ -309,23 +334,29 @@ describe("resolveAction", () => {
   });
 
   it("infers player-event action and option keys for legacy saved messages", () => {
-    i18n.addResourceBundle("en", "translation", {
-      be: {
-        msg: {
-          playerEvent: {
-            respond: "Custom Respond",
-            options: {
-              happyPlayer: {
-                praiseBack: {
-                  label: "Custom Praise Back",
-                  description: "Custom praise description.",
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        be: {
+          msg: {
+            playerEvent: {
+              respond: "Custom Respond",
+              options: {
+                happyPlayer: {
+                  praiseBack: {
+                    label: "Custom Praise Back",
+                    description: "Custom praise description.",
+                  },
                 },
               },
             },
           },
         },
       },
-    }, true, true);
+      true,
+      true,
+    );
 
     const action = makeAction({
       id: "respond",
@@ -351,7 +382,9 @@ describe("resolveAction", () => {
 
     expect(result.label).toBe("Custom Respond");
     expect(result.action_type.ChooseOption.options[0].label).toBe("Custom Praise Back");
-    expect(result.action_type.ChooseOption.options[0].description).toBe("Custom praise description.");
+    expect(result.action_type.ChooseOption.options[0].description).toBe(
+      "Custom praise description.",
+    );
   });
 });
 
@@ -360,12 +393,73 @@ describe("resolveAction", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveMessage", () => {
+  // Given a failed registration notice with the exact agreed fee, when resolved in the selected currency,
+  // then the fee is converted without compact rounding and the registration day is localized.
+  it("renders an exact fee and a localized registration day", () => {
+    useSettingsStore.setState({
+      settings: { ...useSettingsStore.getState().settings, currency: "GBP" },
+      currency: { code: "GBP", symbol: "£", exchange_rate: 0.86 },
+    });
+
+    const result = resolveMessage(
+      makeMessage({
+        subject_key: "be.msg.transferRegistrationFailed.subject",
+        body_key: "be.msg.transferRegistrationFailed.InsufficientFunds",
+        i18n_params: {
+          player: "Golden Boot",
+          buyer: "Alpha FC",
+          fee: "800001",
+          start: "2026-07-02",
+        },
+      }),
+    );
+
+    expect(result.subject).toBe("Transfer registration failed: Golden Boot");
+    expect(result.body).toContain("Golden Boot to Alpha FC for £688,001");
+    expect(result.body).toContain("July 2, 2026");
+    expect(result.body).not.toContain("2026-07-02");
+    expect(result.body).toContain("No transfer fee was paid.");
+    expect(result.body).not.toContain("800001");
+  });
+
+  // Given a failed registration notice, when rendered in German, then its date follows the same locale as its text.
+  it("localizes the failed registration day in German", async () => {
+    const previousLanguage = i18n.language;
+    await i18n.changeLanguage("de");
+    useSettingsStore.setState({
+      settings: { ...useSettingsStore.getState().settings, language: "de" },
+    });
+    try {
+      const result = resolveMessage(
+        makeMessage({
+          subject_key: "be.msg.transferRegistrationFailed.subject",
+          body_key: "be.msg.transferRegistrationFailed.InsufficientFunds",
+          i18n_params: {
+            player: "Golden Boot",
+            buyer: "Alpha FC",
+            fee: "800001",
+            start: "2026-07-02",
+          },
+        }),
+      );
+      expect(result.body).toContain("2. Juli 2026");
+      expect(result.body).toContain("800.001\u00a0€");
+      expect(result.body).not.toContain("2026-07-02");
+    } finally {
+      await i18n.changeLanguage(previousLanguage);
+    }
+  });
+
   it("resolves all translatable fields when keys exist", () => {
     const msg = makeMessage({
-      subject: "raw", subject_key: "test.subject",
-      body: "raw", body_key: "test.body",
-      sender: "raw", sender_key: "test.sender",
-      sender_role: "raw", sender_role_key: "test.senderRole",
+      subject: "raw",
+      subject_key: "test.subject",
+      body: "raw",
+      body_key: "test.body",
+      sender: "raw",
+      sender_key: "test.sender",
+      sender_role: "raw",
+      sender_role_key: "test.senderRole",
       i18n_params: { name: "Coach" },
       actions: [makeAction({ label: "raw", label_key: "test.actionLabel" })],
     });
@@ -399,27 +493,22 @@ describe("resolveMessage", () => {
       const msg = makeMessage({
         id: "delegated_renewals_2026-07-01_0",
         subject: "Assistant Report — Contract Renewals",
-        body:
-          "Boss, I went through our renewal list at Lisbon Sporting. 4 completed, 2 still pending, 1 failed.\n\nCompleted: Claes agreed to 1 year(s) on €5000/wk.\nStill difficult: Vieira — Their camp want around €25000/wk for 3 years, which is beyond the delegation limits.\nFailed: Fernandes — You told me not to reopen contract talks yet.",
+        body: "Boss, I went through our renewal list at Lisbon Sporting. 4 completed, 2 still pending, 1 failed.\n\nCompleted: Claes agreed to 1 year(s) on €5000/wk.\nStill difficult: Vieira — Their camp want around €25000/wk for 3 years, which is beyond the delegation limits.\nFailed: Fernandes — You told me not to reopen contract talks yet.",
         sender: "Assistant Manager",
         sender_role: "Assistant Manager",
       });
 
       const result = resolveMessage(msg);
 
-      expect(result.subject).toBe(
-        "Relatório do assistente — Renovações contratuais",
-      );
+      expect(result.subject).toBe("Relatório do assistente — Renovações contratuais");
       expect(result.sender).toBe("Auxiliar Técnico");
       expect(result.sender_role).toBe("Auxiliar Técnico");
       expect(result.body).toContain(
         "Chefe, revisei nossa lista de renovações no Lisbon Sporting. 4 concluídas, 2 ainda pendentes e 1 falhas.",
       );
+      expect(result.body).toContain("Concluída: Claes aceitou 1 ano(s) por €5K/semana.");
       expect(result.body).toContain(
-        "Concluída: Claes aceitou 1 ano(s) por €5,000/semana.",
-      );
-      expect(result.body).toContain(
-        "Continua difícil: Vieira — O estafe deles quer cerca de €25,000/semana por 3 anos, acima dos limites da delegação.",
+        "Continua difícil: Vieira — O estafe deles quer cerca de €25K/semana por 3 anos, acima dos limites da delegação.",
       );
       expect(result.body).toContain(
         "Falhou: Fernandes — Você me disse para ainda não reabrir as conversas contratuais.",
@@ -437,8 +526,7 @@ describe("resolveMessage", () => {
       const msg = makeMessage({
         id: "contract_review_takeover_team-1",
         subject: "Assistant Manager - Contract Review",
-        body:
-          "Your assistant has reviewed the squad contracts after your arrival. 2 player(s) are due to come up for renewal this season, but none require an immediate decision today.\n\nStart mapping out who you want to keep so the situation stays under control.",
+        body: "Your assistant has reviewed the squad contracts after your arrival. 2 player(s) are due to come up for renewal this season, but none require an immediate decision today.\n\nStart mapping out who you want to keep so the situation stays under control.",
         sender: "Assistant Manager",
         sender_role: "Assistant Manager",
         actions: [
@@ -516,9 +604,12 @@ describe("resolveMessage", () => {
 describe("resolveNewsArticle", () => {
   it("resolves all translatable fields with params", () => {
     const article = makeNewsArticle({
-      headline: "raw", headline_key: "test.headline",
-      body: "raw", body_key: "test.newsBody",
-      source: "raw", source_key: "test.source",
+      headline: "raw",
+      headline_key: "test.headline",
+      body: "raw",
+      body_key: "test.newsBody",
+      source: "raw",
+      source_key: "test.source",
       i18n_params: { team: "Test FC" },
     });
     const result = resolveNewsArticle(article);
@@ -627,7 +718,7 @@ describe("resolveNewsArticle", () => {
 
       const result = resolveNewsArticle(article);
 
-      expect(result.body).toContain("Adam Smith: Alpha FC -> Beta FC (£1.5M)");
+      expect(result.body).toContain("Adam Smith: Alpha FC -> Beta FC (£1.55M)");
     } finally {
       await i18n.changeLanguage(previousLanguage);
     }
@@ -667,6 +758,82 @@ describe("resolveNewsArticle", () => {
       expect(result.body).toContain("No amistoso, Alpha FC 2 - 1 Beta FC.");
       expect(result.body).toContain("Gols: Alice (10', Alpha FC)");
       expect(result.source).toBe("Gazeta Esportiva");
+    } finally {
+      await i18n.changeLanguage(previousLanguage);
+    }
+  });
+
+  // Given a cup-tie report with one scorer, when it is resolved in German,
+  // then it names its competition and lists the scorer instead of ending at the score.
+  it("writes the scorers into a competition match report", async () => {
+    const previousLanguage = i18n.language;
+    await i18n.changeLanguage("de");
+
+    try {
+      const article = makeNewsArticle({
+        headline: "",
+        headline_key: "be.news.matchReport.reportCompetition.title",
+        body: "",
+        body_key: "be.news.matchReport.reportCompetition.body",
+        source: "",
+        source_key: "be.source.sportsGazette",
+        i18n_params: {
+          home: "Alpha FC",
+          away: "Beta FC",
+          homeGoals: "2",
+          awayGoals: "1",
+          competition: "Landespokal",
+          scorers: "",
+          scorersSection: "",
+          scorersData: JSON.stringify([{ player: "Alice", minute: 10, team: "Alpha FC" }]),
+        },
+      });
+
+      const result = resolveNewsArticle(article);
+
+      expect(result.headline).toBe("Alpha FC 2 - 1 Beta FC: Spielbericht (Landespokal)");
+      expect(result.body).toContain("Landespokal: Die Partie endete Alpha FC 2 - 1 Beta FC.");
+      expect(result.body).toContain("Tore: Alice (10. Min., Alpha FC)");
+    } finally {
+      await i18n.changeLanguage(previousLanguage);
+    }
+  });
+
+  // Given a generated national cup, whose stored name is the English template "Germany Cup",
+  // when its report is resolved in German,
+  // then the competition is named the way every other screen names it: from its key.
+  it("translates a generated competition's name in its match report", async () => {
+    const previousLanguage = i18n.language;
+    await i18n.changeLanguage("de");
+
+    try {
+      const article = makeNewsArticle({
+        headline: "",
+        headline_key: "be.news.matchReport.reportCompetition.title",
+        body: "",
+        body_key: "be.news.matchReport.reportCompetition.body",
+        source: "",
+        source_key: "be.source.sportsGazette",
+        i18n_params: {
+          home: "Alpha FC",
+          away: "Beta FC",
+          homeGoals: "1",
+          awayGoals: "0",
+          competition: "Germany Cup",
+          competitionKey: "tournaments.competitions.nationalCup",
+          competitionCountry: "DE",
+          competitionSeason: "2026",
+          scorers: "",
+          scorersSection: "",
+          scorersData: "[]",
+        },
+      });
+
+      const result = resolveNewsArticle(article);
+
+      expect(result.headline).toBe("Alpha FC 1 - 0 Beta FC: Spielbericht (Deutschland Pokal)");
+      expect(result.body).toContain("Deutschland Pokal: Die Partie endete");
+      expect(result.body).not.toContain("Germany Cup");
     } finally {
       await i18n.changeLanguage(previousLanguage);
     }
@@ -722,24 +889,24 @@ describe("resolveNewsArticle", () => {
 
     try {
       const article = makeNewsArticle({
-        headline: '',
-        headline_key: 'be.news.pressConference.headlinePressConf',
-        body: '',
-        body_key: 'be.news.pressConference.bodyMultiple',
-        source: '',
-        source_key: 'be.source.sportsDaily',
+        headline: "",
+        headline_key: "be.news.pressConference.headlinePressConf",
+        body: "",
+        body_key: "be.news.pressConference.bodyMultiple",
+        source: "",
+        source_key: "be.source.sportsDaily",
         i18n_params: {
-          team: 'Madrid Real',
-          result: 'Madrid Real 7 - 1 Rome Gladiators',
+          team: "Madrid Real",
+          result: "Madrid Real 7 - 1 Rome Gladiators",
           quotesData: JSON.stringify([
             {
-              key: 'match.press.result.responses.win.humble.text',
-              fallback: 'The players worked hard. We prepared well and executed the game plan.',
+              key: "match.press.result.responses.win.humble.text",
+              fallback: "The players worked hard. We prepared well and executed the game plan.",
               params: {},
             },
             {
-              key: 'match.press.ahead.responses.focused.text',
-              fallback: 'First recovery, then preparation. We go one game at a time.',
+              key: "match.press.ahead.responses.focused.text",
+              fallback: "First recovery, then preparation. We go one game at a time.",
               params: {},
             },
           ]),
@@ -751,10 +918,16 @@ describe("resolveNewsArticle", () => {
       expect(result.headline).toBe(
         'Coletiva de Imprensa: "Os jogadores trabalharam duro. Nos preparamos bem e executamos o plano de jogo." — técnico do Madrid Real',
       );
-      expect(result.body).toContain('Após o resultado Madrid Real 7 - 1 Rome Gladiators, o técnico do Madrid Real falou com a imprensa.');
-      expect(result.body).toContain('• "Os jogadores trabalharam duro. Nos preparamos bem e executamos o plano de jogo."');
-      expect(result.body).toContain('• "Primeiro recuperação, depois preparação. Vamos jogo a jogo."');
-      expect(result.source).toBe('Diário Esportivo');
+      expect(result.body).toContain(
+        "Após o resultado Madrid Real 7 - 1 Rome Gladiators, o técnico do Madrid Real falou com a imprensa.",
+      );
+      expect(result.body).toContain(
+        '• "Os jogadores trabalharam duro. Nos preparamos bem e executamos o plano de jogo."',
+      );
+      expect(result.body).toContain(
+        '• "Primeiro recuperação, depois preparação. Vamos jogo a jogo."',
+      );
+      expect(result.source).toBe("Diário Esportivo");
     } finally {
       await i18n.changeLanguage(previousLanguage);
     }
@@ -790,7 +963,9 @@ describe("resolveNewsArticle", () => {
       const result = resolveNewsArticle(article);
 
       expect(result.headline).toBe("Atualização da Classificação — Rodada 4");
-      expect(result.body).toContain("Após a Rodada 4, o Alpha FC está no topo da tabela da Primeira Divisão.");
+      expect(result.body).toContain(
+        "Após a Rodada 4, o Alpha FC está no topo da tabela da Primeira Divisão.",
+      );
       expect(result.body).toContain("1. Alpha FC — 12 pts (SG: +5)");
       expect(result.source).toBe("Notícias da Liga");
     } finally {
@@ -876,7 +1051,9 @@ describe("resolveNewsArticle", () => {
       const result = resolveNewsArticle(article);
 
       expect(result.headline).toBe("Resumo da pré-temporada — Semana de 2025-08-11");
-      expect(result.body).toContain("2 amistoso(s) foram disputados pela divisão nesta semana, produzindo 3 gol(s).");
+      expect(result.body).toContain(
+        "2 amistoso(s) foram disputados pela divisão nesta semana, produzindo 3 gol(s).",
+      );
       expect(result.body).toContain("Alpha FC 2 - 1 Beta FC");
       expect(result.body).toContain("Gamma FC 0 - 0 Delta FC");
       expect(result.body).toContain("Alpha FC e Gamma FC seguem invictos na pré-temporada.");
@@ -907,7 +1084,9 @@ describe("resolveNewsArticle", () => {
 
       const result = resolveNewsArticle(article);
 
-      expect(result.body).toContain("Alpha FC, Gamma FC e Delta FC seguem invictos na pré-temporada.");
+      expect(result.body).toContain(
+        "Alpha FC, Gamma FC e Delta FC seguem invictos na pré-temporada.",
+      );
     } finally {
       await i18n.changeLanguage(previousLanguage);
     }
@@ -948,10 +1127,29 @@ describe("resolveBoardObjective", () => {
 });
 
 describe("resolveBackendText", () => {
+  // Given the set-aside-data notice, whose params name the frontend's own labels by key
+  // When its body is resolved
+  // Then it says where the bug report is in the player's words, as the sidebar and Settings do
+  it("names the bug report by the labels the screens show", () => {
+    const body = resolveBackendText("be.msg.savedDataSetAside.body", "fallback", {
+      settings: "dashboard.settings",
+      reportBug: "settings.reportBug",
+    });
+
+    expect(body).toContain(`${i18n.t("dashboard.settings")} → ${i18n.t("settings.reportBug")}`);
+    expect(body).not.toContain("dashboard.settings");
+  });
+
   it("resolves backend effect keys with params", () => {
-    i18n.addResourceBundle("en", "translation", {
-      "test.effect": "Morale {{delta}}",
-    }, true, true);
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        "test.effect": "Morale {{delta}}",
+      },
+      true,
+      true,
+    );
 
     const result = resolveBackendText("test.effect", "fallback", { delta: "+3" });
 
@@ -959,14 +1157,18 @@ describe("resolveBackendText", () => {
   });
 
   it("resolves backend text keys with encoded params", () => {
-    i18n.addResourceBundle("en", "translation", {
-      "be.msg.world.exportedDescription": "World with {{teamCount}} teams exported from saved game",
-    }, true, true);
-
-    const result = resolveBackendText(
-      "be.msg.world.exportedDescription?teamCount=18",
-      "fallback",
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        "be.msg.world.exportedDescription":
+          "World with {{teamCount}} teams exported from saved game",
+      },
+      true,
+      true,
     );
+
+    const result = resolveBackendText("be.msg.world.exportedDescription?teamCount=18", "fallback");
 
     expect(result).toBe("World with 18 teams exported from saved game");
   });
@@ -989,9 +1191,15 @@ describe("resolveBackendText", () => {
   // The backend sends an ISO day precisely so the month name is not baked in
   // English; we render it in the player's locale.
   it("formats an ISO `start` param in the active locale", () => {
-    i18n.addResourceBundle("en", "translation", {
-      "test.kickoff": "Kicks off on {{start}}",
-    }, true, true);
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        "test.kickoff": "Kicks off on {{start}}",
+      },
+      true,
+      true,
+    );
 
     const result = resolveBackendText("test.kickoff?start=2026-08-01", "fallback");
 
@@ -1002,16 +1210,19 @@ describe("resolveBackendText", () => {
   // `formatDate`, since en-US is the default. This one does not.
   it("formats the `start` param in the player's own locale", async () => {
     const previousLanguage = i18n.language;
-    i18n.addResourceBundle("de", "translation", {
-      "test.kickoff": "Beginnt am {{start}}",
-    }, true, true);
+    i18n.addResourceBundle(
+      "de",
+      "translation",
+      {
+        "test.kickoff": "Beginnt am {{start}}",
+      },
+      true,
+      true,
+    );
 
     await i18n.changeLanguage("de");
     try {
-      const result = resolveBackendText(
-        "test.kickoff?start=2026-08-01",
-        "fallback",
-      );
+      const result = resolveBackendText("test.kickoff?start=2026-08-01", "fallback");
 
       expect(result).toBe("Beginnt am 1. August 2026");
     } finally {
@@ -1023,22 +1234,34 @@ describe("resolveBackendText", () => {
   // day survives whatever offset the machine is in — a date-only value must
   // never shift by a day.
   it("keeps the calendar day of a date-only param", () => {
-    i18n.addResourceBundle("en", "translation", {
-      "test.kickoff": "Kicks off on {{start}}",
-    }, true, true);
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        "test.kickoff": "Kicks off on {{start}}",
+      },
+      true,
+      true,
+    );
 
-    expect(
-      resolveBackendText("test.kickoff?start=2026-01-01", "fallback"),
-    ).toBe("Kicks off on January 1, 2026");
-    expect(
-      resolveBackendText("test.kickoff?start=2026-12-31", "fallback"),
-    ).toBe("Kicks off on December 31, 2026");
+    expect(resolveBackendText("test.kickoff?start=2026-01-01", "fallback")).toBe(
+      "Kicks off on January 1, 2026",
+    );
+    expect(resolveBackendText("test.kickoff?start=2026-12-31", "fallback")).toBe(
+      "Kicks off on December 31, 2026",
+    );
   });
 
   it("leaves a `start` param that is not a date alone", () => {
-    i18n.addResourceBundle("en", "translation", {
-      "test.kickoff": "Kicks off on {{start}}",
-    }, true, true);
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        "test.kickoff": "Kicks off on {{start}}",
+      },
+      true,
+      true,
+    );
 
     const result = resolveBackendText("test.kickoff?start=soon", "fallback");
 
@@ -1048,35 +1271,51 @@ describe("resolveBackendText", () => {
 
 describe("resolveBackendError", () => {
   it("resolves backend error keys", () => {
-    i18n.addResourceBundle("en", "translation", {
-      "be.error.noActiveGameSession": "No active game session",
-    }, true, true);
-
-    expect(resolveBackendError("be.error.noActiveGameSession")).toBe(
-      "No active game session",
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        "be.error.noActiveGameSession": "No active game session",
+      },
+      true,
+      true,
     );
+
+    expect(resolveBackendError("be.error.noActiveGameSession")).toBe("No active game session");
   });
 
   it("keeps raw backend errors when no translation key exists", () => {
-    expect(resolveBackendError(new Error("Something raw happened"))).toBe(
-      "Something raw happened",
-    );
+    expect(resolveBackendError(new Error("Something raw happened"))).toBe("Something raw happened");
   });
 
   it("resolves encoded backend error params", () => {
-    i18n.addResourceBundle("en", "translation", {
-      "be.error.contracts.boardWagePolicy": "Renewal blocked by board wage policy. Keep annual wages near {{budget}} to recover.",
-    }, true, true);
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        "be.error.contracts.boardWagePolicy":
+          "Renewal blocked by board wage policy. Keep weekly wages near {{budget}} to recover.",
+      },
+      true,
+      true,
+    );
 
     expect(resolveBackendError("be.error.contracts.boardWagePolicy?budget=200000")).toBe(
-      "Renewal blocked by board wage policy. Keep annual wages near €200,000 to recover.",
+      "Renewal blocked by board wage policy. Keep weekly wages near €200,000 to recover.",
     );
   });
 
   it("normalizes non-euro money params into the active currency", () => {
-    i18n.addResourceBundle("en", "translation", {
-      "be.error.finance.facilityUpgradeInsufficientFunds": "Insufficient funds for this facility upgrade. Need {{amount}}.",
-    }, true, true);
+    i18n.addResourceBundle(
+      "en",
+      "translation",
+      {
+        "be.error.finance.facilityUpgradeInsufficientFunds":
+          "Insufficient funds for this facility upgrade. Need {{amount}}.",
+      },
+      true,
+      true,
+    );
     useSettingsStore.setState({
       settings: { ...originalSettings, currency: "USD", language: "en" },
       currency: { code: "USD", symbol: "$", exchange_rate: 1.08 },
@@ -1085,5 +1324,158 @@ describe("resolveBackendError", () => {
     expect(
       resolveBackendError("be.error.finance.facilityUpgradeInsufficientFunds?amount=%C2%A3215000"),
     ).toBe("Insufficient funds for this facility upgrade. Need $270,000.");
+  });
+});
+
+// Given an agreement with raw backend terms, when displayed, then shared date and currency formatting apply.
+describe("accepted deal messages", () => {
+  const terms = {
+    player: "Golden Boot",
+    seller: "Beta FC",
+    buyer: "Alpha FC",
+    parent: "Beta FC",
+    borrower: "Alpha FC",
+    start: "2026-07-02",
+    end: "2026-12-20",
+    contribution: "70",
+    fee: "800001",
+  };
+  const dealMessage = (body: string, subject: string) =>
+    makeMessage({
+      body_key: body,
+      subject_key: subject,
+      i18n_params: terms,
+    });
+
+  // Given a deferred transfer, when its agreement is read, then its registration day and exact fee are localized.
+  it("shows the registration day and exact fee for an agreed transfer", () => {
+    const message = resolveMessage(
+      dealMessage("be.msg.transferAgreed.body", "be.msg.transferAgreed.subject"),
+    );
+    expect(message.subject).toBe("Transfer agreed: Golden Boot");
+    expect(message.body).toContain("July 2, 2026");
+    expect(message.body).toContain("€800,001");
+    expect(message.body).toContain("Beta FC");
+    expect(message.body).toContain("Alpha FC");
+  });
+  // Given a completed sale, when its notice is read, then it describes departure rather than joining the seller's squad.
+  it("shows a departure notice to the selling manager", () => {
+    const message = resolveMessage(
+      dealMessage("be.msg.transferComplete.bodySold", "be.msg.transferComplete.subject"),
+    );
+    expect(message.body).toContain("joined Alpha FC");
+    expect(message.body).toContain("€800,001");
+    expect(message.body).not.toContain("joined the squad");
+  });
+  // Given an agreed loan with an option, when read, then both dates, contribution and selected-currency option are displayed.
+  it("shows all agreed loan terms in the selected currency", () => {
+    useSettingsStore.setState({ currency: { code: "GBP", symbol: "£", exchange_rate: 0.86 } });
+    const message = resolveMessage(
+      dealMessage("be.msg.loanAgreed.bodyWithOption", "be.msg.loanAgreed.subject"),
+    );
+    expect(message.subject).toBe("Loan agreed: Golden Boot");
+    expect(message.body).toContain("July 2, 2026");
+    expect(message.body).toContain("December 20, 2026");
+    expect(message.body).toContain("70%");
+    expect(message.body).toContain("£688,001");
+  });
+  // Given a counter that removed the buy option, when read, then the notice explicitly says there is no option.
+  it("shows no buy option when the accepted counter dropped it", () => {
+    const message = resolveMessage(
+      dealMessage("be.msg.loanAgreed.bodyNoOption", "be.msg.loanAgreed.subject"),
+    );
+    expect(message.body).toContain("No purchase option");
+    expect(message.body).toContain("December 20, 2026");
+    expect(message.body).not.toContain("800");
+  });
+  // Given German settings, when a loan notice is read, then both dates follow the German locale.
+  it("localizes both loan dates in German", async () => {
+    const previous = i18n.language;
+    await i18n.changeLanguage("de");
+    useSettingsStore.setState({ settings: { ...originalSettings, language: "de" } });
+    try {
+      const message = resolveMessage(
+        dealMessage("be.msg.loanAgreed.bodyNoOption", "be.msg.loanAgreed.subject"),
+      );
+      expect(message.body).toContain("2. Juli 2026");
+      expect(message.body).toContain("20. Dezember 2026");
+    } finally {
+      await i18n.changeLanguage(previous);
+    }
+  });
+});
+
+describe("the weekly wage bill in the over-budget message", () => {
+  const key = "be.msg.wageOverBudget.body";
+
+  it("shows the bill and the budget the backend sends as whole numbers, compact and precise", () => {
+    const text = resolveBackendText(key, "fallback", {
+      weeklyWageBill: "1700",
+      wageBudget: "1500",
+    });
+
+    expect(text).toContain("€1.7K");
+    expect(text).toContain("€1.5K");
+    expect(text).not.toContain("{{");
+  });
+
+  it("still reads a message saved with the old annualWages name and a formatted amount", () => {
+    const text = resolveBackendText(key, "fallback", {
+      annualWages: "€1.7K",
+      wageBudget: "€1.5K",
+    });
+
+    expect(text).toContain("€1.7K");
+    expect(text).not.toContain("{{");
+  });
+});
+
+describe("money in inbox and news lines is compact and precise", () => {
+  it("shows a whole-number fee with up to three significant digits", () => {
+    const text = resolveBackendText("test.bidBody", "fallback", { fee: "1250000" });
+
+    expect(text).toBe("Offer: €1.25M");
+  });
+
+  it("converts the whole number to the selected currency before it is shortened", () => {
+    useSettingsStore.setState({
+      settings: { ...useSettingsStore.getState().settings, currency: "USD" },
+      currency: { code: "USD", symbol: "$", exchange_rate: 1.08 },
+    });
+
+    const text = resolveBackendText("test.bidBody", "fallback", { fee: "1000000" });
+
+    expect(text).toBe("Offer: $1.08M");
+  });
+});
+
+describe("the loan offer's purchase option", () => {
+  const key = "be.msg.loanOffer.body";
+  const terms = {
+    team: "Alpha FC",
+    player: "Golden Boot",
+    endDate: "2026-12-31",
+    wageContribution: "70",
+  };
+
+  it("reads the whole-number option as money, compact and precise", () => {
+    expect(resolveBackendText(key, "fallback", { ...terms, buyOption: "1200000" })).toContain(
+      "Purchase option: €1.2M.",
+    );
+    expect(resolveBackendText(key, "fallback", { ...terms, buyOption: "1250000" })).toContain(
+      "Purchase option: €1.25M.",
+    );
+  });
+
+  it("keeps the dash for a loan with no purchase option", () => {
+    expect(resolveBackendText(key, "fallback", { ...terms, buyOption: "—" })).toContain(
+      "Purchase option: —.",
+    );
+  });
+});
+
+describe("a compact string already in a saved message", () => {
+  it("keeps the figure it carries instead of rounding it to one decimal", () => {
+    expect(resolveBackendText("test.bidBody", "fallback", { fee: "€1.25M" })).toBe("Offer: €1.25M");
   });
 });

@@ -4,18 +4,14 @@ import { Checkbox } from "./Checkbox";
 
 describe("Checkbox", () => {
   it("renders unchecked with no checkmark icon", () => {
-    render(
-      <Checkbox checked={false} onChange={vi.fn()} aria-label="Select item" />,
-    );
+    render(<Checkbox checked={false} onChange={vi.fn()} aria-label="Select item" />);
 
     expect(screen.getByRole("checkbox", { name: "Select item" })).not.toBeChecked();
     expect(document.querySelector("svg")).not.toBeInTheDocument();
   });
 
   it("renders checked with a checkmark icon", () => {
-    render(
-      <Checkbox checked={true} onChange={vi.fn()} aria-label="Select item" />,
-    );
+    render(<Checkbox checked={true} onChange={vi.fn()} aria-label="Select item" />);
 
     expect(screen.getByRole("checkbox", { name: "Select item" })).toBeChecked();
     expect(document.querySelector("svg")).toBeInTheDocument();
@@ -24,9 +20,7 @@ describe("Checkbox", () => {
   it("calls onChange when clicked", () => {
     const onChange = vi.fn();
 
-    render(
-      <Checkbox checked={false} onChange={onChange} aria-label="Select item" />,
-    );
+    render(<Checkbox checked={false} onChange={onChange} aria-label="Select item" />);
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Select item" }));
 
@@ -34,14 +28,7 @@ describe("Checkbox", () => {
   });
 
   it("is disabled when the disabled prop is set", () => {
-    render(
-      <Checkbox
-        checked={false}
-        onChange={vi.fn()}
-        disabled
-        aria-label="Select item"
-      />,
-    );
+    render(<Checkbox checked={false} onChange={vi.fn()} disabled aria-label="Select item" />);
 
     expect(screen.getByRole("checkbox", { name: "Select item" })).toBeDisabled();
   });
@@ -57,5 +44,45 @@ describe("Checkbox", () => {
     );
 
     expect(screen.getByTestId("my-checkbox")).toBeInTheDocument();
+  });
+
+  /**
+   * Given visible text that explains what ticking the box means,
+   * when the checkbox points at it with aria-describedby,
+   * then a screen reader announces that text as the input's description.
+   */
+  it("forwards aria-describedby to the hidden input", () => {
+    render(
+      <>
+        <Checkbox
+          checked={false}
+          onChange={vi.fn()}
+          aria-label="Send these files"
+          aria-describedby="consent-desc"
+        />
+        <p id="consent-desc">I have reviewed the list.</p>
+      </>,
+    );
+
+    expect(screen.getByRole("checkbox", { name: "Send these files" })).toHaveAccessibleDescription(
+      "I have reviewed the list.",
+    );
+  });
+
+  it("exposes a mixed state to the native input and assistive technology", () => {
+    render(<Checkbox checked={false} indeterminate onChange={vi.fn()} aria-label="Select item" />);
+
+    const input = screen.getByRole("checkbox", { name: "Select item" }) as HTMLInputElement;
+    expect(input.indeterminate).toBe(true);
+    expect(input).toBePartiallyChecked();
+    expect(document.querySelector("svg")).toBeInTheDocument();
+  });
+
+  it("is not mixed by default", () => {
+    render(<Checkbox checked={false} onChange={vi.fn()} aria-label="Select item" />);
+
+    const input = screen.getByRole("checkbox", { name: "Select item" }) as HTMLInputElement;
+    expect(input.indeterminate).toBe(false);
+    expect(input).not.toBePartiallyChecked();
   });
 });

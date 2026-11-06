@@ -1,5 +1,7 @@
 import { useId } from "react";
 
+import { oppositeInk, readableInk } from "../../lib/colorContrast";
+
 interface CrestColors {
   primary?: string;
   secondary?: string;
@@ -29,18 +31,6 @@ function derivedColor(seed: number, light: boolean): string {
   return `hsl(${hue}, 55%, ${light ? "68%" : "40%"})`;
 }
 
-/** Black or white text, whichever reads better on a `#rrggbb` background. */
-function readableTextColor(color: string): string {
-  const match = /^#?([0-9a-f]{6})$/i.exec(color.trim());
-  if (!match) return "#ffffff";
-  const value = parseInt(match[1], 16);
-  const r = (value >> 16) & 0xff;
-  const g = (value >> 8) & 0xff;
-  const b = value & 0xff;
-  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-  return luminance > 0.6 ? "#111827" : "#ffffff";
-}
-
 /**
  * A procedurally generated club crest: a rounded tile in the club's two
  * colours with its short name, varied by a hash of the name so clubs look
@@ -53,16 +43,14 @@ export function GeneratedCrest({ name, label, colors, className }: GeneratedCres
   const primary = colors?.primary?.trim() || derivedColor(seed, false);
   const secondary = colors?.secondary?.trim() || derivedColor(seed >> 3, true);
   const text = label.slice(0, 3).toUpperCase();
-  const textColor = readableTextColor(primary);
+  // Both colours sit behind the label (the secondary paints half the tile), so the ink must read
+  // on both; the opposite-ink halo keeps it legible where the two colours disagree.
+  const textColor = readableInk([primary, secondary]);
+  const haloColor = oppositeInk(textColor);
   const variant = seed % 4;
 
   return (
-    <svg
-      viewBox="0 0 64 64"
-      className={className}
-      role="presentation"
-      aria-hidden="true"
-    >
+    <svg viewBox="0 0 64 64" className={className} role="presentation" aria-hidden="true">
       <clipPath id={clipId}>
         <rect x="2" y="2" width="60" height="60" rx="14" />
       </clipPath>
@@ -71,9 +59,7 @@ export function GeneratedCrest({ name, label, colors, className }: GeneratedCres
         {variant === 0 && <rect x="32" y="0" width="32" height="64" fill={secondary} />}
         {variant === 1 && <rect x="0" y="40" width="64" height="24" fill={secondary} />}
         {variant === 2 && <polygon points="0,0 30,0 0,64" fill={secondary} />}
-        {variant === 3 && (
-          <polygon points="32,2 62,32 32,62 2,32" fill={secondary} opacity="0.9" />
-        )}
+        {variant === 3 && <polygon points="32,2 62,32 32,62 2,32" fill={secondary} opacity="0.9" />}
       </g>
       <rect
         x="2"
@@ -85,6 +71,9 @@ export function GeneratedCrest({ name, label, colors, className }: GeneratedCres
         stroke={secondary}
         strokeWidth="2"
       />
+      {/* The halo is 2.5 units of the 64-unit viewBox: about 1 px at the smallest crest drawn (24 px).
+          Below that it would close the letters' counters, so whoever first draws a smaller crest
+          should keep it near 1 px (a non-scaling stroke) or drop the label there. */}
       <text
         x="32"
         y="34"
@@ -93,14 +82,13 @@ export function GeneratedCrest({ name, label, colors, className }: GeneratedCres
         fontSize={text.length > 2 ? 17 : 22}
         fontWeight="800"
         fill={textColor}
-        style={{ fontFamily: "inherit", paintOrder: "stroke" }}
-        stroke={primary}
-        strokeWidth="0.6"
+        style={{ fontFamily: "inherit", paintOrder: "stroke", strokeLinejoin: "round" }}
+        stroke={haloColor}
+        strokeOpacity="0.85"
+        strokeWidth="2.5"
       >
         {text}
       </text>
     </svg>
   );
 }
-
-export default GeneratedCrest;

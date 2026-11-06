@@ -3,7 +3,7 @@ name: add-tauri-command
 description: Expose new backend behaviour to the frontend over Tauri IPC. Covers the _internal function split so MCP tools can share the logic, atomic mutation via mutate_active_game, translation-key errors, registration in the invoke handler, the typed service wrapper, store update, tests on both sides, and the docs/ARCHITECTURE.md command table.
 when_to_use: Adding a new Tauri command, changing an existing command's signature, or wiring a new backend action into the UI.
 argument-hint: "[command name and what it does]"
-allowed-tools: Read, Edit, Write, Grep, Glob, Bash(cargo test*), Bash(cargo clippy*), Bash(npx vitest run src/services), Bash(npx tsc --noEmit)
+allowed-tools: Read, Edit, Write, Grep, Glob, Bash(cargo test*), Bash(cargo clippy*), Bash(npm exec --no -- vitest run src/services), Bash(npm exec --no -- tsc --noEmit)
 ---
 
 # Adding a Tauri command
@@ -19,7 +19,9 @@ One module per area — `squad.rs`, `transfers.rs`, `contracts.rs`, `club.rs`, `
 where its siblings live rather than starting a new module.
 
 **Split it in two.** The `#[tauri::command]` wrapper does IPC plumbing only; the real work lives
-in a plain `*_internal` function that takes `&StateManager`:
+in a plain `*_internal` function that takes `&StateManager`. The wrapper is <= 50 lines including
+its signature; the root Code quality section defines the other layer and size limits. Commands and MCP
+adapt the same seam; application code never imports either adapter. For example:
 
 ```rust
 pub fn set_play_style_internal(state: &StateManager, play_style: &str) -> Result<Game, String> {
@@ -81,6 +83,13 @@ error, so mirror an existing wrapper exactly.
 
 Types come from `src/store/types.ts` or `src/store/gameStore.ts`. No `any`.
 
+If the command returns a type the screens receive that `Game` or `SquadPlayer` already reach, its
+TypeScript is generated: derive `TS` on any new Rust type, regenerate with
+`OFM_UPDATE_TS_TYPES=1 cargo test --manifest-path src-tauri/Cargo.toml --test wire_types`, and
+commit `src/store/generated/`. Never edit those files by hand (`src-tauri/CLAUDE.md`, "Wire types
+are generated"). A response type outside those roots generates nothing until it is added to
+`visit_wire_roots` in `src-tauri/tests/wire_types.rs`: regenerating alone writes no file for it.
+
 ## 4. Update the store
 
 Commands that return game state feed `gameStore`. Follow the existing call sites: call the
@@ -102,7 +111,12 @@ Frontend: `src/services/<area>Service.test.ts`, mocking `@tauri-apps/api/core`. 
 tests show the shape. Cover the failure path — a command that returns `Err` must surface a usable
 message.
 
-Write the failing test first.
+Use `/write-tests` before implementation. Test wrapper equivalence at the
+public adapter seam: Tauri/service arguments, errors and returned state match the shared function;
+where an MCP counterpart exists, verify it delegates to that seam too. Do not stop at helper-only
+tests. Test failure atomicity and read persisted changes through a fresh reader. For an existing
+MCP counterpart, run `--lib --features mcp`; UI-only commands need no invented MCP route.
+Use `ofm-test-reviewer` for observed fix-removal evidence.
 
 ## 6. Update the docs
 
@@ -121,8 +135,9 @@ If the command should also be available to AI agents, continue with `/add-mcp-to
 - [ ] Registered in `generate_handler![…]` in `src-tauri/src/lib.rs`
 - [ ] New modules re-exported from `commands/mod.rs`
 - [ ] Typed wrapper in `src/services/`, camelCase args, no `any`
+- [ ] A changed or new wire type reached from `Game` or `SquadPlayer`: `TS` derived, `src/store/generated/` regenerated and committed. A response type outside those roots is added to `visit_wire_roots` in `src-tauri/tests/wire_types.rs`.
 - [ ] Store updated without in-place mutation
 - [ ] Backend test on the `_internal` fn (`cargo test --lib`), written first
 - [ ] Frontend service test including the error path
 - [ ] `docs/ARCHITECTURE.md` command table updated
-- [ ] `cargo clippy --workspace --all-targets` and `npx tsc --noEmit` green
+- [ ] `cargo clippy --workspace --all-targets` and `npm exec --no -- tsc --noEmit` green

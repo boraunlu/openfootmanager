@@ -34,6 +34,26 @@ pub fn contract_warning_stage(
     None
 }
 
+/// The warning stage of each requested player's contract on the game's date: the one the daily
+/// warnings, the morale pressure and the renewal urgency use, so a screen shows the same stage.
+/// A player with no stage (beyond a year, or already over) maps to `None`; an unknown id is left out.
+pub fn contract_warning_stages(
+    game: &Game,
+    player_ids: &[String],
+) -> std::collections::HashMap<String, Option<ContractWarningStage>> {
+    let today = game.clock.current_date.date_naive();
+    player_ids
+        .iter()
+        .filter_map(|id| {
+            let player = game.players.iter().find(|player| &player.id == id)?;
+            Some((
+                id.clone(),
+                contract_warning_stage(player.contract_end(), today),
+            ))
+        })
+        .collect()
+}
+
 pub fn process_contract_expiries(game: &mut Game) {
     let current_date = game.clock.current_date.date_naive();
 
@@ -42,8 +62,7 @@ pub fn process_contract_expiries(game: &mut Game) {
         .iter()
         .enumerate()
         .filter_map(|(index, player)| {
-            let days_remaining =
-                contract_days_remaining(player.contract_end.as_deref(), current_date)?;
+            let days_remaining = contract_days_remaining(player.contract_end(), current_date)?;
             if player.team_id.is_some() && days_remaining <= 0 {
                 Some(index)
             } else {
@@ -70,10 +89,8 @@ pub(crate) fn release_player_contract(
     let player_id = game.players[player_index].id.clone();
     let player_name = game.players[player_index].match_name.clone();
     let team_id = game.players[player_index]
-        .active_loan
-        .as_ref()
-        .map(|loan| loan.parent_team_id.clone())
-        .or_else(|| game.players[player_index].team_id.clone());
+        .contract_club_id()
+        .map(str::to_string);
 
     let Some(team_id) = team_id.as_deref() else {
         return;
@@ -86,6 +103,15 @@ pub(crate) fn release_player_contract(
     else {
         return;
     };
+    // Expiry releases every club's players, so whether the user hears about it is decided per
+    // player: the contract is theirs, or the player is in their squad on loan and leaves it.
+    let affected_clubs: Vec<String> = game
+        .controlled_clubs()
+        .into_iter()
+        .filter(|club| {
+            club == team_id || game.players[player_index].team_id.as_deref() == Some(club.as_str())
+        })
+        .collect();
 
     for team in &mut game.teams {
         remove_player_from_team_references(team, &player_id);
@@ -94,31 +120,41 @@ pub(crate) fn release_player_contract(
     let player = &mut game.players[player_index];
     player.team_id = None;
     player.active_loan = None;
-    player.contract_end = None;
-    player.wage = 0;
     player.transfer_listed = false;
     player.loan_listed = false;
     player.transfer_offers.clear();
     player.loan_offers.clear();
     player.morale_core.renewal_state = None;
-    player.movement_history.push(PlayerMovementEntry {
-        date: today.clone(),
-        kind: PlayerMovementKind::Released,
-        from_team_id: Some(team_id.to_string()),
-        from_team_name: Some(team_name.clone()),
-        to_team_id: None,
-        to_team_name: None,
-        fee: None,
-        loan_end_date: None,
-    });
+    // Recording the release is what ends the contract: the dates and the wage follow it.
+    record_movement(
+        player,
+        PlayerMovementEntry {
+            from_team_id: Some(team_id.to_string()),
+            from_team_name: Some(team_name.clone()),
+            release_reason: Some(match reason {
+                ContractReleaseReason::Expired => ReleaseReason::Expired,
+                ContractReleaseReason::ManagerTermination { .. } => ReleaseReason::Terminated,
+            }),
+            ..PlayerMovementEntry::new(today.clone(), PlayerMovementKind::Released)
+        },
+    );
 
+    if affected_clubs.is_empty() {
+        return;
+    }
+    // Each release appends one entry to the append-only movement history, so its position names
+    // this release and no other: a player can be released, re-signed and released again, even
+    // on the same day, and a key that named only the player or the day would let the ledger
+    // silence the second release.
+    let release_number = game.players[player_index].movement_history.len();
+    let release_id = format!("{player_id}_{today}_{release_number}");
     let message = match reason {
         ContractReleaseReason::Expired => {
-            contract_expired_message(&player_id, &player_name, &team_name, &today)
+            contract_expired_message(&release_id, &player_name, &team_name, &today)
         }
         ContractReleaseReason::ManagerTermination { severance_cost } => {
             contract_terminated_message(
-                &player_id,
+                &release_id,
                 &player_name,
                 &team_name,
                 severance_cost,
@@ -127,11 +163,18 @@ pub(crate) fn release_player_contract(
         }
     };
 
-    game.deliver_to_club(team_id, message);
+    let original = game.manager.team_id.clone();
+    for club in affected_clubs {
+        game.swap_controlled(&club);
+        crate::inbox::emit(game, message.clone());
+    }
+    if let Some(original) = original {
+        game.swap_controlled(&original);
+    }
 }
 
 pub(crate) fn contract_expired_message(
-    player_id: &str,
+    release_id: &str,
     player_name: &str,
     team_name: &str,
     date: &str,
@@ -141,7 +184,7 @@ pub(crate) fn contract_expired_message(
     i18n_params.insert("team".to_string(), team_name.to_string());
 
     InboxMessage::new(
-        format!("contract_expired_{}", player_id),
+        format!("contract_expired_{release_id}"),
         String::new(),
         String::new(),
         String::new(),

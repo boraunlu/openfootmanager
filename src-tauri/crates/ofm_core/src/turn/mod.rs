@@ -1,11 +1,17 @@
+mod calendar_sweep;
+pub(crate) mod cup_renewal;
+mod cup_round_summary;
 mod dormant;
+mod match_injuries;
+pub(crate) mod matchday_lookups;
 mod news;
 mod post_match;
 mod round_summary;
+pub(crate) mod squad;
 
 use crate::board_objectives;
 use crate::game::Game;
-use crate::live_match_manager::{domain_to_engine_role, domain_to_engine_tactics};
+use crate::live_match_manager;
 use crate::player_events;
 use crate::random_events;
 use crate::scouting;
@@ -13,11 +19,11 @@ use crate::training;
 use crate::transfers;
 use chrono::Datelike;
 use domain::league::FixtureStatus;
-use domain::player::Position as DomainPosition;
 use domain::stats::StatsState;
 use log::{debug, info};
 
 // Re-export public items
+pub use cup_round_summary::{CupRoundSummary, CupTieResult, build_cup_round_summaries};
 pub use news::generate_matchday_news;
 pub use post_match::{apply_match_report, apply_match_report_with_capture};
 pub use round_summary::{
@@ -139,42 +145,202 @@ fn simulate_competition_day_with_capture<F>(
     game.sync_legacy_league();
 }
 
+/// A day at the training ground, for every club that is not playing.
+///
+/// Lives here rather than inline because a day has two entry points and both owe
+/// the world the same one. `finish_live_match_day` used to run no training at
+/// all, so on the day the player watched their own fixture, nobody in the game
+/// recovered — the eighteen clubs with nothing on included.
+fn run_training_ground(game: &mut Game) {
+    run_training_ground_with_policy(game, &DayPolicy::default());
+}
+fn run_training_ground_with_policy(game: &mut Game, policy: &DayPolicy) {
+    let weekday_num = game.clock.current_date.weekday().num_days_from_monday();
+    crate::ai_training::apply_ai_training_policies(game, weekday_num);
+    training::process_training_with_recovery(
+        game,
+        weekday_num,
+        &policy.staff_managed,
+        &policy.training_recovery,
+    );
+    game.for_each_controlled(training::check_squad_fitness_warnings);
+    // Not a session, and deliberately not skipped for the clubs playing today:
+    // a league plays whole rounds on one date, so a club whose review day landed
+    // on its matchday would never review at all. It runs after active matches,
+    // so those results are part of the form it reads. Dormant scoreline-only
+    // competitions resolve later in `process_day` and enter the next review.
+    crate::ai_tactics::apply_ai_tactical_reviews(game, weekday_num);
+}
+
+/// Everything both endings of a day do, in the order they both did it.
+///
+/// `process_day` and `finish_live_match_day` were two hand-maintained copies of this sequence,
+/// and the live one had drifted: it never simulated the other competitions due that day, the
+/// dormant tier, the internationals or the World Cup. Because a fixture is only ever due on an
+/// exact date match, everything it skipped was skipped permanently. Sharing the tail means a step
+/// can no longer be in one ending and not the other.
+fn process_day_common(game: &mut Game, today: &str) {
+    process_day_common_with_policy(
+        game,
+        today,
+        &mut transfers::generate_incoming_transfer_offers,
+        &DayPolicy::default(),
+    );
+}
+fn process_day_common_with_policy<T: FnMut(&mut Game)>(
+    game: &mut Game,
+    today: &str,
+    on_market: &mut T,
+    policy: &DayPolicy,
+) {
+    // AI clubs decide on their running-down contracts first, so a renewal made
+    // on the day a contract ends lands before the expiry that would release him.
+    let weekday_num = game.clock.current_date.weekday().num_days_from_monday();
+    crate::ai_contracts::apply_ai_contract_decisions(game, weekday_num);
+    crate::contracts::process_contract_expiries(game);
+
+    // Weekly financial processing (wages, matchday income, warnings)
+    crate::finances::process_weekly_finances(game);
+
+    // Board objectives (generate if missing, update progress)
+    game.for_each_controlled(board_objectives::generate_objectives);
+    game.for_each_controlled(board_objectives::update_objective_progress);
+
+    // Player conversations, random events, and scouting
+    game.for_each_controlled(player_events::check_player_events);
+    progress_injury_recovery(game);
+    game.for_each_controlled(random_events::check_random_events);
+    scouting::process_scouting_excluding(game, &policy.external_scouting);
+    transfers::process_pending_transfer_registrations(game);
+    transfers::process_pending_loan_registrations(game);
+    on_market(game);
+    // After every step above that can take a player away from a club — expiry,
+    // registrations and the AI market — and the loan returns that opened the day.
+    crate::ai_contracts::apply_ai_squad_planning(game, weekday_num);
+    crate::squad_floor::keep_squads_at_the_floor(game);
+    crate::generator::process_available_staff_market(game);
+    crate::ai_hiring::update_ai_manager_satisfaction(game);
+
+    news::generate_weekly_digest_news(game, today);
+    game.for_each_controlled(|game| news::generate_pre_match_messages(game, today));
+
+    crate::firing::check_manager_firing(game);
+    crate::ai_hiring::process_vacant_ai_clubs(game);
+    crate::ai_manager_appointments::appoint_permanent_managers(game);
+    if game.controlled.clubs.is_empty() {
+        crate::job_offers::check_job_offers(game);
+    }
+    game.for_each_controlled(crate::inbox_archive::archive_on_the_first_of_the_month);
+}
+
+/// Marks the start of a day, before any match of it is played: notes which knockout fixtures the
+/// player has been shown, so a round drawn later in the day, by the player's own result or any
+/// other, is known to be new. Safe to call again the same day. Every way of playing a day that
+/// applies results before it finishes the day calls this first.
+pub fn begin_day(game: &mut Game) {
+    calendar_sweep::begin_day(game);
+}
+
+/// The football that happens today outside the fixture the player was watching.
+///
+/// Every competition still holding a scheduled fixture for `today`, then the dormant tier, then
+/// national-team football. Safe to call after the player's own match has been applied: a fixture
+/// already `Completed` is no longer due, so nothing is played twice.
+fn simulate_the_rest_of_the_world<F>(game: &mut Game, today: &str, on_capture: &mut F)
+where
+    F: FnMut(StatsState),
+{
+    simulate_the_rest_of_the_world_with_matchday(
+        game,
+        today,
+        on_capture,
+        &mut simulate_competition_day_with_capture,
+    );
+}
+fn simulate_the_rest_of_the_world_with_matchday<F, M>(
+    game: &mut Game,
+    today: &str,
+    on_capture: &mut F,
+    on_matchday: &mut M,
+) where
+    F: FnMut(StatsState),
+    M: FnMut(&mut Game, usize, &str, &mut F),
+{
+    let shown_fixtures = calendar_sweep::take_shown_at_day_start(game, today);
+    let due = competition_indices_due_today(game, today);
+    if !due.is_empty() {
+        info!("[turn] {}: matchday in {} competition(s)", today, due.len());
+    }
+    for competition_index in due {
+        on_matchday(game, competition_index, today, on_capture);
+    }
+
+    // Tiered simulation: competitions outside the active scope are resolved by
+    // scoreline only, keeping the dormant world moving without the full engine.
+    let dormant_competitions = dormant_competition_indices_due_today(game, today);
+    if !dormant_competitions.is_empty() {
+        // Found once for the whole dormant tier: a scoreline moves no player.
+        let players_by_club = crate::match_day_eligibility::players_by_club(&game.players);
+        for competition_index in dormant_competitions {
+            dormant::simulate_dormant_competition_day(
+                &mut game.competitions[competition_index],
+                game.seed,
+                &players_by_club,
+                today,
+            );
+        }
+    }
+
+    // National-team football: window friendlies and any running World Cup.
+    // Both self-filter by date, so they are no-ops on other days.
+    crate::national_team::process_national_team_fixtures_due(game, today);
+    crate::world_cup::process_world_cup_fixtures_due(game, today);
+
+    // A cup whose last tie was played today starts its next edition, so the sweep below settles
+    // the new ties too.
+    cup_renewal::renew_finished_cups(game, today);
+
+    // Last, so a round drawn or a postponement caused by today's results is settled before the
+    // next day's fixtures are looked up.
+    calendar_sweep::reconcile_calendar(game, today, &shown_fixtures);
+}
+
 /// Process a single day advance.
 pub fn process_day(game: &mut Game) {
     process_day_with_capture(game, &mut |_| {});
 }
 
-pub fn process_day_with_capture<F>(game: &mut Game, on_capture: &mut F)
-where
-    F: FnMut(StatsState),
-{
-    process_day_with_matchday(game, on_capture, &mut simulate_competition_day_with_capture);
+#[derive(Default)]
+pub struct DayPolicy {
+    pub external_scouting: std::collections::HashSet<String>,
+    pub staff_managed: std::collections::HashSet<String>,
+    pub training_recovery: std::collections::HashSet<String>,
 }
 
-/// Hosts can present or delegate managed matches while retaining the entire
-/// daily lifecycle. The handler must resolve the scheduled competition day;
-/// it must not advance the clock or run daily processing a second time.
+pub fn process_day_with_capture<F: FnMut(StatsState)>(game: &mut Game, on_capture: &mut F) {
+    process_day_with_policy(
+        game,
+        on_capture,
+        &mut simulate_competition_day_with_capture,
+        &mut transfers::generate_incoming_transfer_offers,
+        &DayPolicy::default(),
+    );
+}
+
 pub fn process_day_with_matchday<F, M>(game: &mut Game, on_capture: &mut F, on_matchday: &mut M)
 where
     F: FnMut(StatsState),
     M: FnMut(&mut Game, usize, &str, &mut F),
 {
-    process_day_with_market(
+    process_day_with_policy(
         game,
         on_capture,
         on_matchday,
         &mut transfers::generate_incoming_transfer_offers,
+        &DayPolicy::default(),
     );
 }
 
-/// Explicit host ownership; default callers retain native daily behavior.
-#[derive(Default)]
-pub struct DayPolicy {
-    pub external_scouting: std::collections::HashSet<String>,
-    pub staff_managed: std::collections::HashSet<String>,
-}
-
-/// A host may supply a market policy while retaining the single daily lifecycle.
 pub fn process_day_with_market<F, M, T>(
     game: &mut Game,
     on_capture: &mut F,
@@ -209,102 +375,50 @@ pub fn process_day_with_policy<F, M, T>(
     transfers::process_loan_development_reports(game);
     transfers::process_loan_returns(game);
 
-    let due_competitions = competition_indices_due_today(game, &today);
-    let has_match_today = !due_competitions.is_empty();
+    begin_day(game);
+    simulate_the_rest_of_the_world_with_matchday(game, &today, on_capture, on_matchday);
 
-    if has_match_today {
-        info!("[turn] process_day {}: matchday", today);
-        for competition_index in due_competitions {
-            on_matchday(game, competition_index, &today, on_capture);
-        }
-    } else {
-        let weekday_num = game.clock.current_date.weekday().num_days_from_monday();
-        crate::ai_training::apply_ai_training_policies(game, weekday_num);
-        training::process_training_with_staff(game, weekday_num, &policy.staff_managed);
-        game.for_each_controlled(training::check_squad_fitness_warnings);
-    }
+    // Unconditional, and after the matches: a fixture somewhere in the world says
+    // nothing about whether *this* club trains. `run_training_ground` skips only
+    // the clubs actually playing today.
+    run_training_ground_with_policy(game, policy);
 
-    // Tiered simulation: competitions outside the active scope are resolved by
-    // scoreline only, keeping the dormant world moving without the full engine.
-    let dormant_competitions = dormant_competition_indices_due_today(game, &today);
-    if !dormant_competitions.is_empty() {
-        let mut rng = rand::rng();
-        for competition_index in dormant_competitions {
-            dormant::simulate_dormant_competition_day(game, competition_index, &today, &mut rng);
-        }
-    }
-
-    // National-team football: window friendlies and any running World Cup.
-    // Both self-filter by date, so they are no-ops on other days.
-    crate::national_team::process_national_team_fixtures_due(game, &today, &mut rand::rng());
-    crate::world_cup::process_world_cup_fixtures_due(game, &today, &mut rand::rng());
-
-    crate::contracts::process_contract_expiries(game);
-
-    // Weekly financial processing (wages, matchday income, warnings)
-    crate::finances::process_weekly_finances(game);
-
-    // Board objectives (generate if missing, update progress)
-    game.for_each_controlled(board_objectives::generate_objectives);
-    game.for_each_controlled(board_objectives::update_objective_progress);
-
-    // Player conversations, random events, and scouting
-    game.for_each_controlled(player_events::check_player_events);
-    progress_injury_recovery(game);
-    game.for_each_controlled(random_events::check_random_events);
-    scouting::process_scouting_excluding(game, &policy.external_scouting);
-    transfers::process_pending_transfer_registrations(game);
-    transfers::process_pending_loan_registrations(game);
-    on_market(game);
-    crate::generator::process_available_staff_market(game);
-    crate::ai_hiring::update_ai_manager_satisfaction(game);
-
-    news::generate_weekly_digest_news(game, &today);
-    game.for_each_controlled(|game| news::generate_pre_match_messages(game, &today));
-
-    crate::firing::check_manager_firing(game);
-    crate::ai_hiring::process_vacant_ai_clubs(game);
-    if game.controlled.clubs.is_empty() {
-        crate::job_offers::check_job_offers(game);
-    }
+    process_day_common_with_policy(game, &today, on_market, policy);
 
     debug!("[turn] process_day {}: complete, advancing clock", today);
     game.clock.advance_days(1);
     crate::season_context::refresh_game_context(game);
 }
 
-/// Called after a live match finishes to complete the day:
-/// generates matchday news, pre-match messages, and advances the clock by one day.
+/// Complete the day after the player's own match has been played and applied.
+///
+/// This runs *instead of* [`process_day`], not after it, so everything a day does has to happen
+/// here too — including the football the player was not watching.
 pub fn finish_live_match_day(game: &mut Game) {
+    finish_live_match_day_with_capture(game, &mut |_| {});
+}
+
+/// [`finish_live_match_day`], keeping the stats produced by the matches it simulates.
+pub fn finish_live_match_day_with_capture<F>(game: &mut Game, on_capture: &mut F)
+where
+    F: FnMut(StatsState),
+{
     let today = game.clock.current_date.format("%Y-%m-%d").to_string();
     info!("[turn] finish_live_match_day: {}", today);
     transfers::process_loan_development_reports(game);
     transfers::process_loan_returns(game);
     generate_matchday_news(game, &today);
 
-    crate::contracts::process_contract_expiries(game);
-    crate::finances::process_weekly_finances(game);
+    // The rest of the world had a day too. The player's own fixture is already settled, so it is
+    // no longer due and is not played twice; everything else due today would otherwise be
+    // stranded, because a fixture is only ever due on an exact date match.
+    simulate_the_rest_of_the_world(game, &today, on_capture);
 
-    game.for_each_controlled(board_objectives::generate_objectives);
-    game.for_each_controlled(board_objectives::update_objective_progress);
+    // The user's fixture is over; the rest of the world still had a day, and the
+    // clubs that were not in it still had a session or a rest day.
+    run_training_ground(game);
 
-    game.for_each_controlled(player_events::check_player_events);
-    progress_injury_recovery(game);
-    game.for_each_controlled(random_events::check_random_events);
-    scouting::process_scouting(game);
-    transfers::process_pending_transfer_registrations(game);
-    transfers::process_pending_loan_registrations(game);
-    transfers::generate_incoming_transfer_offers(game);
-    crate::generator::process_available_staff_market(game);
-    crate::ai_hiring::update_ai_manager_satisfaction(game);
-    news::generate_weekly_digest_news(game, &today);
-    game.for_each_controlled(|game| news::generate_pre_match_messages(game, &today));
-
-    crate::firing::check_manager_firing(game);
-    crate::ai_hiring::process_vacant_ai_clubs(game);
-    if game.controlled.clubs.is_empty() {
-        crate::job_offers::check_job_offers(game);
-    }
+    process_day_common(game, &today);
 
     game.clock.advance_days(1);
     game.sync_legacy_league();
@@ -370,7 +484,7 @@ mod tests {
             attrs,
         );
         player.team_id = Some("team1".to_string());
-        player.wage = 52_000;
+        player.stage_wage(1_000);
         player
     }
 
@@ -390,7 +504,7 @@ mod tests {
         );
         staff.team_id = Some("team1".to_string());
         staff.nationality = "GB".to_string();
-        staff.wage = 10_400;
+        staff.wage = 200;
         staff
     }
 
@@ -418,96 +532,29 @@ mod tests {
 
         finish_live_match_day(&mut game);
 
-        assert_eq!(
-            game.teams[0].finance,
-            initial_finance - ((52_000 + 10_400) / 52)
-        );
+        assert_eq!(game.teams[0].finance, initial_finance - 1_200);
     }
-}
 
-// ---------------------------------------------------------------------------
-// Domain → Engine type conversion
-// ---------------------------------------------------------------------------
+    /// Given a fixture that cannot be played live and no competition in the
+    /// legacy slot to settle it in, when the match is simulated, then the day
+    /// goes on: the fallback that exists so a day always finishes does not
+    /// itself panic.
+    #[test]
+    fn a_fixture_with_no_competition_to_settle_it_in_does_not_stop_the_day() {
+        let clock = GameClock::new(Utc.with_ymd_and_hms(2025, 6, 16, 12, 0, 0).unwrap());
+        let manager = Manager::new(
+            "mgr1".to_string(),
+            "Test".to_string(),
+            "Manager".to_string(),
+            "1980-01-01".to_string(),
+            "England".to_string(),
+        );
+        let mut game = Game::new(clock, manager, vec![make_team()], vec![], vec![], vec![]);
+        assert!(game.league.is_none());
 
-fn build_engine_team(game: &Game, team_id: &str) -> engine::TeamData {
-    let team = game.teams.iter().find(|t| t.id == team_id);
-    let player_roles = team.map(|t| &t.player_roles);
-    let (name, formation, play_style, tactics) = match team {
-        Some(t) => (
-            t.name.clone(),
-            t.formation.clone(),
-            match t.play_style {
-                domain::team::PlayStyle::Attacking => engine::PlayStyle::Attacking,
-                domain::team::PlayStyle::Defensive => engine::PlayStyle::Defensive,
-                domain::team::PlayStyle::Possession => engine::PlayStyle::Possession,
-                domain::team::PlayStyle::Counter => engine::PlayStyle::Counter,
-                domain::team::PlayStyle::HighPress => engine::PlayStyle::HighPress,
-                _ => engine::PlayStyle::Balanced,
-            },
-            domain_to_engine_tactics(&t.tactics_phase),
-        ),
-        None => (
-            "Unknown".into(),
-            "4-4-2".into(),
-            engine::PlayStyle::Balanced,
-            engine::TacticsConfig::default(),
-        ),
-    };
+        super::simulate_single_match_with_capture(&mut game, 0, None, &mut |_| {});
 
-    let players: Vec<engine::PlayerData> = game
-        .players
-        .iter()
-        .filter(|p| p.team_id.as_deref() == Some(team_id))
-        .map(|p| {
-            let pos = match p.position.to_group_position() {
-                DomainPosition::Goalkeeper => engine::Position::Goalkeeper,
-                DomainPosition::Defender => engine::Position::Defender,
-                DomainPosition::Midfielder => engine::Position::Midfielder,
-                DomainPosition::Forward => engine::Position::Forward,
-                _ => engine::Position::Midfielder,
-            };
-            engine::PlayerData {
-                id: p.id.clone(),
-                name: p.match_name.clone(),
-                position: pos,
-                ovr: p.ovr,
-                condition: p.condition,
-                fitness: p.fitness,
-                pace: p.attributes.pace,
-                stamina: p.attributes.stamina,
-                strength: p.attributes.strength,
-                agility: p.attributes.agility,
-                passing: p.attributes.passing,
-                shooting: p.attributes.shooting,
-                tackling: p.attributes.tackling,
-                dribbling: p.attributes.dribbling,
-                defending: p.attributes.defending,
-                positioning: p.attributes.positioning,
-                vision: p.attributes.vision,
-                decisions: p.attributes.decisions,
-                composure: p.attributes.composure,
-                aggression: p.attributes.aggression,
-                teamwork: p.attributes.teamwork,
-                leadership: p.attributes.leadership,
-                handling: p.attributes.handling,
-                reflexes: p.attributes.reflexes,
-                aerial: p.attributes.aerial,
-                traits: p.traits.iter().map(|t| format!("{:?}", t)).collect(),
-                role: player_roles
-                    .and_then(|roles| roles.get(&p.id))
-                    .map(domain_to_engine_role)
-                    .unwrap_or(engine::PlayerRole::Standard),
-            }
-        })
-        .collect();
-
-    engine::TeamData {
-        id: team_id.to_string(),
-        name,
-        formation,
-        play_style,
-        players,
-        tactics,
+        assert!(game.league.is_none());
     }
 }
 
@@ -552,38 +599,82 @@ pub fn simulate_other_matches_with_capture<F>(
             .collect()
     });
 
+    // What a match asks of the whole world is asked once for the competition-day; the lookups are
+    // told when a match changed what they hold.
+    let mut lookups = matchday_lookups::MatchdayLookups::of(game);
     for idx in fixture_indices {
-        simulate_single_match_with_capture(game, idx, on_capture);
+        simulate_single_match_with_capture(game, idx, Some(&mut lookups), on_capture);
+        lookups.after_match_applied(game);
     }
 }
 
-fn simulate_single_match_with_capture<F>(game: &mut Game, idx: usize, on_capture: &mut F)
-where
+fn simulate_single_match_with_capture<F>(
+    game: &mut Game,
+    idx: usize,
+    mut lookups: Option<&mut matchday_lookups::MatchdayLookups>,
+    on_capture: &mut F,
+) where
     F: FnMut(StatsState),
 {
-    let (home_team_id, away_team_id, is_knockout) = {
-        let league = game.league.as_ref().unwrap();
-        let f = &league.fixtures[idx];
-        (
-            f.home_team_id.clone(),
-            f.away_team_id.clone(),
-            league.is_knockout_fixture(&f.id),
-        )
-    };
-
-    let home_data = build_engine_team(game, &home_team_id);
-    let away_data = build_engine_team(game, &away_team_id);
-    let config = engine::MatchConfig::default();
-    let mut report = engine::simulate(&home_data, &away_data, &config);
-    // A level knockout tie must produce a winner: resolve it with a simulated
-    // shootout so the home side no longer advances by default on a draw.
-    if is_knockout && report.home_goals == report.away_goals {
-        let home_strength = crate::catchup::club_strength(&game.players, &home_team_id);
-        let away_strength = crate::catchup::club_strength(&game.players, &away_team_id);
-        let (home_pens, away_pens) =
-            crate::national_team::simulate_shootout(home_strength, away_strength, &mut rand::rng());
-        report.home_penalties = Some(home_pens);
-        report.away_penalties = Some(away_pens);
+    // One match path. Every fixture in an active competition is played by the
+    // engine the player watches: eleven starters, a real bench, and a manager on
+    // both touchlines reading the game at the same checkpoints. It used to be
+    // `engine::simulate`, a one-shot with no command loop — so no substitution
+    // and no tactical change was possible in any match but the player's own.
+    // Extra time, and the engine's own shootout, follow the one knockout
+    // predicate inside `play_unwatched_fixture`.
+    match live_match_manager::play_unwatched_fixture_with(game, idx, lookups.as_deref_mut()) {
+        Ok(played) => post_match::apply_match_report_in(
+            game,
+            idx,
+            (&played.home_team_id, &played.away_team_id),
+            &played.report,
+            lookups.as_deref(),
+            on_capture,
+        ),
+        // A side nobody could field, after the kick-off gate found no academy
+        // player and no free agent: the world has run out of players, which
+        // ordinary squad management exists to prevent. The day still finishes —
+        // the fixture is settled by scoreline, as the dormant tier settles every
+        // fixture, rather than left scheduled in the past.
+        Err(error) => {
+            log::error!(
+                "[turn] fixture {idx} could not be played live ({error}); settled by scoreline"
+            );
+            // The day's sweep puts the competition in the legacy slot before it
+            // gets here. Were it ever missing there would be no fixture to
+            // settle either, so the day goes on without it rather than
+            // panicking on the one path that exists so a day always finishes.
+            let clubs = game
+                .league
+                .as_ref()
+                .and_then(|league| league.fixtures.get(idx))
+                .map(|fixture| format!("{}/{}", fixture.home_team_id, fixture.away_team_id))
+                .unwrap_or_default();
+            let mut fallback_rng = game.rng_today(&format!("match/{clubs}"));
+            let Some(league) = game.league.as_mut() else {
+                log::error!(
+                    "[turn] fixture {idx} has no competition in the legacy slot to settle it in"
+                );
+                return;
+            };
+            crate::catchup::resolve_fixture_by_scoreline(
+                &game.players,
+                league,
+                idx,
+                &mut fallback_rng,
+            );
+        }
     }
-    apply_match_report_with_capture(game, idx, &home_team_id, &away_team_id, &report, on_capture);
+}
+
+/// The native matchday XI, for a host's lineup preview. Uses the same eligibility,
+/// goalkeeper selection and injury fallback as the actual match builder.
+pub fn selected_starting_xi_ids(game: &Game, team_id: &str) -> Vec<String> {
+    squad::build_team_with_bench(game, team_id)
+        .0
+        .players
+        .into_iter()
+        .map(|p| p.id)
+        .collect()
 }

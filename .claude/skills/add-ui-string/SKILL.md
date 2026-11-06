@@ -3,14 +3,34 @@ name: add-ui-string
 description: Add or change any text a player can see, in every locale the game ships in. Covers the full procedure — en.json first, real translations for the rest, INTENTIONAL_SAME.json only where a term genuinely does not translate, then the two vitest gates. Use for frontend strings and for Rust-side message keys.
 when_to_use: Adding a label, button, tooltip, error message, news headline, inbox message, aria-label, or any other user-visible text. Also when changing existing wording, renaming a translation key, or when localeCoverage.test.ts or frontendKeyCoverage.test.ts fails.
 argument-hint: "[what the string says or the key you are adding]"
-allowed-tools: Read, Edit, Write, Grep, Glob, Bash(npx vitest run src/i18n), Bash(npx vitest run src/utils), Bash(npm run audit:i18n)
+allowed-tools: Read, Edit, Write, Grep, Glob, Bash(npm exec --no -- vitest run src/i18n), Bash(npm exec --no -- vitest run src/utils), Bash(npm run audit:i18n)
 ---
 
 # Adding a user-facing string
 
+Follow the root Code quality section; use `i18n-auditor` for translation review and
+`ui-accessibility-reviewer` for changed accessible names. `/write-tests` and `ofm-test-reviewer`
+provide scenario and regression evidence; locale coverage alone does not prove wiring.
+
 OpenFoot Manager ships in **12 locales**. A string that exists only in English is a broken
 build, not a TODO. This is the project's most frequently violated rule, so follow the steps in
 order and finish with the tests.
+
+## First: will a player read it?
+
+That is the test, and it is narrower than "a human will read it". If the answer is yes — anywhere in
+the UI, or a backend error the UI surfaces — this skill applies and the string needs all 12 locales.
+
+If the only reader is an **AI agent** (the MCP server's tool output) or a **modder at a terminal**
+(`ofm-cli` output and its scaffold templates, `docs/`), it stays **English** and this skill does not
+apply. The boundary inside the MCP server: its own private errors reach only the agent, through
+`tools.rs::err_result`. But an MCP function that propagates an error from a shared `application::`
+service which also backs a Tauri command (such as `application::live_match::*`) must keep the
+`be.error.*` key, because the UI shows that error on the Tauri path.
+
+Getting this wrong in the cautious direction is not free — a key no player will ever see still costs
+twelve translations and a row in every locale file, forever. Root `CLAUDE.md` rule 2 has the table;
+if a surface is genuinely ambiguous, ask.
 
 ## The 12 locales
 
@@ -148,8 +168,8 @@ file. `src/utils/backendI18n.localeCoverage.test.ts` covers this half.
 ### 7. Run the gates
 
 ```bash
-npx vitest run src/i18n        # localeCoverage + frontendKeyCoverage + index
-npx vitest run src/utils       # backendI18n coverage, if you touched backend keys
+npm exec --no -- vitest run src/i18n        # localeCoverage + frontendKeyCoverage + index
+npm exec --no -- vitest run src/utils       # backendI18n coverage, if you touched backend keys
 ```
 
 - `localeCoverage.test.ts` — every locale has every `en.json` key, and no locale silently copies
@@ -178,6 +198,6 @@ is not a pass — the vitest gates are.
 - [ ] Form of address matches the neighbouring keys, and no wording assumes the manager’s gender
 - [ ] `INTENTIONAL_SAME.json` touched only for genuinely untranslatable terms
 - [ ] Backend keys mapped in `src/utils/backendI18n*.ts` if applicable
-- [ ] `npx vitest run src/i18n` green
+- [ ] `npm exec --no -- vitest run src/i18n` green
 - [ ] `npm run audit:i18n` output read, not just run
 - [ ] Any new `aria-label` uses a translated string, not a hardcoded one

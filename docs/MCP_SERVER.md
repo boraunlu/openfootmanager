@@ -57,7 +57,10 @@ All MCP-related arguments are only recognized when the `mcp` feature is compiled
 | `--mcp-port <PORT>` | **Yes** | — | Port for the MCP SSE server. Without this flag, no MCP server starts. |
 | `--mcp-mode <MODE>` | No | `sandbox` | `sandbox` = all tools available. `competition` = restricted tool set (see below). |
 | `--mcp-auto-start <WORLD[,TEAM]>` | No* | — | Bootstrap a game before MCP starts. Format: `"/path/to/world.json"` or `"/path/to/world.json,team_id"`. Team ID is optional for HistoricalSnapshot worlds where the manager already has a team assigned. \*\*Required in competition mode\*\* (enforced after CLI parsing, at startup). |
+| `--build-revision` | No | — | Print the version and the source revision the binary was built from (`0.3.0+<revision>`) and exit. Needs no display and answers before the app starts, so it works in any build, with or without the `mcp` feature. A Windows release build is a GUI-subsystem program and prints nothing to an interactive console: redirect its output to a file. The E2E fixture uses it to refuse a stale binary. |
 | `--no-gui` | No | off | Hide the GUI window (headless). Saves ~150MB RAM per instance. |
+| `--dev-full-state` | No | off | Test infrastructure: registers `dev_full_game_state`, the whole game as JSON with every club's players at their exact ratings. The E2E harness passes it to every sandbox app (it compares live state with the saved database and checks that a refused call changed nothing). **Refused at startup with `--mcp-mode competition`**, so an agent cannot start its own server with it. |
+| `--mcp-seed <N>`, `--mcp-start-year <YEAR>`, `--mcp-start-phase <PHASE>` | No | — | Same as `game_new`'s `seed`, `start_year` and `start_phase`. Use `random` as the world to generate one: one seed gives the same team ids, so a sandbox run with the seed tells you which `team_id` to pass. |
 | `--manager-name <NAME>` | No | `Agent` | Manager first name for auto-start. |
 | `--manager-last-name <NAME>` | No | `Manager` | Manager last name for auto-start. |
 | `--manager-nationality <NAT>` | No | `England` | Manager nationality for auto-start. |
@@ -78,44 +81,69 @@ In competition mode, the following tools are **completely omitted** from registr
 - `game_load_save` — agents cannot load arbitrary saves
 - `game_exit` — agents cannot quit to menu
 - `game_export_world` — agents cannot export the world
+- `info_game_state` — the raw game dump holds every club's players at their exact ratings and every club's finances; a competition agent follows the same knowledge rule as a player (an unscouted player is unknown)
+- `dev_full_game_state` — the dump's test-infrastructure twin (below); never registered in competition mode, and `--dev-full-state` together with `--mcp-mode competition` is a startup error
 
-This ensures all agents start from the same state and cannot manipulate the game setup.
+This ensures all agents start from the same state, cannot manipulate the game setup, and see only what their club knows. `--mcp-disable-tools` can still disable individual tools explicitly.
+
+`dev_full_game_state` exists only when the app is launched with `--dev-full-state`, which the E2E harness does for every sandbox app. A competition app has no state oracle at all, the harness included: its snapshots compare the saves directory and the `info_game_summary` an agent can read.
+
+---
+
+## Career token
+
+The game's screen sends a career token with every command that changes the game, so a request
+meant for a replaced career is refused. MCP tools carry no token: an agent acts on whichever career
+is active, so an MCP tool that changes the active game writes with `Career::Active`. `game_select_team` and `game_load_save` install a career with a fresh token instead of checking one. See "Screen writes and the career check"
+in `docs/ARCHITECTURE.md`.
 
 ---
 
 ## Tool Reference
 
-89 tools are available across 15 categories. Use the built-in `help_list_categories` and `help_find_tool` tools to discover tools at runtime.
+91 tools are available across 15 categories. Use the built-in `help_list_categories` and `help_find_tool` tools to discover tools at runtime.
 
 > **Adding a new tool?** Follow the checklist in `src-tauri/src/mcp_server/tools.rs` at `tool_catalog()` — register the route, add to the catalog, add the implementation, emit `game-state-changed` if it mutates state, update competition-mode disabled list if needed, and update this document.
+
+### Results
+
+Every tool returns its outcome twice, built from one value: readable markdown in `content`, and the same data as `structuredContent`.
+
+- **Success**: `structuredContent` is a plain object whose shape is one struct per tool, defined in `src-tauri/crates/mcp-results` (serde only, so clients can deserialize it without the game crates). Fields are `snake_case`; enums are their serialized name. A tool with several outcomes is an object with a tag field (`status`, `outcome`, `fixture` or `visibility`), for example `{"status": "in_progress", "remaining_fixtures": 3}`.
+- **Failure**: `isError` is true and `structuredContent` is `{"error": {"key", "params", "message"}}`. `key` is the `be.error.*` translation key (or null for a message private to the MCP layer), `params` its decoded parameters, `message` the readable text.
+
+Assert on the structure or the key, not on the text: wording can change.
+
+The `initialize` result's `serverInfo.version` is the package version plus the sources the binary was built from as semver build metadata (`0.3.0+<revision>`), so a test run can tell a stale binary from a current one (see `crates/mcp-e2e`).
 
 ### Information (15 tools)
 
 | Tool | Description |
 |------|-------------|
 | `info_game_summary` | High-level overview: date, league position, finances, next match, unread messages |
-| `info_game_state` | Full game state as JSON (programmatic access) |
+| `info_game_state` | Full game state as JSON (programmatic access); not available in competition mode |
+| `dev_full_game_state` | Test infrastructure: the whole game as JSON. Only with `--dev-full-state`; never in competition mode |
 | `info_standings` | Full league table with goal difference |
 | `info_fixtures` | Upcoming fixtures and recent results for your team |
 | `info_match_preview` | Next opponent details, form, and standings comparison |
 | `info_season_context` | Current season phase and transfer window status |
-| `info_player_profile` | Detailed player card: attributes, contract, morale (own team) or limited info (other teams) |
+| `info_player_profile` | Player card, limited to what the club knows (`ofm_core::player_knowledge`): own players in full; a player at a club in the manager's own division by rating and attributes; a scouted player by the scout's report (attributes and date); anyone else by identity only. Condition, morale, fitness, injury and contract are shown for own players only; potential never |
 | `info_player_stats` | Season and career statistics for a player |
 | `info_player_match_history` | Match-by-match performance for a player |
 | `info_team_profile` | Team details: squad size, standings position, recent form, finances |
 | `info_team_stats` | Season statistics for a team |
 | `info_team_match_history` | Match-by-match results for a team |
 | `info_finances` | Financial overview: wage spend, budget, projected net, debt status |
-| `info_finance_snapshot` | Detailed financial snapshot with all health metrics |
+| `info_finance_snapshot` | Detailed financial snapshot with all health metrics, for the manager's own club only (`team_id` may be left out or name the own club; another club's finances are refused) |
 | `info_news` | Recent news articles |
 
 ### Time (3 tools)
 
 | Tool | Description |
 |------|-------------|
-| `time_advance` | Advance one day. Matches are auto-simulated in delegate mode. Returns round summary on match days. |
-| `time_skip_to_match_day` | Fast-forward day-by-day until next fixture. Use `time_advance` to then play the match. |
-| `time_check_blockers` | Check for live matches, pending transfer offers, or other blockers before advancing. |
+| `time_advance` | Advance one day. Matches are auto-simulated in delegate mode. Returns round summary on match days. Refused while a stopping blocker stands (see `time_check_blockers`): the reply lists them, and the squad, contract or other problem has to be resolved first, as on the screen. |
+| `time_skip_to_match_day` | Fast-forward day-by-day until next fixture. Use `time_advance` to then play the match. Stops with a `blocked` outcome, listing the blockers, before it starts if one stands and after any day that brings one. |
+| `time_check_blockers` | What stops time, from the game's own blocker check (`application::time_blockers`, the list and severities the UI uses; informational items such as unread urgent mail are left out): each blocker has an `id` (`injured_xi`, `incomplete_xi`, `squad_size_crisis`, `planned_contract_exit_crisis`, `key_contract_risk`, `contract_wage_risk`), a `severity`, the `tab` that resolves it and its `params`, plus `live_match_in_progress`. |
 
 ### Squad (7 tools)
 
@@ -123,7 +151,7 @@ This ensures all agents start from the same state and cannot manipulate the game
 |------|-------------|
 | `squad_get` | Full squad listing with player IDs, positions, OVR, condition, morale, wages, contract end, starting XI markers |
 | `squad_set_formation` | Change formation (e.g. `4-4-2`, `4-3-3`). Outfield positions are reassigned by defending ability. |
-| `squad_set_starting_xi` | Set the starting eleven by player IDs (must be exactly 11) |
+| `squad_set_starting_xi` | Set the starting eleven by player IDs: exactly 11 distinct players of your club who are match-day eligible (the whole eligible pool if the club has fewer than 11). Refused with `be.error.startingXiPlayerNotEligible`, `…DuplicatePlayer` or `…WrongSize`, and nothing is saved |
 | `squad_set_play_style` | Change play style: `Attacking`, `Defensive`, `Possession`, `Counter`, `HighPress`, `Balanced` |
 | `squad_set_match_roles` | Assign captain, penalty taker, free kick taker, corner taker by player ID |
 | `squad_auto_set_pieces` | Auto-assign best set-piece takers based on attributes |
@@ -143,9 +171,9 @@ This ensures all agents start from the same state and cannot manipulate the game
 
 | Tool | Description |
 |------|-------------|
-| `transfer_market_browse` | Browse players with optional position, max price, and listed-only filters |
-| `transfer_make_bid` | Make a transfer bid. Returns negotiation feedback (mood, tension, patience, suggested fee). |
-| `transfer_preview_bid` | Preview financial impact of a bid without making it |
+| `transfer_market_browse` | Browse players with optional position, max price, and listed-only filters. Each row shows only what the club knows (`ofm_core::player_knowledge`): the rating of a player in the club's own division (`?` for anyone else), and a wage only for a player a scout reported on outside the club's division, rounded to two significant figures (`~16000`; `?` otherwise). `max_price` is an annual figure compared with the weekly wage the club may see, so a player whose wage is hidden never matches it |
+| `transfer_make_bid` | Make a transfer bid. Returns negotiation feedback (mood, tension, patience, suggested fee). The suggested fee is withheld for a player the club does not know. |
+| `transfer_preview_bid` | Preview financial impact of a bid without making it. Wage-derived figures show as `?` when the club cannot see the player's exact wage |
 | `transfer_respond_to_offer` | Accept or reject an incoming transfer offer |
 | `transfer_counter_offer` | Counter an incoming offer with a different fee |
 | `transfer_toggle_listed` | Toggle a player's transfer-listed status |
@@ -165,11 +193,12 @@ This ensures all agents start from the same state and cannot manipulate the game
 | `contract_preview_termination` | Preview cost of terminating a contract |
 | `contract_terminate` | Terminate a contract immediately (costs compensation) |
 
-### Inbox (6 tools)
+### Inbox (7 tools)
 
 | Tool | Description |
 |------|-------------|
 | `inbox_get_messages` | List messages with optional category and read-status filters |
+| `inbox_get_archived` | Read mail older than 180 days, newest first, a page at a time (`before_date`/`before_id` continue) |
 | `inbox_mark_read` | Mark a message as read |
 | `inbox_mark_all_read` | Mark all messages as read |
 | `inbox_delete` | Delete a message |
@@ -202,8 +231,8 @@ This ensures all agents start from the same state and cannot manipulate the game
 
 | Tool | Description |
 |------|-------------|
-| `season_check_complete` | Check if the current season is finished |
-| `season_advance` | Advance through the off-season (may result in being fired) |
+| `season_check_complete` | Check if the current season is finished, by the rule `season_advance` follows (`end_of_season::is_season_complete`): `complete`, `in_progress` with the league fixtures left in the user's tables, `other_divisions_still_playing` (his tables are played out but another division of his country is not), or `no_league` |
+| `season_advance` | Roll over a completed season through the same command as the UI, returning its summary and any dismissal. Refuses an incomplete season; use `time_advance` for a day. |
 | `season_get_awards` | View end-of-season awards (Golden Boot, Player of the Year, etc.) |
 
 ### Game Lifecycle (10 tools)
@@ -212,7 +241,7 @@ Most of these are **disabled in competition mode** — agents use `--mcp-auto-st
 
 | Tool | Description |
 |------|-------------|
-| `game_new` | Create a new manager and generate/load a world |
+| `game_new` | Create a new manager and a world: loaded from `world_source`, or generated (compact) from an optional `seed`, `start_year` and `start_phase` (`seasonStart` or `midSeason`). With `team_id` the career starts and is saved; without it the game is clubless until `game_select_team` |
 | `game_select_team` | Pick a team to manage (creates initial save) |
 | `game_load_save` | Load an existing save |
 | `game_save` | Persist the current game |
@@ -221,18 +250,19 @@ Most of these are **disabled in competition mode** — agents use `--mcp-auto-st
 | `game_list_saves` | List all saved games with manager name and date |
 | `game_delete_save` | Permanently delete a saved game |
 | `game_list_world_databases` | List available world databases (built-in random + user JSON files) |
-| `game_is_finished` | Check if the current game/season is finished |
+| `game_is_finished` | Check if the current game/season is finished: `manager_fired`, `all_fixtures_completed`, `in_progress`, `other_divisions_still_playing` or `no_league_yet`, read the same way as `season_check_complete` |
 
-### Live Match (7 tools)
+### Live Match (8 tools)
 
 These tools allow agents to play matches interactively instead of delegating them.
 
 | Tool | Description |
 |------|-------------|
-| `match_start` | Start a live match for a fixture (mode: live, spectator, instant) |
+| `match_start` | Start a live match (live, spectator, instant). Paired `competition_id` + `fixture_id` select an exact fixture, including a cup, without requiring an index; otherwise `fixture_index` is required and selects the current league mirror. Extra time follows fixture rules; `allows_extra_time` is ignored. |
 | `match_step` | Advance the live match by N minutes |
-| `match_command` | Apply a tactical command (substitution, formation change, etc.) |
-| `match_snapshot` | Get current match state without advancing time |
+| `match_command` | Apply a tactical command (substitution, formation change, etc.) for your own side only: a command naming the other side, or given in a match you are not playing in, is refused with `be.error.liveMatch.notYourSide` |
+| `match_snapshot` | Get current match state without advancing time; during a shootout, your own side's kicking order (never the opponent's) |
+| `match_set_shootout_order` | Set your side's penalty shootout order: all your eligible players, reordered, once the shootout has started and before its first kick. A multi-minute `match_step` stops when the shootout starts, so there is always a chance to set it |
 | `match_finish` | Finish the match, apply results, and clean up |
 | `match_team_talk` | Apply a team talk (half-time or full-time) affecting player morale |
 | `match_press_conference` | Submit press conference answers affecting squad morale |
@@ -291,8 +321,8 @@ To run 8 agents competing in parallel:
 for i in $(seq 1 8); do
   PORT=$((3000 + i))
   SAVEDIR="/tmp/ofm-agent-$i"
-  mkdir -p "$SAVEDIR"
-  export TAURI_SAVE_DIR="$SAVEDIR"
+  mkdir -p "$SAVEDIR/data" "$SAVEDIR/config"
+  export XDG_DATA_HOME="$SAVEDIR/data" XDG_CONFIG_HOME="$SAVEDIR/config"
 
   openfootmanager \
     --mcp-port $PORT \
@@ -310,7 +340,7 @@ done
 
 Each instance gets its own port (3001–3008) and its own game state. Agents diverge only through their decisions.
 
-**Note on save isolation**: By default, all Tauri instances share the same `app_data_dir/saves/` directory (and thus the same SQLite databases). The script above achieves per-instance isolation by setting `TAURI_SAVE_DIR` to a unique directory for each agent. Alternatively, you can build with distinct app identifiers.
+**Note on save isolation**: By default, all Tauri instances share the same `app_data_dir/saves/` directory (and thus the same SQLite databases). On Linux the app data and config directories derive from `XDG_DATA_HOME` and `XDG_CONFIG_HOME`, so the script above isolates each agent by giving it its own pair. Alternatively, you can build with distinct app identifiers.
 
 ---
 
@@ -404,13 +434,19 @@ The `mcp` feature adds `rmcp`, `axum`, `tower`, `tokio` (with `net`), and `tokio
 
 ## Information Visibility
 
-In competition mode, information about other teams' players is limited:
+`info_player_profile` shows a player only as much as the club knows about him
+(`ofm_core::player_knowledge`, the same rule the game's own screens follow), in every mode.
+`info_player_stats` and `info_player_match_history` do not apply this limit: match and
+performance statistics are public, and they return those of any player in the game.
 
-- **Your team**: Full detail (all attributes, condition, morale, wage, contract end, injury status)
-- **Other teams**: OVR, position, age, and condition only
-- **Scouted players**: Full detail from scout reports (use `scout_send` → `scout_get_reports`)
+- **Your team** (including players loaned in or out): full detail (all attributes, condition, morale, wage, contract end, injury status)
+- **A club in your own division**: rating and the 19 attributes; no condition, morale, injury, wage or contract
+- **Scouted players**: the scout report's attributes and its date (use `scout_send` → `scout_get_reports`); not the live rating or condition
+- **Anyone else**: who he is (name, age, position, nationality, team) and nothing more
 
-This makes scouting strategically important — agents must invest scout assignments to discover player details before bidding.
+A scouted player's profile carries only the report's attributes and its date, never his condition or
+morale. The raw `info_game_state` dump is not available in competition mode, as described under
+[Competition Mode](#competition-mode).
 
 ---
 
@@ -484,3 +520,16 @@ src-tauri/src/mcp_server/
 │   └── help.rs      # Tool discovery helpers
 └── formatting.rs    # Error key → human-readable translation
 ```
+
+### Live-match refusal
+
+While a live-match session exists, `game_save`, `time_advance`,
+`time_skip_to_match_day`, `season_advance`, and a second `match_start` are refused
+with the backend key `be.error.liveMatch.inProgress`. Save-on-exit also refuses
+before clearing the game (`game_exit` and Tauri `exit_to_menu`). The game,
+fixtures, clock and existing session stay unchanged, and saving writes no files. Finish the
+current match with `match_finish` before saving or advancing. A completed
+snapshot still counts as a live session until `match_finish` applies its result.
+Autosave follows a successful day advance and therefore cannot run during the
+refused advance. This application rule also applies to the corresponding Tauri
+save, advance, skip, season and match commands.

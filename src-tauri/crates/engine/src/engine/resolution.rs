@@ -2,10 +2,10 @@ use rand::{Rng, RngExt};
 
 use crate::event::{EventType, MatchEvent};
 use crate::shared::{
-    PlayStylePhase, TraitContext, home_mod, play_style_modifier, role_attribute_modifier,
+    PlayStylePhase, TraitContext, home_mod, play_style_modifier, role_modifier,
     tactics_buildup_mod, tactics_cross_probability, tactics_defensive_conversion_mod,
     tactics_foul_modifier, tactics_pressing_press, tactics_shape_modifier,
-    tactics_tempo_progression, trait_bonus,
+    tactics_tempo_progression, tactics_width_versus_shape, trait_bonus,
 };
 use crate::types::{Position, Side, Zone};
 
@@ -105,12 +105,16 @@ fn resolve_midfield<R: Rng>(
         ctx.team(att_side).play_style,
         PlayStylePhase::Midfield,
         true,
-    ) * role_attribute_modifier(attacker.role, PlayStylePhase::Midfield);
+    ) * role_modifier(
+        Position::Midfielder,
+        attacker.role,
+        PlayStylePhase::Midfield,
+    );
     let def_mod = play_style_modifier(
         ctx.team(def_side).play_style,
         PlayStylePhase::Midfield,
         false,
-    ) * role_attribute_modifier(defender.role, PlayStylePhase::Defense);
+    ) * role_modifier(Position::Midfielder, defender.role, PlayStylePhase::Defense);
     let att_eff = att_rating
         * att_mod
         * home_mod(att_side, ctx.config)
@@ -182,17 +186,15 @@ fn resolve_attacking_third<R: Rng>(
         * trait_bonus(&defender, TraitContext::Tackling);
 
     let att_mod = play_style_modifier(ctx.team(att_side).play_style, PlayStylePhase::Attack, true)
-        * role_attribute_modifier(attacker.role, PlayStylePhase::Attack);
-    let def_mod = play_style_modifier(
-        ctx.team(def_side).play_style,
-        PlayStylePhase::Defense,
-        false,
-    ) * role_attribute_modifier(defender.role, PlayStylePhase::Defense);
+        * role_modifier(Position::Forward, attacker.role, PlayStylePhase::Attack);
+    let def_mod = play_style_modifier(ctx.team(def_side).play_style, PlayStylePhase::Defense, true)
+        * role_modifier(Position::Defender, defender.role, PlayStylePhase::Defense);
     let att_eff = att_rating * att_mod * home_mod(att_side, ctx.config);
     let def_eff = def_rating
         * def_mod
         * home_mod(def_side, ctx.config)
-        * tactics_shape_modifier(&ctx.team(def_side).tactics);
+        * tactics_shape_modifier(&ctx.team(def_side).tactics)
+        * tactics_width_versus_shape(&ctx.team(att_side).tactics, &ctx.team(def_side).tactics);
     let success = att_eff / (att_eff + def_eff);
     let zone = Zone::attacking_third(att_side);
     let cross_prob = tactics_cross_probability(&ctx.team(att_side).tactics);
@@ -366,9 +368,7 @@ fn resolve_shot<R: Rng>(ctx: &mut MatchContext, minute: u8, att_side: Side, rng:
         ctx.ball_zone = Zone::Midfield;
     } else {
         ctx.emit(
-            MatchEvent::new(minute, EventType::ShotSaved, att_side, zone)
-                .with_player(&shooter.id)
-                .with_secondary(&goalkeeper.id),
+            MatchEvent::new(minute, EventType::ShotSaved, att_side, zone).with_player(&shooter.id),
         );
         // 40% of saves → corner (keeper parries wide), 60% → goal kick (keeper catches)
         if rng.random_range(0.0..1.0f64) < 0.40 {

@@ -74,6 +74,9 @@ pub struct CompetitionDefinition {
     /// Optional path to a logo/badge image, relative to the package root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo: Option<String>,
+    /// Explicit phase identity and optional authored closing window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<domain::competition_calendar::SeasonCalendar>,
 }
 
 /// Format-specific configuration. `kind` selects the shape; the other fields
@@ -95,6 +98,29 @@ pub struct FormatDef {
     /// Best next-placed finishers that also advance (GroupAndKnockout).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_third_qualifiers: Option<u32>,
+}
+
+impl FormatDef {
+    /// Ordinary-table leg resolution, also used by its retained metadata.
+    pub(crate) fn league_table_legs(&self) -> u8 {
+        self.legs.unwrap_or(2)
+    }
+
+    /// The effective authored shape, shared by validation and construction.
+    fn group_stage_config(&self) -> crate::group_stage::GroupStageConfig {
+        let defaults = crate::group_stage::GroupStageConfig::default();
+        crate::group_stage::GroupStageConfig {
+            group_size: self.group_size.unwrap_or(defaults.group_size),
+            legs: self.legs.unwrap_or(defaults.legs),
+            qualifiers_per_group: self
+                .qualifiers_per_group
+                .unwrap_or(defaults.qualifiers_per_group),
+            best_third_qualifiers: self
+                .best_third_qualifiers
+                .unwrap_or(defaults.best_third_qualifiers),
+            ..defaults
+        }
+    }
 }
 
 /// How a competition's participants are chosen. Exactly one variant must be
@@ -201,6 +227,12 @@ impl<'a> WorldValidationContext<'a> {
                 }
             })
             .collect();
+        country_codes.extend(
+            world
+                .regions
+                .iter()
+                .flat_map(|region| region.country_codes.iter().map(String::as_str)),
+        );
         // Include builtin nations so competition selectors that reference them
         // pass validation here, matching what validate_competition_references
         // uses at build/install time. `all_nations()`, not the World Cup pool:
@@ -271,6 +303,12 @@ pub fn validate_definitions(
 
         validate_region_and_country(competition, ctx, &mut errors);
         validate_format(competition, &mut errors);
+        if crate::calendar_identity::invalid_definition_calendar(competition) {
+            errors.push(DefinitionError::new(
+                "be.error.competitionDef.invalidCalendar",
+                &competition.id,
+            ));
+        }
         validate_participants(competition, ctx, &known_ids, &mut errors);
         validate_berths(competition, &known_ids, &mut errors);
 
@@ -280,7 +318,109 @@ pub fn validate_definitions(
     }
 
     detect_selector_cycles(file, &mut errors);
+    detect_duplicate_tier_priorities(file, &mut errors);
     errors
+}
+
+/// Two domestic league tables in one country must not share a `priority`.
+///
+/// `priority` is what ranks one division above another, so an equal pair are
+/// peers and the order between them is whatever the file happened to list
+/// first. The ladder refuses to promote across such a pair rather than guess,
+/// which means neither division promotes or relegates anyone — silently. The
+/// package editor and the scaffold both default a new competition to the same
+/// number, so this is easy to author by accident.
+fn detect_duplicate_tier_priorities(
+    file: &CompetitionDefinitionFile,
+    errors: &mut Vec<DefinitionError>,
+) {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // Mirror the ladder's own exclusions, or this rejects configurations the
+    // game supports. Parallel regional groups at one tier feeding a central
+    // league are peers on purpose: they leave the ladder as a set through their
+    // berths, so they never reach the rank check and equal numbers are correct
+    // for them. A berth-fed target is off the ladder for the same reason.
+    let is_tier = |competition: &CompetitionDefinition| {
+        competition.scope == CompetitionScope::Domestic
+            && competition.r#type == CompetitionType::League
+            && competition.format.kind == CompetitionFormat::LeagueTable
+    };
+    fn position_targets(competition: &CompetitionDefinition) -> BTreeSet<&str> {
+        competition
+            .berths
+            .iter()
+            .filter(|berth| matches!(berth.rule, BerthRule::PositionRange { .. }))
+            .map(|berth| berth.target.as_str())
+            .collect()
+    }
+    // Only a berth into a tier makes siblings, because only those leave the
+    // runtime ladder. Counting a continental cup here would excuse the very
+    // shape `create_game` ships — every first division berths into the same cup
+    // — so two equal-ranked divisions would be waved through as "siblings" and
+    // then silently refused promotion at runtime.
+    let tier_ids: HashSet<&str> = file
+        .competitions
+        .iter()
+        .filter(|competition| is_tier(competition))
+        .map(|competition| competition.id.as_str())
+        .collect();
+    let tier_targets = |competition: &CompetitionDefinition| -> Vec<String> {
+        position_targets(competition)
+            .into_iter()
+            .filter(|target| tier_ids.contains(target))
+            .map(str::to_string)
+            .collect()
+    };
+    let berth_targets: HashSet<String> = file.competitions.iter().flat_map(&tier_targets).collect();
+    let mut feeders_by_target: BTreeMap<String, usize> = BTreeMap::new();
+    for competition in file.competitions.iter().filter(|c| is_tier(c)) {
+        for target in tier_targets(competition) {
+            *feeders_by_target.entry(target).or_default() += 1;
+        }
+    }
+    let is_sibling_feeder = |competition: &CompetitionDefinition| {
+        tier_targets(competition).iter().any(|target| {
+            feeders_by_target
+                .get(target)
+                .is_some_and(|count| *count > 1)
+        })
+    };
+
+    let mut by_country: BTreeMap<(&str, u32), Vec<(usize, &CompetitionDefinition)>> =
+        BTreeMap::new();
+    for (index, competition) in file.competitions.iter().enumerate() {
+        if !is_tier(competition)
+            || berth_targets.contains(competition.id.as_str())
+            || is_sibling_feeder(competition)
+        {
+            continue;
+        }
+        let Some(country) = competition.country_id.as_deref() else {
+            continue;
+        };
+        by_country
+            .entry((country, competition.priority))
+            .or_default()
+            .push((index, competition));
+    }
+
+    for ((country, priority), tiers) in by_country {
+        if tiers.len() < 2 {
+            continue;
+        }
+        // Blame every member: any one of them could be the one to renumber.
+        for (index, competition) in tiers {
+            let mut error = DefinitionError::new(
+                "be.error.competitionDef.duplicateTierPriority",
+                &competition.id,
+            )
+            .with("country", country.to_string())
+            .with("priority", priority.to_string());
+            error.competition_index = Some(index);
+            errors.push(error);
+        }
+    }
 }
 
 fn validate_berths(
@@ -340,6 +480,16 @@ fn check_berth_target(
                 &competition.id,
             )
             .with("target", target.to_string()),
+        );
+        return;
+    }
+    // A berth sends clubs somewhere else. Pointed at itself it validates
+    // cleanly, marks the competition as berth-fed, and quietly takes it off
+    // its own country's promotion ladder — a typo that costs a whole pyramid.
+    if target == competition.id {
+        errors.push(
+            DefinitionError::new("be.error.competitionDef.berthSelfTarget", &competition.id)
+                .with("target", target.to_string()),
         );
     }
 }
@@ -448,13 +598,18 @@ fn validate_format(competition: &CompetitionDefinition, errors: &mut Vec<Definit
         );
     }
     if let Some(group_size) = format.group_size
-        && group_size < 2
+        && group_size < domain::league::MIN_GROUP_SIZE
     {
         errors.push(
             DefinitionError::new("be.error.competitionDef.groupSizeTooSmall", &competition.id)
                 .with("groupSize", group_size.to_string()),
         );
     }
+    validate_group_qualification(
+        competition,
+        competition.participants.explicit.as_ref().map(Vec::len),
+        errors,
+    );
     if let Some(legs) = format.legs
         && legs == 0
     {
@@ -463,6 +618,109 @@ fn validate_format(competition: &CompetitionDefinition, errors: &mut Vec<Definit
             &competition.id,
         ));
     }
+}
+
+/// Qualification must be attainable in every balanced group. Extra qualifiers
+/// are next-placed finishers, so shorter groups may have none to supply.
+fn validate_group_qualification(
+    competition: &CompetitionDefinition,
+    entrants: Option<usize>,
+    errors: &mut Vec<DefinitionError>,
+) {
+    if competition.format.kind != CompetitionFormat::GroupAndKnockout {
+        return;
+    }
+    let config = competition.format.group_stage_config();
+    let size = config.group_size as usize;
+    if size < domain::league::MIN_GROUP_SIZE as usize {
+        return; // Reported by validate_format; avoid division by zero.
+    }
+    let qualifiers = config.qualifiers_per_group as usize;
+    let extra = config.best_third_qualifiers as usize;
+    let incompatible = qualifiers == 0
+        || qualifiers > size
+        || entrants.is_some_and(|entrants| {
+            let groups = crate::group_stage::group_count(entrants, size);
+            let smallest = entrants / groups;
+            let available_extra = if smallest > qualifiers {
+                groups
+            } else if smallest == qualifiers {
+                entrants % groups
+            } else {
+                0
+            };
+            smallest < domain::league::MIN_GROUP_SIZE as usize
+                || qualifiers > smallest
+                || extra > available_extra
+                || groups * qualifiers + extra < 2
+        });
+    if incompatible {
+        errors.push(DefinitionError::new(
+            "be.error.competitionDef.invalidGroupQualification",
+            &competition.id,
+        ));
+    }
+}
+
+/// How the `topByReputation` and `championsOf` selectors rank clubs.
+///
+/// A package's clubs have a reputation *range*, and a world built from it samples one value per
+/// club. Ranking by the sampled value would let the same package resolve to different fields from
+/// one career to the next, and differently from the editor's check, so a package ranks by the
+/// authored value, the middle of the range (see [`authored_reputations`]). Every other world ranks
+/// by the reputation its clubs already have.
+#[derive(Clone, Copy)]
+pub enum ReputationBasis<'a> {
+    /// The club's own `reputation`.
+    Stored,
+    /// The authored reputation of each club by id; a club that is not in the map ranks by its own.
+    Authored(&'a HashMap<String, u32>),
+}
+
+impl ReputationBasis<'_> {
+    fn of(&self, team: &Team) -> u32 {
+        match self {
+            Self::Stored => team.reputation,
+            Self::Authored(authored) => authored.get(&team.id).copied().unwrap_or(team.reputation),
+        }
+    }
+}
+
+/// Validate against the actual selector results, using the same resolver as
+/// construction. A selector's requested count is only an upper bound.
+pub fn validate_definitions_for_world(
+    file: &CompetitionDefinitionFile,
+    world: &super::WorldData,
+) -> Vec<DefinitionError> {
+    validate_definitions_for_world_ranked(file, world, ReputationBasis::Stored)
+}
+
+/// [`validate_definitions_for_world`], ranking clubs by `basis`.
+pub fn validate_definitions_for_world_ranked(
+    file: &CompetitionDefinitionFile,
+    world: &super::WorldData,
+    basis: ReputationBasis<'_>,
+) -> Vec<DefinitionError> {
+    let mut errors = validate_definitions(file, &WorldValidationContext::from_world(world));
+    if !errors.is_empty() {
+        return errors;
+    }
+    let participants = resolve_definition_participants(file, world, basis);
+    for (index, competition) in file.competitions.iter().enumerate() {
+        if competition.participants.selector.is_none() {
+            continue; // Explicit lists were checked by validate_format.
+        }
+        let entrants = participants[&competition.id].len();
+        if entrants < 2 {
+            continue; // Construction skips these selectors instead of creating a cup.
+        }
+        let raised_before = errors.len();
+        validate_group_qualification(competition, Some(entrants), &mut errors);
+        for error in &mut errors[raised_before..] {
+            error.competition_index = Some(index);
+        }
+    }
+    errors
 }
 
 fn validate_participants(
@@ -482,26 +740,45 @@ fn validate_participants(
             &competition.id,
         )),
         (Some(explicit), None) => {
-            if explicit.len() < 2 {
-                errors.push(DefinitionError::new(
-                    "be.error.competitionDef.tooFewParticipants",
-                    &competition.id,
-                ));
-            }
-            for team_id in explicit {
-                if !ctx.team_ids.contains(team_id.as_str()) {
-                    errors.push(
-                        DefinitionError::new(
-                            "be.error.competitionDef.unknownTeam",
-                            &competition.id,
-                        )
-                        .with("team", team_id.clone()),
-                    );
-                }
-            }
+            validate_explicit_participants(competition, explicit, ctx, errors)
         }
         (None, Some(selector)) => {
             validate_selector(competition, selector, ctx, known_ids, errors);
+        }
+    }
+}
+
+fn validate_explicit_participants(
+    competition: &CompetitionDefinition,
+    explicit: &[String],
+    ctx: &WorldValidationContext,
+    errors: &mut Vec<DefinitionError>,
+) {
+    if explicit.len() < 2 {
+        errors.push(DefinitionError::new(
+            "be.error.competitionDef.tooFewParticipants",
+            &competition.id,
+        ));
+    }
+    for team_id in explicit {
+        if !ctx.team_ids.contains(team_id.as_str()) {
+            errors.push(
+                DefinitionError::new("be.error.competitionDef.unknownTeam", &competition.id)
+                    .with("team", team_id.clone()),
+            );
+        }
+    }
+    // A club listed twice would get two rows in a league table, and its
+    // reputation would be judged once per row. Selectors draw from the world's
+    // clubs, whose ids are unique, so only an authored list can repeat one.
+    let mut seen = HashSet::new();
+    let mut reported = HashSet::new();
+    for team_id in explicit {
+        if !seen.insert(team_id.as_str()) && reported.insert(team_id.as_str()) {
+            errors.push(
+                DefinitionError::new("be.error.competitionDef.duplicateTeam", &competition.id)
+                    .with("team", team_id.clone()),
+            );
         }
     }
 }
@@ -705,6 +982,9 @@ fn reassign_competition_id(competition: &mut League, new_id: &str) {
     competition.id = new_id.to_string();
     for fixture in &mut competition.fixtures {
         fixture.competition_id = new_id.to_string();
+        // Fixture ids were derived from the competition's name and teams; two authored cups
+        // that share both would share every id. The definition's own id tells them apart.
+        fixture.id = crate::seed::derived_id(&["authored-fixture", new_id, &fixture.id]);
     }
     for round in &mut competition.knockout_rounds {
         round.id = round.id.replace(&old, new_id);
@@ -729,6 +1009,7 @@ fn dependency_ids(def: &CompetitionDefinition) -> Vec<String> {
 fn resolve_participants(
     def: &CompetitionDefinition,
     world: &super::WorldData,
+    basis: ReputationBasis<'_>,
     region_by_country: &HashMap<String, String>,
     resolved: &HashMap<String, Vec<String>>,
 ) -> Vec<String> {
@@ -757,7 +1038,7 @@ fn resolve_participants(
                 .filter(|team| team_country(team) == country)
                 .filter(|team| !excluded.contains(&team.id))
                 .collect();
-            clubs.sort_by(|a, b| b.reputation.cmp(&a.reputation).then(a.id.cmp(&b.id)));
+            clubs.sort_by(|a, b| basis.of(b).cmp(&basis.of(a)).then(a.id.cmp(&b.id)));
             clubs
                 .into_iter()
                 .take(take.unwrap_or(usize::MAX))
@@ -803,7 +1084,7 @@ fn resolve_participants(
                         .collect()
                 })
                 .unwrap_or_default();
-            clubs.sort_by(|a, b| b.reputation.cmp(&a.reputation).then(a.id.cmp(&b.id)));
+            clubs.sort_by(|a, b| basis.of(b).cmp(&basis.of(a)).then(a.id.cmp(&b.id)));
             clubs
                 .into_iter()
                 .take(take.unwrap_or(usize::MAX))
@@ -832,8 +1113,8 @@ fn build_competition(
                 team_ids,
                 season_start,
                 fixture_competition,
-                def.format.legs.unwrap_or(2),
-                7,
+                def.format.league_table_legs(),
+                crate::schedule::LEAGUE_MATCHDAY_GAP_DAYS.into(),
             );
             league
         }
@@ -850,13 +1131,7 @@ fn build_competition(
             cup
         }
         CompetitionFormat::GroupAndKnockout => {
-            let config = crate::group_stage::GroupStageConfig {
-                legs: def.format.legs.unwrap_or(2),
-                matchday_gap_days: 7,
-                qualifiers_per_group: def.format.qualifiers_per_group.unwrap_or(2),
-                best_third_qualifiers: def.format.best_third_qualifiers.unwrap_or(0),
-                ..Default::default()
-            };
+            let config = def.format.group_stage_config();
             let mut cup = crate::group_stage::generate_group_knockout_cup_with(
                 &def.name,
                 season,
@@ -882,6 +1157,7 @@ fn build_competition(
     competition.season_start_month = def.season_start_month.unwrap_or(8);
     competition.season_start_day = def.season_start_day.unwrap_or(1);
     competition.name_key = def.name_key.clone();
+    crate::calendar_identity::attach_definition_calendar(&mut competition, def, season_start);
     // Rebuild standings to match the resolved participants for table formats.
     if def.format.kind == CompetitionFormat::LeagueTable {
         competition.standings = team_ids
@@ -892,20 +1168,11 @@ fn build_competition(
     Some(competition)
 }
 
-/// Turn a validated definition file into runnable competitions. Selectors are
-/// resolved against the world (in dependency order), and competitions whose
-/// participant list comes out below two clubs are skipped. Call only after
-/// [`validate_definitions`] has returned no errors.
-///
-/// `game_start` is the game's anchor date (July 1 of the chosen start year).
-/// Each competition derives its own season-start date from its
-/// `season_start_month`/`season_start_day` fields.
-pub fn resolve_definitions(
+fn resolve_definition_participants(
     file: &CompetitionDefinitionFile,
     world: &super::WorldData,
-    season: u32,
-    game_start: DateTime<Utc>,
-) -> Vec<League> {
+    basis: ReputationBasis<'_>,
+) -> HashMap<String, Vec<String>> {
     let region_by_country = country_to_region(world);
 
     // Resolve participant lists in dependency order (selectors that read other
@@ -920,7 +1187,7 @@ pub fn resolve_definitions(
                 .iter()
                 .all(|dep| resolved.contains_key(dep));
             if ready {
-                let ids = resolve_participants(def, world, &region_by_country, &resolved);
+                let ids = resolve_participants(def, world, basis, &region_by_country, &resolved);
                 resolved.insert(def.id.clone(), ids);
                 progressed = true;
                 false
@@ -935,9 +1202,39 @@ pub fn resolve_definitions(
     // Any unresolved (e.g. a dependency pointing outside the file) resolve
     // ignoring the missing dependency, so nothing is silently dropped.
     for def in pending {
-        let ids = resolve_participants(def, world, &region_by_country, &resolved);
+        let ids = resolve_participants(def, world, basis, &region_by_country, &resolved);
         resolved.insert(def.id.clone(), ids);
     }
+
+    resolved
+}
+
+/// Turn a validated definition file into runnable competitions. Selectors are
+/// resolved against the world (in dependency order), and competitions whose
+/// participant list comes out below two clubs are skipped. Call only after
+/// [`validate_definitions_for_world`] has returned no errors.
+///
+/// `game_start` is the game's anchor date (July 1 of the chosen start year).
+/// Each competition derives its own season-start date from its
+/// `season_start_month`/`season_start_day` fields.
+pub fn resolve_definitions(
+    file: &CompetitionDefinitionFile,
+    world: &super::WorldData,
+    season: u32,
+    game_start: DateTime<Utc>,
+) -> Vec<League> {
+    resolve_definitions_ranked(file, world, ReputationBasis::Stored, season, game_start)
+}
+
+/// [`resolve_definitions`], ranking clubs by `basis`.
+pub fn resolve_definitions_ranked(
+    file: &CompetitionDefinitionFile,
+    world: &super::WorldData,
+    basis: ReputationBasis<'_>,
+    season: u32,
+    game_start: DateTime<Utc>,
+) -> Vec<League> {
+    let resolved = resolve_definition_participants(file, world, basis);
 
     // Build in authoring order so priorities line up predictably.
     file.competitions
@@ -969,6 +1266,36 @@ pub fn build_explicit_competition(
 
 #[cfg(test)]
 mod tests {
+    /// Given two authored group cups with the same name and the same teams but different ids,
+    /// When both are built,
+    /// Then no fixture id is shared: ids are keyed by the definition, not just by what it is
+    ///      called, or match statistics for one would be overwritten by the other.
+    #[test]
+    fn two_group_cups_with_one_name_and_different_ids_share_no_fixture_id() {
+        let teams: Vec<String> = (1..=8).map(|n| format!("team_{n}")).collect();
+        use chrono::TimeZone;
+        let start = chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let build = |id: &str| {
+            let mut cup = crate::group_stage::generate_group_knockout_cup_with(
+                "Same Name",
+                2026,
+                &teams,
+                start,
+                CompetitionType::Cup,
+                CompetitionScope::Domestic,
+                &crate::group_stage::GroupStageConfig::default(),
+            );
+            reassign_competition_id(&mut cup, id);
+            cup
+        };
+
+        let (one, two) = (build("cup-one"), build("cup-two"));
+
+        assert!(!one.fixtures.is_empty());
+        let ids: std::collections::BTreeSet<&String> = one.fixtures.iter().map(|f| &f.id).collect();
+        assert!(two.fixtures.iter().all(|f| !ids.contains(&f.id)));
+    }
+
     use super::*;
 
     fn ctx() -> WorldValidationContext<'static> {
@@ -1005,6 +1332,7 @@ mod tests {
             season_start_day: None,
             name_key: None,
             logo: None,
+            calendar: None,
         }
     }
 
@@ -1019,6 +1347,108 @@ mod tests {
             competitions: vec![explicit("tr-1", &["team-a", "team-b"])],
         };
         assert!(validate_definitions(&file, &ctx()).is_empty());
+    }
+
+    /// Two divisions of one country at the same rank are peers, and the ladder
+    /// refuses to promote across them rather than guess the order — silently.
+    /// The package editor and the scaffold both default a new competition to
+    /// the same number, so this is easy to author by accident.
+    #[test]
+    fn two_domestic_league_tables_in_one_country_must_not_share_a_priority() {
+        let mut first = explicit("tr-1", &["team-a", "team-b"]);
+        let mut second = explicit("tr-2", &["team-b", "team-c"]);
+        first.priority = 1;
+        second.priority = 1;
+        let file = CompetitionDefinitionFile {
+            format_version: 1,
+            competitions: vec![first, second],
+        };
+
+        let errors = validate_definitions(&file, &ctx());
+        assert_eq!(
+            codes(&errors),
+            vec![
+                "be.error.competitionDef.duplicateTierPriority",
+                "be.error.competitionDef.duplicateTierPriority",
+            ],
+            "both divisions are blamed, because either could be the one to renumber"
+        );
+    }
+
+    /// The shape `create_game` ships: every first division berths into the same
+    /// continental cup. A cup is not a rung, so the two divisions are not
+    /// siblings at runtime — they stay in one ladder run and are refused
+    /// promotion for sharing a rank. Counting every berth target here excused
+    /// exactly that case.
+    #[test]
+    fn a_shared_continental_berth_does_not_excuse_a_duplicate_priority() {
+        let mut first = explicit("tr-1", &["team-a", "team-b"]);
+        let mut second = explicit("tr-2", &["team-b", "team-c"]);
+        first.priority = 1;
+        second.priority = 1;
+        for division in [&mut first, &mut second] {
+            division.berths = vec![Berth {
+                target: "ucl".to_string(),
+                rule: BerthRule::PositionRange { from: 1, to: 1 },
+                fallback_to: None,
+            }];
+        }
+        let mut cup = explicit("ucl", &["team-a", "team-b"]);
+        cup.r#type = CompetitionType::ContinentalClub;
+        cup.scope = CompetitionScope::Continental;
+        cup.country_id = None;
+        cup.region_id = Some("europe".to_string());
+        cup.format.kind = CompetitionFormat::GroupAndKnockout;
+
+        let file = CompetitionDefinitionFile {
+            format_version: 1,
+            competitions: vec![first, second, cup],
+        };
+
+        assert_eq!(
+            codes(&validate_definitions(&file, &ctx())),
+            vec![
+                "be.error.competitionDef.duplicateTierPriority",
+                "be.error.competitionDef.duplicateTierPriority",
+            ],
+            "a continental berth does not make two divisions siblings"
+        );
+    }
+
+    /// Ranked apart, the very same pair is an ordinary two-tier pyramid.""
+    #[test]
+    fn two_domestic_league_tables_ranked_apart_are_a_valid_pyramid() {
+        let mut first = explicit("tr-1", &["team-a", "team-b"]);
+        let mut second = explicit("tr-2", &["team-b", "team-c"]);
+        first.priority = 0;
+        second.priority = 1;
+        let file = CompetitionDefinitionFile {
+            format_version: 1,
+            competitions: vec![first, second],
+        };
+        assert!(validate_definitions(&file, &ctx()).is_empty());
+    }
+
+    /// A berth sends clubs somewhere else. Pointed at itself it used to
+    /// validate cleanly, then mark the competition as berth-fed and take it off
+    /// its own country's ladder — one typo costing a whole pyramid.
+    #[test]
+    fn a_berth_cannot_target_its_own_competition() {
+        let mut league = explicit("tr-1", &["team-a", "team-b"]);
+        league.berths = vec![Berth {
+            target: "tr-1".to_string(),
+            rule: BerthRule::PositionRange { from: 1, to: 1 },
+            fallback_to: None,
+        }];
+        let file = CompetitionDefinitionFile {
+            format_version: 1,
+            competitions: vec![league],
+        };
+
+        assert_eq!(
+            codes(&validate_definitions(&file, &ctx())),
+            vec!["be.error.competitionDef.berthSelfTarget"]
+        );
     }
 
     fn berth(target: &str, rule: BerthRule) -> Berth {
@@ -1114,6 +1544,34 @@ mod tests {
         assert!(codes(&errors).contains(&"be.error.competitionDef.unknownTeam"));
         assert!(codes(&errors).contains(&"be.error.competitionDef.unknownCountry"));
         assert!(codes(&errors).contains(&"be.error.competitionDef.unknownRegion"));
+    }
+
+    /// Given a league whose explicit list names one club three times
+    /// When the definitions are validated
+    /// Then the repeat is reported once, naming that club, because a club
+    /// listed twice would be given two rows in the league table
+    #[test]
+    fn a_club_listed_twice_in_an_explicit_list_is_rejected() {
+        let file = CompetitionDefinitionFile {
+            format_version: 1,
+            competitions: vec![explicit(
+                "tr-1",
+                &["team-a", "team-b", "team-a", "team-c", "team-a"],
+            )],
+        };
+
+        let errors = validate_definitions(&file, &ctx());
+
+        let repeats: Vec<_> = errors
+            .iter()
+            .filter(|e| e.code == "be.error.competitionDef.duplicateTeam")
+            .collect();
+        assert_eq!(repeats.len(), 1, "reported once: {:?}", codes(&errors));
+        assert_eq!(repeats[0].competition_id, "tr-1");
+        assert_eq!(
+            repeats[0].params,
+            vec![("team".to_string(), "team-a".to_string())]
+        );
     }
 
     #[test]
@@ -1308,6 +1766,7 @@ mod tests {
             season_start_day: None,
             name_key: None,
             logo: None,
+            calendar: None,
         }
     }
 

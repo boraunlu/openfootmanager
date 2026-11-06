@@ -32,9 +32,7 @@ interface MatchSlotProps {
 
 function ScoreBadge({ score }: { score: number }): JSX.Element {
   return (
-    <span className="w-6 text-center text-xs font-bold font-heading tabular-nums">
-      {score}
-    </span>
+    <span className="w-6 text-center text-xs font-bold font-heading tabular-nums">{score}</span>
   );
 }
 
@@ -66,34 +64,21 @@ function MatchSlot({
   }
 
   const result = fixture.result;
-  const homeName = fixture.home_team_id
-    ? resolveTeamName(fixture.home_team_id)
-    : tbdLabel;
-  const awayName = fixture.away_team_id
-    ? resolveTeamName(fixture.away_team_id)
-    : tbdLabel;
+  const homeName = fixture.home_team_id ? resolveTeamName(fixture.home_team_id) : tbdLabel;
+  const awayName = fixture.away_team_id ? resolveTeamName(fixture.away_team_id) : tbdLabel;
 
-  // A knockout decided on penalties is level on goals: fall back to the
-  // shootout score so the advancing side is highlighted, not left neutral.
+  // The tally is shown for a tie the shootout settled; who advances is the backend's answer.
   const decidedByPenalties =
     !!result &&
     result.home_penalties != null &&
     result.away_penalties != null &&
     result.home_goals === result.away_goals;
-  const isHomeWinner =
-    !!result &&
-    (decidedByPenalties
-      ? result.home_penalties! > result.away_penalties!
-      : result.home_goals > result.away_goals);
-  const isAwayWinner =
-    !!result &&
-    (decidedByPenalties
-      ? result.away_penalties! > result.home_penalties!
-      : result.away_goals > result.home_goals);
+  const advancingTeamId = fixture.advancing_team_id ?? null;
+  const isHomeWinner = !!result && advancingTeamId === fixture.home_team_id;
+  const isAwayWinner = !!result && advancingTeamId === fixture.away_team_id;
 
   const userInvolved =
-    userTeamId &&
-    (fixture.home_team_id === userTeamId || fixture.away_team_id === userTeamId);
+    userTeamId && (fixture.home_team_id === userTeamId || fixture.away_team_id === userTeamId);
 
   const baseRow = "flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors";
   const winnerRow = "font-bold text-gray-900 dark:text-white bg-primary-50 dark:bg-primary-900/20";
@@ -101,10 +86,18 @@ function MatchSlot({
   const neutralRow = "text-gray-700 dark:text-gray-300";
 
   const homeRowStyle = result
-    ? isHomeWinner ? winnerRow : isAwayWinner ? loserRow : neutralRow
+    ? isHomeWinner
+      ? winnerRow
+      : isAwayWinner
+        ? loserRow
+        : neutralRow
     : neutralRow;
   const awayRowStyle = result
-    ? isAwayWinner ? winnerRow : isHomeWinner ? loserRow : neutralRow
+    ? isAwayWinner
+      ? winnerRow
+      : isHomeWinner
+        ? loserRow
+        : neutralRow
     : neutralRow;
 
   return (
@@ -149,7 +142,9 @@ export default function KnockoutBracket({
 
   const fixtureById = new Map(fixtures.map((f) => [f.id, f]));
 
-  const maxSlots = Math.max(...rounds.map((r) => r.fixture_ids.length + (r.bye_team_ids?.length ?? 0)));
+  const maxSlots = Math.max(
+    ...rounds.map((r) => r.fixture_ids.length + (r.bye_team_ids?.length ?? 0)),
+  );
 
   return (
     <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-navy-600 bg-white dark:bg-navy-800">
@@ -175,10 +170,7 @@ export default function KnockoutBracket({
                 <span className="text-xs font-heading font-bold uppercase tracking-wider text-gray-600 dark:text-gray-300 truncate">
                   {localizedRoundName(round.name)}
                 </span>
-                <Badge
-                  variant={round.completed ? "accent" : "neutral"}
-                  size="sm"
-                >
+                <Badge variant={round.completed ? "accent" : "neutral"} size="sm">
                   {round.completed ? roundCompleteLabel : roundInProgressLabel}
                 </Badge>
               </div>

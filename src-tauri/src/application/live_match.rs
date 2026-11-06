@@ -1,19 +1,34 @@
 use log::info;
 
 use crate::commands::round_summary::{build_round_summary_dto, RoundSummaryDto};
+use domain::league::FixtureStatus;
 use ofm_core::game::Game;
 use ofm_core::live_match_manager::{self, MatchMode};
-use ofm_core::state::StateManager;
+use ofm_core::state::{Career, StateManager};
+use ofm_core::turn::{build_cup_round_summaries, CupRoundSummary};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinishLiveMatchResponse {
     pub game: Game,
     pub round_summary: Option<RoundSummaryDto>,
+    #[serde(default)]
+    pub cup_round_summaries: Vec<CupRoundSummary>,
 }
 
-pub fn finish_live_match(state: &StateManager) -> Result<FinishLiveMatchResponse, String> {
+type FinishedDay = (Game, Option<RoundSummaryDto>, Vec<CupRoundSummary>);
+
+pub fn finish_live_match(
+    state: &StateManager,
+    career: Career,
+) -> Result<FinishLiveMatchResponse, String> {
+    let _operation = super::live_session::operation();
     info!("[cmd] finish_live_match");
+    // Checked before the session is taken, under the career lock `install_career` also holds, so
+    // a finish meant for another career leaves this one's match where it is.
+    state
+        .with_live_match(|session| career.check_token(session.career_token))
+        .ok_or("be.error.noActiveLiveMatch")??;
     let mut session = state
         .take_live_match()
         .ok_or("be.error.noActiveLiveMatch")?;
@@ -28,9 +43,9 @@ pub fn finish_live_match(state: &StateManager) -> Result<FinishLiveMatchResponse
     }
 
     let fixture_index = session.fixture_index;
+    let fixture_id = session.fixture_id.clone();
     let competition_id = session.competition_id.clone();
-    let round_matchday = session.round_matchday;
-    let round_previous_standings = session.round_previous_standings.clone();
+    let league_round_context = session.league_round_context.clone();
     let home_team_id = session.home_team_id.clone();
     let away_team_id = session.away_team_id.clone();
 
@@ -48,34 +63,44 @@ pub fn finish_live_match(state: &StateManager) -> Result<FinishLiveMatchResponse
     // GUI/MCP write is never clobbered by a stale whole-game clone. Stats
     // captures are appended after the lock is released.
     let mut captures = Vec::new();
-    let (game, round_summary) = state
-        .update_game(|game| -> Result<(Game, Option<RoundSummaryDto>), String> {
-            // `fixture_index` indexes the fixtures of the competition the
-            // session was created for (possibly a cup). `game.league` was
-            // reset to the user's domestic league by sync_legacy_league when
-            // the match day started, so applying the report through it would
-            // write the result onto an unrelated fixture of the wrong
-            // competition (or panic on an out-of-range index). Swap the
-            // session's competition back in first.
-            if let Some(idx) = game
+    let (game, round_summary, cup_round_summaries) =
+        state.update_game_for(career, |game| -> Result<FinishedDay, String> {
+            // Check the authoritative competition before changing the legacy
+            // mirror. A stale session must not replay a completed fixture or
+            // leave the mirror pointing at a cup when finish is rejected.
+            let competition_index = game
                 .competitions
                 .iter()
-                .position(|c| c.id == competition_id)
-            {
-                game.league = Some(game.competitions[idx].clone());
-            } else if !game.competitions.is_empty() {
-                // The session's competition no longer exists; applying by
-                // index to whatever game.league holds would corrupt an
-                // unrelated fixture.
+                .position(|c| c.id == competition_id);
+            if competition_index.is_none() && !game.competitions.is_empty() {
                 return Err("be.error.liveMatch.fixtureNotFound".to_string());
             }
-            // Legacy saves (no competitions) keep game.league, which the
-            // session was created against.
-            let fixture_count = game.league.as_ref().map_or(0, |l| l.fixtures.len());
-            if fixture_index >= fixture_count {
+            let league = competition_index
+                .map(|idx| &game.competitions[idx])
+                .or(game.league.as_ref());
+            let fixture = league
+                .and_then(|league| league.fixtures.get(fixture_index))
+                .ok_or("be.error.liveMatch.fixtureNotFound")?;
+            if fixture.id != fixture_id
+                || fixture.home_team_id != home_team_id
+                || fixture.away_team_id != away_team_id
+            {
                 return Err("be.error.liveMatch.fixtureNotFound".to_string());
+            }
+            if fixture.status != FixtureStatus::Scheduled {
+                return Err("be.error.liveMatch.fixtureNotScheduled".to_string());
             }
 
+            // `fixture_index` belongs to the session's competition (possibly
+            // a cup), while game.league may mirror the domestic league. Swap
+            // only after the fixture has passed validation.
+            if let Some(idx) = competition_index {
+                game.league = Some(game.competitions[idx].clone());
+            }
+
+            // A no-op when the day was begun at kick-off; otherwise it notes what was shown before
+            // the player's result is applied, which may draw the next round.
+            ofm_core::turn::begin_day(game);
             ofm_core::turn::apply_match_report_with_capture(
                 game,
                 fixture_index,
@@ -102,14 +127,40 @@ pub fn finish_live_match(state: &StateManager) -> Result<FinishLiveMatchResponse
                 game.sync_legacy_league();
             }
 
+            // The digest describes the user's league round, and `build_round_summary` reads the
+            // competition `sync_legacy_league` has just mirrored — so its context has to come
+            // from that same competition. The session's `round_matchday` and
+            // `round_previous_standings` describe whatever the user *played*, which on a cup day
+            // is the cup: a knockout cup has no table at all, so its standings would be an empty
+            // baseline for the league's deltas, and its matchday would select the wrong round.
+            //
+            // It also has to be the table as it stood *before* the round. The GUI simulates the
+            // rest of the round right after creating the session, so reading it here instead
+            // reports every club's delta as zero — the round has already happened. So the
+            // session carries the league baseline from creation time, and today's context is only
+            // the fallback for a session that has none.
+            let summary_context = league_round_context
+                .or_else(|| ofm_core::matchday::user_league_round_context(game));
+
+            // The sweep advances the clock, and the cup summary is scoped to the day just played.
+            let played_on = game.clock.current_date.format("%Y-%m-%d").to_string();
+
+            ofm_core::turn::finish_live_match_day_with_capture(game, &mut |capture| {
+                captures.push(capture)
+            });
+
+            // After the sweep, not before: on a cup day with domestic fixtures also due, the
+            // summary built beforehand described a round that had not been played yet and came
+            // back `None`, so the digest read "unavailable" for a round the response was
+            // carrying. The matchday and standings are captured above, so the advanced clock
+            // does not affect it.
             let round_summary =
-                build_round_summary_dto(game, round_matchday, &round_previous_standings);
+                summary_context.and_then(|context| build_round_summary_dto(game, &context));
 
-            ofm_core::turn::finish_live_match_day(game);
+            let cup_round_summaries = build_cup_round_summaries(game, &played_on);
 
-            Ok((game.clone(), round_summary))
-        })
-        .ok_or("be.error.noActiveGameSession")??;
+            Ok((game.clone(), round_summary, cup_round_summaries))
+        })??;
     for capture in captures {
         state.append_stats_state(capture);
     }
@@ -117,20 +168,23 @@ pub fn finish_live_match(state: &StateManager) -> Result<FinishLiveMatchResponse
     Ok(FinishLiveMatchResponse {
         game,
         round_summary,
+        cup_round_summaries,
     })
 }
 
-pub fn start_live_match(
+pub fn start_live_match_with_identity(
     state: &StateManager,
+    career: Career,
     fixture_index: usize,
     mode: &str,
-    allows_extra_time: bool,
-    home_team_id: Option<&str>,
-    away_team_id: Option<&str>,
+    _allows_extra_time: bool,
+    competition_id: Option<&str>,
+    fixture_id: Option<&str>,
 ) -> Result<engine::MatchSnapshot, String> {
+    let _operation = super::live_session::idle_operation(state)?;
     info!(
-        "[cmd] start_live_match: fixture={}, mode={}, extra_time={}, teams={:?}/{:?}",
-        fixture_index, mode, allows_extra_time, home_team_id, away_team_id
+        "[cmd] start_live_match: fixture={}, mode={}, competition={:?}, fixture_id={:?}",
+        fixture_index, mode, competition_id, fixture_id
     );
     let match_mode = match mode {
         "spectator" => MatchMode::Spectator,
@@ -142,96 +196,16 @@ pub fn start_live_match(
     // GUI/MCP write is never clobbered; captures and the live session are
     // stored after the lock is released.
     let mut captures = Vec::new();
-    let (snapshot, session) = state
-        .update_game(|game| -> Result<(engine::MatchSnapshot, live_match_manager::LiveMatchSession), String> {
-            // Session restore after an app restart: `game.league` mirrors the
-            // user's domestic league, but the fixture being restored may belong
-            // to another competition (a cup). When the caller identifies the
-            // fixture by its teams, resolve today's scheduled fixture across
-            // all competitions and swap its competition into `game.league` so
-            // the session is created against — and later applied to — the
-            // right competition.
-            let mut fixture_index = fixture_index;
-            let mut swapped_league = false;
-            if let (Some(home_id), Some(away_id)) = (home_team_id, away_team_id) {
-                let today = game.clock.current_date.format("%Y-%m-%d").to_string();
-                let resolved = game
-                    .competitions
-                    .iter()
-                    .enumerate()
-                    .find_map(|(competition_index, competition)| {
-                        competition
-                            .fixtures
-                            .iter()
-                            .position(|fixture| {
-                                fixture.date == today
-                                    && fixture.status == domain::league::FixtureStatus::Scheduled
-                                    && fixture.home_team_id == home_id
-                                    && fixture.away_team_id == away_id
-                            })
-                            .map(|index| (competition_index, index))
-                    });
-                if let Some((competition_index, index)) = resolved {
-                    game.league = Some(game.competitions[competition_index].clone());
-                    fixture_index = index;
-                    swapped_league = true;
-                }
-                // No match: fall back to the caller-supplied index into game.league.
-            }
-
-            let session = live_match_manager::create_live_match(
-                game,
-                fixture_index,
-                match_mode,
-                allows_extra_time,
-            )?;
-            let snapshot = session.snapshot();
-            info!(
-                "[cmd] start_live_match: created fixture={}, phase={:?}, home_team={}, away_team={}, home_players={}, away_players={}",
-                fixture_index,
-                snapshot.phase,
-                snapshot.home_team.name,
-                snapshot.away_team.name,
-                snapshot.home_team.players.len(),
-                snapshot.away_team.players.len()
-            );
-
-            // Simulate the rest of today's fixtures in this competition, exactly
-            // like the GUI match-day path does. Without this, an MCP
-            // `match_start` → `match_finish` flow advanced the clock past
-            // fixtures that were never played, stranding them Scheduled in the
-            // past. simulate_other_matches only touches Scheduled fixtures, so
-            // the session-restore path (where they are already Completed) is
-            // naturally idempotent.
-            let today = game.clock.current_date.format("%Y-%m-%d").to_string();
-            let fixture_is_today = game
-                .league
-                .as_ref()
-                .and_then(|league| league.fixtures.get(fixture_index))
-                .map(|fixture| fixture.date == today)
-                .unwrap_or(false);
-            if fixture_is_today {
-                ofm_core::turn::simulate_other_matches_with_capture(
-                    game,
-                    &today,
-                    Some(fixture_index),
-                    &mut |capture| captures.push(capture),
-                );
-                if let Some(league) = game.league.clone() {
-                    if let Some(idx) = game.competitions.iter().position(|c| c.id == league.id) {
-                        game.competitions[idx] = league;
-                        game.sync_legacy_league();
-                    }
-                }
-            } else if swapped_league && !game.competitions.is_empty() {
-                // The swap now persists (update_game mutates in place); restore
-                // the legacy mirror when no simulation ran to do it for us.
-                game.sync_legacy_league();
-            }
-
-            Ok((snapshot, session))
-        })
-        .ok_or("be.error.noActiveGameSession")??;
+    let (snapshot, session) = state.update_game_for(career, |game| {
+        start_selected_fixture(
+            game,
+            fixture_index,
+            match_mode,
+            competition_id,
+            fixture_id,
+            &mut captures,
+        )
+    })??;
     for capture in captures {
         state.append_stats_state(capture);
     }
@@ -240,20 +214,161 @@ pub fn start_live_match(
     Ok(snapshot)
 }
 
+fn resolve_fixture_for_start(
+    game: &mut Game,
+    requested_index: usize,
+    competition_id: Option<&str>,
+    fixture_id: Option<&str>,
+) -> Result<(usize, bool), String> {
+    // After a restart, game.league may mirror the domestic league
+    // while the selected fixture belongs to a cup. Resolve the exact
+    // competition and fixture IDs before creating the session.
+    let mut fixture_index = requested_index;
+    let mut swapped_league = false;
+    match (competition_id, fixture_id) {
+        (Some(competition_id), Some(fixture_id)) => {
+            let competition = game
+                .competitions
+                .iter()
+                .find(|competition| competition.id == competition_id)
+                .cloned();
+            if let Some(competition) = competition {
+                fixture_index = competition
+                    .fixtures
+                    .iter()
+                    .position(|fixture| fixture.id == fixture_id)
+                    .ok_or("be.error.liveMatch.fixtureNotFound")?;
+                if competition.fixtures[fixture_index].status != FixtureStatus::Scheduled {
+                    return Err("be.error.liveMatch.fixtureNotScheduled".to_string());
+                }
+                game.league = Some(competition);
+                swapped_league = true;
+            } else if game.competitions.is_empty() {
+                let league = game.league.as_ref().ok_or("be.error.liveMatch.noLeague")?;
+                if league.id != competition_id {
+                    return Err("be.error.liveMatch.fixtureNotFound".to_string());
+                }
+                fixture_index = league
+                    .fixtures
+                    .iter()
+                    .position(|fixture| fixture.id == fixture_id)
+                    .ok_or("be.error.liveMatch.fixtureNotFound")?;
+            } else {
+                return Err("be.error.liveMatch.fixtureNotFound".to_string());
+            }
+        }
+        (None, None) => {} // MCP selects the current mirror by index.
+        _ => return Err("be.error.liveMatch.fixtureNotFound".to_string()),
+    }
+
+    let league = game.league.as_ref().ok_or("be.error.liveMatch.noLeague")?;
+    let fixture = league
+        .fixtures
+        .get(fixture_index)
+        .ok_or("be.error.liveMatch.fixtureNotFound")?;
+    if let Some(competition) = game.competitions.iter().find(|c| c.id == league.id) {
+        let current_fixture = competition
+            .fixtures
+            .get(fixture_index)
+            .ok_or("be.error.liveMatch.fixtureNotFound")?;
+        if current_fixture.id != fixture.id {
+            return Err("be.error.liveMatch.fixtureNotFound".to_string());
+        }
+        if current_fixture.status != FixtureStatus::Scheduled {
+            return Err("be.error.liveMatch.fixtureNotScheduled".to_string());
+        }
+    } else if !game.competitions.is_empty() {
+        return Err("be.error.liveMatch.fixtureNotFound".to_string());
+    }
+
+    Ok((fixture_index, swapped_league))
+}
+
+fn start_selected_fixture(
+    game: &mut Game,
+    fixture_index: usize,
+    match_mode: MatchMode,
+    competition_id: Option<&str>,
+    fixture_id: Option<&str>,
+    captures: &mut Vec<domain::stats::StatsState>,
+) -> Result<(engine::MatchSnapshot, live_match_manager::LiveMatchSession), String> {
+    let (fixture_index, swapped_league) =
+        resolve_fixture_for_start(game, fixture_index, competition_id, fixture_id)?;
+
+    // A caller's flag cannot turn a league draw into a knockout result or suppress
+    // a cup decider. Resolve identity first so the shared rule reads this fixture's
+    // competition, including cup restores while the domestic league is mirrored.
+    let allows_extra_time = ofm_core::matchday::fixture_allows_extra_time(game, fixture_index);
+    let session =
+        live_match_manager::kick_off_live_match(game, fixture_index, match_mode, allows_extra_time)
+            .inspect_err(|_| {
+                if swapped_league {
+                    game.sync_legacy_league();
+                }
+            })?;
+    let snapshot = session.snapshot();
+    info!(
+        "[cmd] start_live_match: created fixture={}, phase={:?}, home_team={}, away_team={}, home_players={}, away_players={}",
+        fixture_index,
+        snapshot.phase,
+        snapshot.home_team.name,
+        snapshot.away_team.name,
+        snapshot.home_team.players.len(),
+        snapshot.away_team.players.len()
+    );
+
+    // Simulate the rest of today's fixtures in this competition, exactly
+    // like the GUI match-day path does. Without this, an MCP
+    // `match_start` → `match_finish` flow advanced the clock past
+    // fixtures that were never played, stranding them Scheduled in the
+    // past. simulate_other_matches only touches Scheduled fixtures, so
+    // the session-restore path (where they are already Completed) is
+    // naturally idempotent.
+    let today = game.clock.current_date.format("%Y-%m-%d").to_string();
+    let fixture_is_today = game
+        .league
+        .as_ref()
+        .and_then(|league| league.fixtures.get(fixture_index))
+        .map(|fixture| fixture.date == today)
+        .unwrap_or(false);
+    if fixture_is_today {
+        ofm_core::turn::simulate_other_matches_with_capture(
+            game,
+            &today,
+            Some(fixture_index),
+            &mut |capture| captures.push(capture),
+        );
+        if let Some(league) = game.league.clone() {
+            if let Some(idx) = game.competitions.iter().position(|c| c.id == league.id) {
+                game.competitions[idx] = league;
+                game.sync_legacy_league();
+            }
+        }
+    } else if swapped_league && !game.competitions.is_empty() {
+        // The swap now persists (update_game mutates in place); restore
+        // the legacy mirror when no simulation ran to do it for us.
+        game.sync_legacy_league();
+    }
+
+    Ok((snapshot, session))
+}
+
 pub fn step_live_match(
     state: &StateManager,
+    career: Career,
     minutes: u16,
 ) -> Result<Vec<engine::MinuteResult>, String> {
     log::debug!("[cmd] step_live_match: minutes={}", minutes);
     let results = state
         .with_live_match(|session| {
-            if minutes <= 1 {
+            career.check_token(session.career_token)?;
+            Ok::<_, String>(if minutes <= 1 {
                 vec![session.step()]
             } else {
                 session.step_many(minutes)
-            }
+            })
         })
-        .ok_or_else(|| "be.error.noActiveLiveMatch".to_string())?;
+        .ok_or_else(|| "be.error.noActiveLiveMatch".to_string())??;
 
     if let Some(last) = results.last() {
         info!(
@@ -271,11 +386,13 @@ pub fn step_live_match(
 
 pub fn apply_match_command(
     state: &StateManager,
+    career: Career,
     command: engine::MatchCommand,
 ) -> Result<engine::MatchSnapshot, String> {
     info!("[cmd] apply_match_command: {:?}", command);
     let snapshot = state
         .with_live_match(|session| {
+            career.check_token(session.career_token)?;
             session.apply_command(command)?;
             Ok::<engine::MatchSnapshot, String>(session.snapshot())
         })

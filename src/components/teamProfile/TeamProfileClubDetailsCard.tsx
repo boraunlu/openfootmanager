@@ -10,10 +10,7 @@ interface TeamProfileClubDetailsCardProps {
   t: TeamProfileTranslate;
 }
 
-export default function TeamProfileClubDetailsCard({
-  team,
-  t,
-}: TeamProfileClubDetailsCardProps) {
+export default function TeamProfileClubDetailsCard({ team, t }: TeamProfileClubDetailsCardProps) {
   return (
     <Card>
       <CardHeader>{t("teamProfile.clubInfo")}</CardHeader>
@@ -37,7 +34,7 @@ export default function TeamProfileClubDetailsCard({
           <InfoRow
             icon={<Trophy className="w-4 h-4" />}
             label={t("tactics.playStyle")}
-            value={team.play_style}
+            value={t(`common.playStyles.${team.play_style}`, team.play_style)}
           />
         </div>
       </CardBody>

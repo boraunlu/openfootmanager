@@ -3,7 +3,7 @@ name: new-ui-surface
 description: Build a new frontend component, panel, dashboard tab, or screen that matches the Matchday design language, works in light and dark, is keyboard and screen-reader accessible, reuses existing primitives, and ships with a Testing Library test.
 when_to_use: Creating any new React component, adding a dashboard tab, building a modal or panel, redesigning an existing screen, or when a UI change needs to look and behave like the rest of the app.
 argument-hint: "[what you are building]"
-allowed-tools: Read, Edit, Write, Grep, Glob, Bash(npx vitest run src/components*), Bash(npx tsc --noEmit)
+allowed-tools: Read, Edit, Write, Grep, Glob, Bash(npm exec --no -- vitest run src/components*), Bash(npm exec --no -- tsc --noEmit)
 ---
 
 # Building a new UI surface
@@ -30,22 +30,33 @@ Also check before writing a helper:
 A new component belongs in `src/components/ui/` **only** if a second feature will use it.
 Otherwise put it in the feature folder (`src/components/squad/`, `src/components/transfers/`, …).
 
+Apply the root Code quality layer and size rules: frontend functions <= 200 lines/complexity 25
+(100/15 in shared directories), <= 7 parameters, production files <= 1,000. Shared libraries and
+services import no component/page, UI primitives import no feature/page, features import no page,
+and only services call `invoke`; type-only imports and re-exports count too. Backend policy is
+projected into the UI rather than recomputed here.
+
 ## 2. Design tokens
 
-Colours and fonts come from the `@theme` block in `src/App.css`. Nothing else defines them.
+Colours, type sizes and layout sizes come from the `@theme` block in `src/App.css`. Nothing else
+defines them. The full table and rules are in `src/CLAUDE.md` §2.
 
 | Use | Token |
 |---|---|
-| Primary action, positive state | `primary-500…900` (emerald) |
-| Highlight, award, emphasis | `accent-400` (`#ffd60a` gold), `accent-500…900` |
-| Success | `success-400/500/600` |
-| Dark surfaces | `navy-900` (deepest) → `navy-800` → `navy-700` → `navy-600` |
-| Headings | `font-heading` (Barlow Condensed), usually `uppercase tracking-wider` |
+| Surfaces | `bg-page` (workspace), `bg-panel` (cards, tables, dialogs), `bg-sunken` (insets), `bg-hover` |
+| Text and lines | `text-fg`, `text-fg-muted`, `text-fg-subtle`, `border-line`, `text-on-brand` on the brand fill, chrome or turf (never on a `-solid`) |
+| Status | `positive`, `warning`, `danger`, `info`, each with `-tint` and `-solid` |
+| Rated values | `tone-top/good/fair/low/bad`; the backend picks the tone |
+| Type | `text-caption` 12 · `text-body` 14 · `text-lead` 16 · `text-heading` 18 · `text-title` 24 · `text-display` 32 |
+| Rows and headers | `h-row`, `h-panel-header`, `h-toolbar` (they shrink under compact density) |
+| Brand moments | `primary-*` (emerald), `accent-*` (gold), `navy-*` |
+| Headings | `font-heading` (Barlow Condensed), `uppercase tracking-label`, `text-heading` or larger |
 | Body | `font-sans` (Inter) |
 
-- **Never** a hex literal or an arbitrary value (`bg-[#10b981]`) in a component.
-- **Every** colour class needs its `dark:` partner. Light and dark both ship.
-- Light surfaces are `white` / `gray-100`; their dark counterparts are `navy-800` / `navy-900`.
+- **Never** a hex literal or an arbitrary value (`bg-[#10b981]`, `text-[10px]`) in a component.
+- **Role tokens switch with the theme by themselves**, so they need no `dark:` partner. Don't use
+  the raw palette (`gray-500`, `red-400`, `white`) in new code.
+- Nothing under `text-caption` (12px). Uppercase only for headings, buttons, badges and tabs.
 
 `src/components/ui/Button.tsx` is the reference for how variants, sizes, and states are composed —
 read it before inventing a new pattern.
@@ -54,9 +65,8 @@ read it before inventing a new pattern.
 
 Not optional, and cheap if done while writing rather than after.
 
-- **Focus is visible.** Every interactive element: `focus:outline-none focus:ring-2
-  focus:ring-offset-2 focus:ring-<token>` plus `dark:focus:ring-offset-navy-800`. Removing an
-  outline without replacing it is a bug.
+- **Focus is visible.** Every interactive element: `focus:outline-none focus-visible:ring-2
+  focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-page`, always `ring-focus`. Removing an outline without replacing it is a bug.
 - **Semantic elements.** `<button>` for actions, `<a>` for navigation, `<table>` for tabular data,
   headings in order. A `div` with `onClick` is not keyboard reachable.
 - **Icon-only controls get an accessible name** — `aria-label={t("…")}`, a translated string.
@@ -79,11 +89,16 @@ translation key in every locale. Use `/add-ui-string`; don't hand-roll it.
 - Zustand stores in `src/store/`. **Never mutate store state from a component** — copy, then set.
   (`fix/hometab-store-mutation` is the regression that made this a rule.)
 - Backend data flows through `src/services/*Service.ts`.
-- Derive, don't duplicate. If a value can be computed from the store, compute it.
+- Derive display state from the store; consume backend-owned game rules through services. Do not
+  recalculate backend policy in the component.
 
 ## 6. Test it
 
-Co-locate `Foo.test.tsx` next to `Foo.tsx`. Write it first.
+Use `/write-tests` for named GWT scenarios. Co-locate `Foo.test.tsx` next to
+`Foo.tsx`, write it first and watch it fail for the intended reason. Test through the component
+and service wiring; helper-only tests cannot prove that a handler calls the helper. A controlled
+component needs a stateful host that feeds `onChange` values back as props, not just `vi.fn()`.
+Test service rejection paths and resulting UI feedback, plus failure atomicity when applicable.
 
 ```ts
 // Query by role and accessible name. If this line fails, the component
@@ -94,11 +109,13 @@ const save = screen.getByRole("button", { name: /save/i });
 - Query by role/label, never by class or test id.
 - Pure logic goes in a `*.helpers.ts` file and gets unit-tested directly —
   `src/components/squad/SquadTab.helpers.ts` is the pattern.
-- Cover the keyboard path, not just the click path, for anything interactive.
+- Cover keyboard activation, focus visibility/return and semantic role/name for interactive controls.
+  A promoted Biome a11y rule is a syntax gate, not evidence that the actual keyboard flow works.
+- Use `ui-accessibility-reviewer`, `i18n-auditor`, and `ofm-test-reviewer` when their surfaces change.
 
 ```bash
-npx vitest run src/components/<area>
-npx tsc --noEmit
+npm exec --no -- vitest run src/components/<area>
+npm exec --no -- tsc --noEmit
 ```
 
 ## 7. Invariants, if you touch squad, tactics, or the pitch
@@ -114,11 +131,11 @@ npx tsc --noEmit
 ## Checklist
 
 - [ ] Searched `src/components/ui/index.ts`, `src/lib/`, `src/hooks/` before writing anything new
-- [ ] Token classes only — no hex literals, no arbitrary values
-- [ ] Every colour class has a `dark:` partner; checked in both themes
+- [ ] Role tokens only: no hex literals, no arbitrary values, no raw palette, nothing under 12px
+- [ ] Checked in both themes, at 960×640 and 1280×800
 - [ ] Visible focus ring on every interactive element
 - [ ] Semantic elements; icon-only controls have translated `aria-label`s
 - [ ] All strings routed through `/add-ui-string` (every locale)
 - [ ] No store mutation from a component
 - [ ] Co-located test querying by role, written before the component
-- [ ] `npx vitest run src/components/<area>` and `npx tsc --noEmit` green
+- [ ] `npm exec --no -- vitest run src/components/<area>` and `npm exec --no -- tsc --noEmit` green

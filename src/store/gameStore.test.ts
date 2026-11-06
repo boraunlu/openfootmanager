@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { useGameStore } from "./gameStore";
 import type { GameStateData } from "./types";
+import { createSeasonContext } from "../test-utils/factories";
 
 // ---------------------------------------------------------------------------
 // Reset store between tests
@@ -17,12 +18,27 @@ beforeEach(() => {
 
 // Minimal GameStateData stub — only the fields the store cares about
 const makeGameState = (overrides: Partial<GameStateData> = {}): GameStateData => ({
+  season_context: createSeasonContext(),
   clock: { current_date: "2026-08-01", start_date: "2026-08-01" },
   manager: {
-    id: "mgr1", first_name: "Test", last_name: "Manager",
-    date_of_birth: "1985-01-01", nationality: "GB", team_id: "team1",
-    satisfaction: 50, fan_approval: 50, reputation: 500,
-    career_stats: { matches_managed: 0, wins: 0, draws: 0, losses: 0, trophies: 0, best_finish: null },
+    display_name: "Test Manager",
+    id: "mgr1",
+    first_name: "Test",
+    last_name: "Manager",
+    date_of_birth: "1985-01-01",
+    nationality: "GB",
+    team_id: "team1",
+    satisfaction: 50,
+    fan_approval: 50,
+    reputation: 500,
+    career_stats: {
+      matches_managed: 0,
+      wins: 0,
+      draws: 0,
+      losses: 0,
+      trophies: 0,
+      best_finish: null,
+    },
     career_history: [],
   },
   teams: [],
@@ -148,6 +164,7 @@ describe("useGameStore", () => {
             id: "s1",
             first_name: "Sam",
             last_name: "Coach",
+            display_name: "Sam Coach",
             date_of_birth: "1980-01-01",
             nationality: "British",
             football_nation: "ENG",
@@ -244,8 +261,12 @@ describe("useGameStore", () => {
     });
 
     it("replaces previous game state", () => {
-      const gs1 = makeGameState({ clock: { current_date: "2026-08-01", start_date: "2026-08-01" } });
-      const gs2 = makeGameState({ clock: { current_date: "2026-09-01", start_date: "2026-08-01" } });
+      const gs1 = makeGameState({
+        clock: { current_date: "2026-08-01", start_date: "2026-08-01" },
+      });
+      const gs2 = makeGameState({
+        clock: { current_date: "2026-09-01", start_date: "2026-08-01" },
+      });
       useGameStore.getState().setGameState(gs1);
       useGameStore.getState().setGameState(gs2);
       expect(useGameStore.getState().gameState?.clock.current_date).toBe("2026-09-01");
@@ -286,12 +307,15 @@ describe("useGameStore", () => {
 
   describe("setMessages", () => {
     const makeMessages = (reads: boolean[]) =>
-      reads.map((read, index) => ({ id: `m${index}`, read })) as unknown as GameStateData["messages"];
+      reads.map((read, index) => ({
+        id: `m${index}`,
+        read,
+      })) as unknown as GameStateData["messages"];
 
     it("patches gameState.messages and re-derives the unread count", () => {
-      useGameStore.getState().setGameState(
-        makeGameState({ messages: makeMessages([false, false]) }),
-      );
+      useGameStore
+        .getState()
+        .setGameState(makeGameState({ messages: makeMessages([false, false]) }));
       expect(useGameStore.getState().sessionState?.unread_messages_count).toBe(2);
 
       useGameStore.getState().setMessages(makeMessages([true, false]));

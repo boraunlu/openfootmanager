@@ -1,6 +1,7 @@
 import { useId, type ReactNode } from "react";
 import { buildPitchRows } from "../squad/SquadTab.helpers";
 import type { EnginePlayerData } from "./types";
+import { usePitchTokenFocus } from "../ui";
 
 interface FormationSlot {
   player: EnginePlayerData;
@@ -64,7 +65,7 @@ export function buildFormationSlots(
   // or non-numeric ("442", "5-5", "abc") can't be laid out by the row logic
   // below without dropping the midfield/forward rows, so fall back to an even
   // single-row spread that still renders every player.
-  if (nums.length < 3 || nums.some((n) => isNaN(n))) {
+  if (nums.length < 3 || nums.some((n) => Number.isNaN(n))) {
     return active.map((p, i) => ({
       player: p,
       x: Math.round((100 * (i + 1)) / (active.length + 1)),
@@ -102,10 +103,7 @@ export function buildFormationSlots(
     const y = Math.round(bottom - rowIdx * step);
     return rowPlayers.map((p, colIdx) => ({
       player: p,
-      x:
-        rowPlayers.length === 1
-          ? 50
-          : Math.round((100 * (colIdx + 1)) / (rowPlayers.length + 1)),
+      x: rowPlayers.length === 1 ? 50 : Math.round((100 * (colIdx + 1)) / (rowPlayers.length + 1)),
       y,
     }));
   });
@@ -117,6 +115,8 @@ interface FormationPitchProps {
   sentOff?: string[];
   selectedId?: string | null;
   subbedOnIds?: Set<string>;
+  /** Players already lined up to come off: shown unavailable and not clickable. */
+  queuedOffIds?: Set<string>;
   onPlayerClick?: (id: string) => void;
   className?: string;
   /**
@@ -127,7 +127,13 @@ interface FormationPitchProps {
    */
   renderToken?: (
     player: EnginePlayerData,
-    state: { isSelected: boolean; isSubOn: boolean; slotPosition?: string },
+    state: {
+      isSelected: boolean;
+      isSubOn: boolean;
+      slotPosition?: string;
+      descriptionId: string;
+      focused: boolean;
+    },
   ) => ReactNode;
 }
 
@@ -137,11 +143,13 @@ export function FormationPitch({
   sentOff = [],
   selectedId,
   subbedOnIds,
+  queuedOffIds,
   onPlayerClick,
   className,
   renderToken,
 }: FormationPitchProps) {
   const uid = useId();
+  const { focusedPlayerId, focusToken, blurToken, getDescriptionId } = usePitchTokenFocus();
   const surfaceId = `pitch-surface-${uid}`;
   const stripesId = `pitch-stripes-${uid}`;
   const slots =
@@ -152,7 +160,11 @@ export function FormationPitch({
     <div
       className={`relative overflow-hidden rounded-xl bg-gradient-to-b from-primary-500 to-primary-700 ${className ?? ""}`}
     >
+      {/* Decorative: this is the pitch markings, and everything a screen reader needs is in the
+          player tokens rendered on top of it. A <title> here would announce "football pitch"
+          before every lineup, which is noise rather than information. */}
       <svg
+        aria-hidden="true"
         className="absolute inset-0 h-full w-full"
         viewBox="0 0 100 140"
         preserveAspectRatio="none"
@@ -162,37 +174,12 @@ export function FormationPitch({
             <stop offset="0%" stopColor="rgba(63,172,99,0.35)" />
             <stop offset="100%" stopColor="rgba(31,109,61,0.25)" />
           </linearGradient>
-          <pattern
-            id={stripesId}
-            x="0"
-            y="0"
-            width="100"
-            height="10"
-            patternUnits="userSpaceOnUse"
-          >
-            <rect
-              x="0"
-              y="0"
-              width="100"
-              height="5"
-              fill="rgba(255,255,255,0.04)"
-            />
+          <pattern id={stripesId} x="0" y="0" width="100" height="10" patternUnits="userSpaceOnUse">
+            <rect x="0" y="0" width="100" height="5" fill="rgba(255,255,255,0.04)" />
           </pattern>
         </defs>
-        <rect
-          x="0"
-          y="0"
-          width="100"
-          height="140"
-          fill={`url(#${surfaceId})`}
-        />
-        <rect
-          x="0"
-          y="0"
-          width="100"
-          height="140"
-          fill={`url(#${stripesId})`}
-        />
+        <rect x="0" y="0" width="100" height="140" fill={`url(#${surfaceId})`} />
+        <rect x="0" y="0" width="100" height="140" fill={`url(#${stripesId})`} />
         <rect
           x="4"
           y="4"
@@ -202,14 +189,7 @@ export function FormationPitch({
           stroke="rgba(255,255,255,0.55)"
           strokeWidth="0.6"
         />
-        <line
-          x1="4"
-          y1="70"
-          x2="96"
-          y2="70"
-          stroke="rgba(255,255,255,0.55)"
-          strokeWidth="0.6"
-        />
+        <line x1="4" y1="70" x2="96" y2="70" stroke="rgba(255,255,255,0.55)" strokeWidth="0.6" />
         <circle
           cx="50"
           cy="70"
@@ -269,8 +249,10 @@ export function FormationPitch({
         />
       </svg>
       {slots.map(({ player: p, x, y, slotPosition }) => {
+        const descriptionId = getDescriptionId(p.id);
         const isSelected = selectedId === p.id;
         const isSubOn = subbedOnIds?.has(p.id) ?? false;
+        const isQueuedOff = queuedOffIds?.has(p.id) ?? false;
         const initials = p.name
           .split(" ")
           .map((n) => n[0])
@@ -280,7 +262,13 @@ export function FormationPitch({
         const sharedClass = `absolute z-20 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-0.5 transition-all ${onPlayerClick ? "cursor-pointer hover:scale-110" : ""} ${isSelected ? "scale-110" : ""}`;
         const sharedStyle = { left: `${x}%`, top: `${y}%` };
         const tokenContent = renderToken ? (
-          renderToken(p, { isSelected, isSubOn, slotPosition })
+          renderToken(p, {
+            isSelected,
+            isSubOn,
+            slotPosition,
+            descriptionId,
+            focused: focusedPlayerId === p.id,
+          })
         ) : (
           <>
             <div
@@ -292,7 +280,13 @@ export function FormationPitch({
                     : "border-white/30 bg-navy-800/80"
               }`}
             >
-              {isSubOn ? "▲" : initials}
+              {isSubOn ? (
+                <span aria-hidden="true">▲</span>
+              ) : isQueuedOff ? (
+                <span aria-hidden="true">▼</span>
+              ) : (
+                initials
+              )}
             </div>
             <span
               className={`max-w-[44px] truncate text-center font-heading text-[8px] font-bold drop-shadow ${isSelected ? "text-red-300" : "text-white/80"}`}
@@ -312,10 +306,17 @@ export function FormationPitch({
               role="button"
               tabIndex={0}
               aria-label={p.name}
-              className={`${sharedClass} rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-300/70`}
+              aria-disabled={isQueuedOff || undefined}
+              aria-describedby={renderToken ? descriptionId : undefined}
+              onFocus={() => focusToken(p.id)}
+              onBlur={blurToken}
+              className={`${sharedClass} rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-300/70 ${isQueuedOff ? "opacity-50" : ""}`}
               style={sharedStyle}
-              onClick={() => onPlayerClick(p.id)}
+              onClick={() => {
+                if (!isQueuedOff) onPlayerClick(p.id);
+              }}
               onKeyDown={(e) => {
+                if (isQueuedOff) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   onPlayerClick(p.id);

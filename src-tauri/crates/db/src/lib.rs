@@ -1,5 +1,6 @@
 pub mod game_database;
 pub mod game_persistence;
+pub mod json_column;
 pub mod legacy_migration;
 pub mod manager_profile;
 pub mod migrations;
@@ -8,5 +9,7 @@ pub mod save_index;
 pub mod save_index_manager;
 pub mod save_load_error;
 pub mod save_manager;
+#[cfg(test)]
+pub(crate) mod stored_text;
 
 pub use save_load_error::SaveLoadError;

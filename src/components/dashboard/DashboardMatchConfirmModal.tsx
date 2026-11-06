@@ -1,12 +1,12 @@
 import { AlertCircle } from "lucide-react";
-import type { JSX } from "react";
+import { type JSX, useId } from "react";
 import { useTranslation } from "react-i18next";
 
 import { getFixtureDisplayLabel, getTeamName } from "../../lib/helpers";
 import type { FixtureData, TeamData } from "../../store/gameStore";
 import type { MatchModeType } from "../../hooks/useAdvanceTime";
+import { Dialog } from "../ui";
 import type { DashboardMatchModeMeta } from "./DashboardHeader";
-import DashboardModalFrame from "./DashboardModalFrame";
 
 interface DashboardMatchConfirmModalProps {
   matchMode: MatchModeType;
@@ -15,6 +15,7 @@ interface DashboardMatchConfirmModalProps {
   onConfirm: () => void;
   teams: TeamData[];
   todayMatchFixture: FixtureData | null;
+  competitionName?: string;
 }
 
 export default function DashboardMatchConfirmModal({
@@ -24,30 +25,31 @@ export default function DashboardMatchConfirmModal({
   onConfirm,
   teams,
   todayMatchFixture,
+  competitionName,
 }: DashboardMatchConfirmModalProps): JSX.Element {
   const { t } = useTranslation();
+  const titleId = useId();
 
   return (
-    <DashboardModalFrame maxWidthClassName="max-w-md">
+    <Dialog labelledBy={titleId} onClose={onCancel} className="w-full max-w-md rounded-2xl p-6">
       <div className="mb-4 flex items-center gap-3">
-        <div
-          className={`flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br ${modeMeta.buttonColorClass} text-white`}
-        >
+        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary-700 text-on-brand">
           {modeMeta.icon}
         </div>
         <div>
-          <h3 className="text-lg font-heading font-bold uppercase tracking-wide text-gray-900 dark:text-white">
+          <h3
+            id={titleId}
+            className="text-lg font-heading font-bold uppercase tracking-wide text-gray-900 dark:text-white"
+          >
             {t("continueMenu.matchDayTitle")}
           </h3>
-          <p className="text-xs text-gray-500 dark:text-gray-400">
-            {modeMeta.label}
-          </p>
+          <p className="text-xs text-gray-500 dark:text-gray-400">{modeMeta.label}</p>
         </div>
       </div>
       {todayMatchFixture && (
         <div className="mb-4 rounded-xl bg-gray-50 p-4 text-center dark:bg-navy-700">
           <p className="mb-2 text-xs font-heading uppercase tracking-widest text-gray-400">
-            {getFixtureDisplayLabel(t, todayMatchFixture)}
+            {getFixtureDisplayLabel(t, todayMatchFixture, competitionName)}
           </p>
           <p className="text-lg font-heading font-bold text-gray-900 dark:text-white">
             {getTeamName(teams, todayMatchFixture.home_team_id)}{" "}
@@ -56,9 +58,7 @@ export default function DashboardMatchConfirmModal({
           </p>
         </div>
       )}
-      <p className="mb-1 text-sm text-gray-500 dark:text-gray-400">
-        {modeMeta.desc}
-      </p>
+      <p className="mb-1 text-sm text-gray-500 dark:text-gray-400">{modeMeta.desc}</p>
       {matchMode === "delegate" && (
         <p className="mt-1 flex items-center gap-1 text-xs text-amber-500 dark:text-amber-400">
           <AlertCircle className="h-3.5 w-3.5" />
@@ -67,19 +67,21 @@ export default function DashboardMatchConfirmModal({
       )}
       <div className="mt-5 flex gap-3">
         <button
+          type="button"
           onClick={onCancel}
           className="flex-1 rounded-lg bg-gray-100 px-4 py-2.5 text-sm font-heading font-bold uppercase tracking-wider text-gray-700 transition-colors hover:bg-gray-200 dark:bg-navy-700 dark:text-gray-300 dark:hover:bg-navy-600"
         >
           {t("common.cancel")}
         </button>
         <button
+          type="button"
           onClick={onConfirm}
-          className={`flex flex-1 items-center justify-center gap-2 rounded-lg bg-gradient-to-r ${modeMeta.buttonColorClass} px-4 py-2.5 text-sm font-heading font-bold uppercase tracking-wider text-white transition-all hover:brightness-110`}
+          className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary-700 px-4 py-2.5 font-heading text-body font-bold uppercase tracking-label text-on-brand transition-colors hover:bg-primary-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-panel"
         >
           {modeMeta.icon}
           {t("common.confirm")}
         </button>
       </div>
-    </DashboardModalFrame>
+    </Dialog>
   );
 }

@@ -1,7 +1,7 @@
 import type { AdvanceMatchResultData } from "../../services/advanceTimeService";
 import type { GameStateData } from "../../store/gameStore";
 import { getUserCompetition } from "../../lib/fixtures";
-import { resolveSeasonContext } from "../../lib/seasonContext";
+import { resolveMessage, resolveNewsArticle } from "../../utils/backendI18n";
 
 /** Match result enriched with the user's outcome (win/draw/loss) when they were involved. */
 export interface RecapMatch extends AdvanceMatchResultData {
@@ -18,13 +18,15 @@ export interface RecapTransfer {
   date: string;
 }
 
-/** A news/inbox line, carrying its i18n key so the modal resolves it via t(). */
+/**
+ * A news/inbox line, already in the player's language. It is resolved where it is built, through
+ * the same resolvers every other screen uses (`resolveNewsArticle`, `resolveMessage`): a param that
+ * is itself a key (an injury, a mood) is translated there, which `t(key, params)` would not do.
+ */
 export interface RecapHeadline {
   id: string;
   date: string;
   text: string;
-  textKey?: string;
-  params?: Record<string, string>;
   /** Message category (inbox items only) — used to resolve the icon. */
   category?: string;
 }
@@ -76,9 +78,7 @@ const ROUTINE_NEWS_CATEGORIES = new Set([
   "TransferRoundup",
 ]);
 
-const NOTABLE_ROUTINE_NEWS_KEYS = new Set([
-  "be.news.loanMove.headline",
-]);
+const NOTABLE_ROUTINE_NEWS_KEYS = new Set(["be.news.loanMove.headline"]);
 
 /** Date portion (YYYY-MM-DD) of an ISO timestamp. */
 export function toDatePart(iso: string | null | undefined): string {
@@ -110,12 +110,7 @@ export function buildAdvanceRecap(
   sinceDate: string,
   matches: AdvanceMatchResultData[],
 ): AdvanceRecap {
-  return buildRecapWindow(
-    game,
-    sinceDate,
-    toDatePart(game.clock?.current_date),
-    matches,
-  );
+  return buildRecapWindow(game, sinceDate, toDatePart(game.clock?.current_date), matches);
 }
 
 /**
@@ -178,8 +173,7 @@ export function buildRecapWindow(
       from: teamName.get(entry.from_team_id) ?? entry.from_team_id,
       to: teamName.get(entry.to_team_id) ?? entry.to_team_id,
       fee: entry.fee,
-      involvesUser:
-        entry.from_team_id === userTeamId || entry.to_team_id === userTeamId,
+      involvesUser: entry.from_team_id === userTeamId || entry.to_team_id === userTeamId,
       date: entry.date,
     }));
 
@@ -192,9 +186,7 @@ export function buildRecapWindow(
     .map((article) => ({
       id: article.id,
       date: article.date,
-      text: article.headline,
-      textKey: article.headline_key,
-      params: article.i18n_params,
+      text: resolveNewsArticle(article).headline,
     }));
 
   const inbox: RecapHeadline[] = (game.messages ?? [])
@@ -204,23 +196,17 @@ export function buildRecapWindow(
     .map((message) => ({
       id: message.id,
       date: message.date,
-      text: message.subject,
-      textKey: message.subject_key,
-      params: message.i18n_params,
+      text: resolveMessage(message).subject,
       category: message.category,
     }));
 
   const hasEvents =
-    recapMatches.length > 0 ||
-    transfers.length > 0 ||
-    news.length > 0 ||
-    inbox.length > 0;
+    recapMatches.length > 0 || transfers.length > 0 || news.length > 0 || inbox.length > 0;
 
   const userTransferInWindow =
     userTeamId !== null &&
     windowTransfers.some(
-      (entry) =>
-        entry.from_team_id === userTeamId || entry.to_team_id === userTeamId,
+      (entry) => entry.from_team_id === userTeamId || entry.to_team_id === userTeamId,
     );
 
   const squadIds = new Set(
@@ -232,8 +218,7 @@ export function buildRecapWindow(
     userTeamId !== null &&
     windowNews.some(
       (article) =>
-        article.team_ids.includes(userTeamId) ||
-        article.player_ids.some((id) => squadIds.has(id)),
+        article.team_ids.includes(userTeamId) || article.player_ids.some((id) => squadIds.has(id)),
     );
 
   return {
@@ -273,11 +258,7 @@ export function buildDigestEntries(
   // of falling through to the catch-all.
   const sinceDay = toDatePart(sinceDate);
   const advancedTo = toDatePart(game.clock?.current_date);
-  if (
-    !DAY_PATTERN.test(sinceDay) ||
-    !DAY_PATTERN.test(advancedTo) ||
-    sinceDay >= advancedTo
-  ) {
+  if (!DAY_PATTERN.test(sinceDay) || !DAY_PATTERN.test(advancedTo) || sinceDay >= advancedTo) {
     const recap = buildAdvanceRecap(game, sinceDay, results);
     const date = DAY_PATTERN.test(sinceDay) ? sinceDay : advancedTo;
     if (!DAY_PATTERN.test(date)) {
@@ -328,7 +309,7 @@ export function detectAttentionEvents(
   if (recap.userTransferInWindow) events.push("userTransfer");
   if (recap.userNewsInWindow) events.push("userNews");
 
-  const window = resolveSeasonContext(game).transfer_window;
+  const window = game.season_context.transfer_window;
   const landedOn = recap.advancedTo;
   if (
     landedOn &&

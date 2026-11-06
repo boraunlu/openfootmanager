@@ -117,10 +117,46 @@ If you're working on a new feature that has no prior **Issue** related to it, pl
   - Use TailwindCSS for styling instead of raw CSS where possible.
   - Ensure type safety across the application (avoid `any` types).
 
+### Which Biome lint rules are on, and why the list is short
+
+`biome.json` starts from `preset: none` and admits rules one group at a time. A group is only
+turned on once its findings have actually been cleared, so the lint step is green the day it
+lands. A rule that reports findings nobody has fixed is a reporter, not a gate, and this project
+has already watched two of those sit switched off for a year.
+
+`biome.json` is strict JSON and cannot carry comments, so the decisions live here:
+
+Five rules sit at **`info`** rather than `error`. That is not "off": Biome still reports them
+every time you lint, it just does not fail the build on them. Don't add new ones — each rule moves
+to `error` once its backlog is cleared, and every new finding is one more to clear first. Fixing a
+few is always welcome.
+
+| Rule | Outstanding | Why it is not a hard error yet |
+|---|---|---|
+| `style/noNonNullAssertion` | 59 | Biome's fix rewrites `game.league!.standings` to `game.league?.standings`, turning a crash into a silent `undefined`. In a test, `expect(a?.b).toBe(c)` then passes vacuously — an assertion-free test, produced by an automated fix. Each site needs a real guard saying what the invariant is. |
+| `a11y/noLabelWithoutControl` | 35 | Some are a `<label>` next to a `<Select>` and want `htmlFor`/`id`. Others label a *group* of cards, where the right answer is a `<fieldset>`/`<legend>`, not a control reference. |
+| `a11y/noStaticElementInteractions` | 24 | Clickable `<div>`s across 18 files. |
+| `a11y/useKeyWithClickEvents` | 24 | The same elements, from the other side: they respond to a mouse and not a keyboard. |
+| `a11y/useSemanticElements` | 9 | `role="button"` on a `<div>` that should be a `<button>`. |
+
+The last three change what is focusable and what responds to Enter and Space in the schedule,
+inbox, tactics pitch and substitution panel. That is interactive behaviour, and it wants
+verifying in the running app rather than in a type-check — which is why it is a floor to work
+down rather than a sweep somebody rushed.
+
+- **`nursery` — never.** Its rules change meaning between Biome minors, which would make every
+  Biome upgrade a red build, for the same reason the Rust toolchain is pinned.
+
+Every other rule in those groups' `recommended` presets is on and hard. If you want to add one
+that is not, measure it first
+(`npm exec --no -- biome lint --only=<rule>`), and only send the PR if the same PR can clear
+what it finds.
+
 ### The format sweep, and `git blame`
 
-Formatting was gated for the first time in this repository's history, and that required one
-commit that reformatted 92 files. Two consequences worth knowing about.
+Formatting was gated for the first time in this repository's history, and that required two
+sweeps: `cargo fmt` across 92 Rust files, and `biome format` across 454 frontend files. Two
+consequences worth knowing about.
 
 **`git blame` needs telling to skip it**, or every line in those files is attributed to the
 sweep. GitHub reads `.git-blame-ignore-revs` automatically; locally, once per clone:
@@ -138,8 +174,9 @@ the formatted `develop`, then run the formatter as **its own commit**:
 
 ```bash
 git rebase upstream/develop
-cargo fmt --manifest-path src-tauri/Cargo.toml --all
-git commit -am "style: rustfmt after the repo-wide sweep"
+cargo fmt --manifest-path src-tauri/Cargo.toml --all   # if you touched Rust
+npm exec --no -- biome format --write                  # if you touched the frontend
+git commit -am "style: reformat after the repo-wide sweep"
 ```
 
 That commit is then a no-op plus your own lines, and your real changes stay readable. This is the
@@ -189,6 +226,10 @@ Run all relevant tests before opening a Pull Request:
 npm test
 ```
 
+Local runs use at most two workers to avoid oversubscribing developer machines (#616). This also
+applies to `npm run preflight` and watch mode. CI retains Vitest's default pool. To measure another
+worker count explicitly, use `npm test -- --maxWorkers=3`; deadlines and retries are unchanged.
+
 ```bash
 cd src-tauri
 cargo test --locked --workspace
@@ -219,9 +260,9 @@ The base version lives in three files that must stay in sync:
 - `package.json`
 
 **Do not bump these per build.** They only change when a release stream branches
-(`0.3` → `0.4`). Everything that varies build to build — the channel, the commit hash, the
-build date — is injected by `vite.config.ts` as `__APP_VERSION__`, `__APP_CHANNEL__`,
-`__APP_COMMIT__` and `__APP_BUILD_DATE__`, and formatted by `formatAppVersion()` in
+(`0.3` → `0.4`). Everything that varies build to build — the channel and the commit hash — is
+injected by `vite.config.ts` as `__APP_VERSION__`, `__APP_CHANNEL__` and `__APP_COMMIT__`, and
+formatted by `formatAppVersion()` in
 `src/lib/appVersion.ts`:
 
 | build | shown in the UI and window title |
@@ -233,10 +274,9 @@ build date — is injected by `vite.config.ts` as `__APP_VERSION__`, `__APP_CHAN
 The channel is set by CI via the `OFM_CHANNEL` environment variable; locally it defaults to
 `dev`. It is deliberately not translated — it is part of a semver identifier, not prose.
 
-Version numbers do not carry a maturity tag. There is no `0.4.0-beta` — the odd/even number already
-says whether a build is stable, and "this project is pre-1.0" is said in
-[VISION.md](VISION.md#what-10-means), not in every version string. Older roadmap entries used
-`-alpha`/`-beta` suffixes; those are historical.
+Version numbers do not carry a maturity tag. There is no `0.4.0-beta`, because the odd/even number
+already says whether a build is stable. Older roadmap entries used `-alpha`/`-beta` suffixes. Those are
+historical.
 
 ### What "stable" means
 
@@ -263,15 +303,20 @@ move fast because `release` is the thing that has to be trustworthy.
 
 ### Release workflows
 
-- `publish-nightly` runs on every push to `develop` and upserts a single **rolling** `nightly`
-  release: one entry that is replaced in place, so the releases page never fills with
-  indistinguishable builds. It is never deleted up front, so a failed build leaves the last
-  good nightly intact.
+- `publish-nightly` runs on every push to `develop` and publishes **one release per build**,
+  tagged `nightly-<yyyymmdd>-<sha>`. It used to upsert a single rolling `nightly` tag, which meant
+  the releases page showed one entry whose date never advanced and no record existed of what
+  shipped on any given night.
+  Each build is created as a **draft** and only published once every platform in the matrix has
+  uploaded. A build that fails or is cancelled therefore leaves a draft nobody sees, instead of a
+  half-finished release sitting on the page looking complete.
+  Nothing prunes old nightlies — a build should not delete published releases on its own.
 - `publish` runs on pushes to `release` and creates `v__VERSION__` as a non-prerelease, which
   is what gives the releases page its "Latest" badge.
 - The `*-release-manifest` workflows generate the download manifest consumed by the website.
-  Because upserting a release does not re-fire `release: published`, the nightly build
-  dispatches `nightly-release-manifest.yml` explicitly when it finishes.
+  `nightly-release-manifest.yml` is dispatch-only: `release: published` would fire when the first
+  of five platforms creates the release, and a manifest built then would describe assets that are
+  still uploading.
 
 ### Translations
 

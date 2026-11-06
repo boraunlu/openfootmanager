@@ -1,27 +1,24 @@
 import {
   Check,
   Copy,
+  Trash2,
   Crosshair,
   Flag,
   Plus,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   Shield,
   Target,
   Zap,
 } from "lucide-react";
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type JSX,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import { Badge, Button, Card, Select } from "../ui";
+import TacticsDeleteDialog from "./TacticsDeleteDialog";
 import { FORMATIONS } from "./TacticsTab.helpers";
 
 export interface TacticsLibraryEntry {
@@ -39,7 +36,13 @@ interface TacticsCommandBarProps {
   activePlayStyle: string;
   formation: string;
   isDirty: boolean;
+  /** Whether pressing Reset would change anything; the library decides, the bar renders. */
+  canReset: boolean;
+  onReset: () => void;
+  /** Whether the active tactic is a saved custom one, the only kind that can be deleted. */
+  canDelete: boolean;
   onCreateNew: () => void;
+  onDelete: () => void;
   onDuplicate: () => void;
   onFormationChange: (formation: string) => void;
   onPlayStyleChange: (playStyle: string) => void;
@@ -68,7 +71,11 @@ export default function TacticsCommandBar({
   activePlayStyle,
   formation,
   isDirty,
+  canReset,
+  onReset,
+  canDelete,
   onCreateNew,
+  onDelete,
   onDuplicate,
   onFormationChange,
   onPlayStyleChange,
@@ -80,6 +87,7 @@ export default function TacticsCommandBar({
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [showSavedCue, setShowSavedCue] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const savedCueTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -109,9 +117,7 @@ export default function TacticsCommandBar({
   const customEntries = filteredLibrary.filter((entry) => entry.type === "custom");
 
   const saveLabel =
-    activeTactic.type === "custom"
-      ? t("tactics.updateTactic")
-      : t("tactics.saveAsTactic");
+    activeTactic.type === "custom" ? t("tactics.updateTactic") : t("tactics.saveAsTactic");
   // Saving a synced custom tactic is a silent no-op — nothing has changed to
   // persist. Presets stay enabled even when isDirty is false because saving
   // there always creates a new custom tactic, which is an observable action.
@@ -159,10 +165,7 @@ export default function TacticsCommandBar({
                 <span className="text-[11px] font-heading font-bold uppercase tracking-[0.24em] text-gray-500 dark:text-gray-400">
                   {t("tactics.presetTactics")}
                 </span>
-                <Badge
-                  variant={activeTactic.type === "custom" ? "accent" : "success"}
-                  size="sm"
-                >
+                <Badge variant={activeTactic.type === "custom" ? "accent" : "success"} size="sm">
                   {activeTactic.type === "custom"
                     ? t("tactics.customTactic")
                     : t("tactics.activePreset")}
@@ -177,23 +180,32 @@ export default function TacticsCommandBar({
             </div>
 
             <div className="flex flex-wrap gap-2 xl:justify-end">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                icon={<Plus />}
-                onClick={onCreateNew}
-              >
+              <Button type="button" variant="ghost" size="sm" icon={<Plus />} onClick={onCreateNew}>
                 {t("tactics.newTactic")}
               </Button>
+              <Button type="button" variant="ghost" size="sm" icon={<Copy />} onClick={onDuplicate}>
+                {t("tactics.duplicateTactic")}
+              </Button>
+              {canDelete ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  icon={<Trash2 />}
+                  onClick={() => setConfirmingDelete(true)}
+                >
+                  {t("tactics.deleteTactic")}
+                </Button>
+              ) : null}
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                icon={<Copy />}
-                onClick={onDuplicate}
+                icon={<RotateCcw />}
+                onClick={onReset}
+                disabled={!canReset}
               >
-                {t("tactics.duplicateTactic")}
+                {t("tactics.resetTactic")}
               </Button>
               <Button
                 type="button"
@@ -216,9 +228,7 @@ export default function TacticsCommandBar({
                   {t("tactics.chooseTactic")}
                 </div>
                 <div className="text-[10px] font-heading font-bold uppercase tracking-[0.18em] text-primary-500 dark:text-primary-300">
-                  {activeTactic.type === "custom"
-                    ? t("tactics.myTactics")
-                    : t("tactics.presets")}
+                  {activeTactic.type === "custom" ? t("tactics.myTactics") : t("tactics.presets")}
                 </div>
               </div>
 
@@ -239,9 +249,7 @@ export default function TacticsCommandBar({
                   </div>
                 </div>
                 <div className="shrink-0 rounded-full bg-primary-500/10 px-2 py-1 text-[10px] font-heading font-bold uppercase tracking-[0.18em] text-primary-500 dark:text-primary-300">
-                  {activeTactic.type === "custom"
-                    ? t("tactics.myTactics")
-                    : t("tactics.presets")}
+                  {activeTactic.type === "custom" ? t("tactics.myTactics") : t("tactics.presets")}
                 </div>
               </button>
 
@@ -361,7 +369,9 @@ export default function TacticsCommandBar({
                 aria-label={t("tactics.formation")}
               >
                 {FORMATIONS.map((f) => (
-                  <option key={f} value={f}>{f}</option>
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
                 ))}
               </Select>
             </div>
@@ -385,10 +395,19 @@ export default function TacticsCommandBar({
                 ))}
               </Select>
             </div>
-
           </div>
         </div>
       </div>
+      {confirmingDelete ? (
+        <TacticsDeleteDialog
+          name={activeTactic.name}
+          onCancel={() => setConfirmingDelete(false)}
+          onConfirm={() => {
+            setConfirmingDelete(false);
+            onDelete();
+          }}
+        />
+      ) : null}
     </Card>
   );
 }

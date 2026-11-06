@@ -31,7 +31,7 @@ managed through migrations.
 
 ### 2. Database Schema (per save `.db` file)
 
-Managed by `rusqlite_migration`. The initial schema starts at V1, and the current save schema also includes later additive migrations such as V14 for football identity fields.
+Managed by `rusqlite_migration`. The initial schema starts at V1, and the current save schema also includes later additive migrations such as V14 for football identity fields. V58 adds the `archived_messages` table (read mail older than 180 days, moved out of the live inbox). It does not bump the save format version, because the migration count already makes an older build refuse the save with the "newer version" message (`IncompatibleVersion`); the archived mail stays on disk. V59 adds `game_meta.legacy_tactics_imported`, the mark that the old browser library of custom tactics was copied into the career (it is copied once, so a deleted tactic is not copied back); a save from before it reads 0 and is copied in once more, then marked. V60 adds `game_meta.gate_settled_from`, the first date a completed home fixture is paid a gate for; a save from before it reads NULL, and its first settlement fixes the date on the day after the old code's last payday that posted a gate, but never more than six days back (the reach of the old weekly gate), so a first settlement on any weekday does not pay again the fixtures that payday already paid. V61 adds `game_meta.last_season_rollover_on`, the day the last season ended, when every player aged and the season's growth applied; a scout's report taken before it is out of date. A save from before it reads NULL, and on load the day is taken from the last finished league season the manager's club played (`end_of_season::backfill_last_season_rollover`), then saved; a career still in its first season keeps NULL.
 
 ```sql
 -- Game clock / session metadata
@@ -112,8 +112,9 @@ CREATE TABLE players (
     injury              TEXT,             -- JSON for Option<Injury> (NULL if none)
     team_id             TEXT,
     traits              TEXT NOT NULL DEFAULT '[]',  -- JSON array
-    contract_end        TEXT,
-    wage                INTEGER NOT NULL DEFAULT 0,
+    contract_start      TEXT,             -- a copy of the current contract; see "Contract history" below. NULL = unknown
+    contract_end        TEXT,             -- (copy) the current contract's end
+    wage                INTEGER NOT NULL DEFAULT 0,  -- (copy) the current contract's weekly wage
     market_value        INTEGER NOT NULL DEFAULT 0,
     stats               TEXT NOT NULL DEFAULT '{}',  -- JSON for PlayerSeasonStats
     career              TEXT NOT NULL DEFAULT '[]',  -- JSON for Vec<CareerEntry>
@@ -212,6 +213,48 @@ CREATE TABLE scouting_assignments (
     days_remaining  INTEGER NOT NULL
 );
 ```
+
+### Contract history
+
+A player's contracts are kept in `players.movement_history` (a JSON array, present since v041),
+not in the three columns above. An entry that makes a contract carries a `contract` block
+(`start`, `end`, `weekly_wage`, `source`); the current contract is the latest such entry unless a
+later `released` or `retired` entry ended it. Loan entries carry no contract: a loaned player is
+still on his parent club's agreement.
+
+A player has no wage or contract-date fields. `wage()`, `contract_start()` and `contract_end()`
+read the ledger, and `contract_start`, `contract_end` and `wage` are **written from it** when a
+player is saved (and when it is serialized for the frontend), so anything that reads the `.db`
+directly, and the frontend, see the same shape as before. On load those three columns are a
+**read-only legacy input**: they are used only when the entries hold no contract (a save from
+before the ledger), and ignored as soon as they do.
+
+No migration was needed: every new field is optional. A save from before the ledger gets **one**
+`initial_contract` entry per player under contract when it is loaded, with `source =
+legacy_migrated`, the end and wage from the old columns, and the start the old columns knew (NULL
+when they did not: it is never invented). A player with no contract gets none.
+
+### Retired players
+
+A player who retires leaves `game.players` and the `players` table and is kept as a frozen
+`RetiredPlayer` record (`domain::retired_player`): who he was, his final ability, his career and
+movements, when he retired and from which club. Records live in `retired_players` (migration
+v052: `player_id` primary key, `record_json`) and are loaded into `Game::retired_players`, which
+is skipped on the IPC payload because it only grows.
+
+- **Written once.** `INSERT OR IGNORE` by id: an archived record is never rewritten, so a field
+  added to the record later cannot make an old row "differ". Archiving a player and deleting his
+  `players` row happen in the same transaction as the save, so a failure leaves him in exactly
+  one place.
+- **Save format 9.** A save written before the archive carries its retirees as `retired = 1`
+  rows. On load, a save below format 9 has them moved into the archive once, each dated by his
+  own `retired` movement and filed under the season of his last career entry; the resave deletes
+  the old rows. The check is not tied to the format: whatever a save's version, a retiree found on
+  a loaded roster is archived on that load and the load writes the move back, so the roster only
+  ever holds people who play. An older build refuses a format 9 save rather than open it with its
+  retirees missing.
+- **Readers.** The Hall of Fame, a retiree's profile, his stats overview and the names on old
+  results read the archive (`ofm_core::retirees`, `ofm_core::hall_of_fame`).
 
 ### Football Identity Notes
 

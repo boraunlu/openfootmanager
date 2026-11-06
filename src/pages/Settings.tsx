@@ -2,11 +2,14 @@ import { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
-import { useSettingsStore, AppSettings } from "../store/settingsStore";
+import { useSettingsStore, type AppSettings } from "../store/settingsStore";
 import { useTheme } from "../context/ThemeContext";
-import { ThemeToggle, Select } from "../components/ui";
+import { SegmentedControl, Switch, ThemeToggle, Select } from "../components/ui";
 import { SUPPORTED_LANGUAGES, changeAppLanguage } from "../i18n";
 import { formatAppVersion } from "../lib/appVersion";
+import { Section, SettingRow } from "./Settings.components";
+import { ReportBugModal } from "../components/diagnostics/ReportBugModal";
+import { SubmittedReports } from "../components/diagnostics/SubmittedReports";
 import {
   ArrowLeft,
   Monitor,
@@ -21,6 +24,7 @@ import {
   Type,
   Maximize,
   Minimize,
+  Bug,
 } from "lucide-react";
 
 const CURRENCY_OPTIONS = [
@@ -33,6 +37,8 @@ const THEME_OPTION_KEYS = ["light", "dark", "system"] as const;
 const MATCH_MODE_KEYS = ["live", "spectator", "delegate"] as const;
 const MATCH_SPEED_KEYS = ["slow", "normal", "fast"] as const;
 const UI_SCALE_KEYS = ["small", "normal", "large", "xlarge"] as const;
+const SIDEBAR_WIDTH_KEYS = ["compact", "standard", "wide"] as const;
+const SIDEBAR_BEHAVIOUR_KEYS = ["normal", "hover", "click", "icons"] as const;
 
 export default function Settings() {
   const navigate = useNavigate();
@@ -41,11 +47,12 @@ export default function Settings() {
   const { settings, loaded, loadSettings, updateSettings } = useSettingsStore();
   const { theme, toggleTheme } = useTheme();
   const [confirmClear, setConfirmClear] = useState(false);
+  const [reportingBug, setReportingBug] = useState(false);
+  // Bumped whenever the report dialog closes, so a code it just received is listed straight away.
+  const [reportsRefresh, setReportsRefresh] = useState(0);
   const [clearSuccess, setClearSuccess] = useState(false);
   const [exportPath, setExportPath] = useState<string | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(
-    !!document.fullscreenElement,
-  );
+  const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
 
   // Where to go back to
   const returnTo = (location.state as { from?: string })?.from || "/";
@@ -135,6 +142,7 @@ export default function Settings() {
         <div className="max-w-3xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
+              type="button"
               onClick={() => navigate(returnTo)}
               className="p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-navy-700 transition-colors"
             >
@@ -151,38 +159,23 @@ export default function Settings() {
       {/* Content */}
       <div className="max-w-3xl mx-auto px-6 py-8 flex flex-col gap-8">
         {/* ─── Display ─── */}
-        <Section
-          title={t("settings.display")}
-          icon={<Monitor className="w-5 h-5" />}
-        >
-          <SettingRow
-            label={t("settings.theme")}
-            description={t("settings.themeDesc")}
-          >
-            <SegmentedControl
-              options={THEME_OPTION_KEYS.map((key) => ({
-                value: key,
-                label: t(`settings.themeOptions.${key}`),
-                icon:
-                  key === "light" ? (
-                    <Sun className="w-4 h-4" />
-                  ) : key === "dark" ? (
-                    <Moon className="w-4 h-4" />
-                  ) : (
-                    <Monitor className="w-4 h-4" />
-                  ),
-              }))}
-              value={settings.theme}
-              onChange={(v) =>
-                handleUpdate({ theme: v as AppSettings["theme"] })
-              }
-            />
+        <Section title={t("settings.display")} icon={<Monitor className="w-5 h-5" />}>
+          <SettingRow label={t("settings.theme")} description={t("settings.themeDesc")}>
+            {(labelId) => (
+              <SegmentedControl
+                labelledBy={labelId}
+                options={THEME_OPTION_KEYS.map((key) => ({
+                  value: key,
+                  label: t(`settings.themeOptions.${key}`),
+                  icon: key === "light" ? <Sun /> : key === "dark" ? <Moon /> : <Monitor />,
+                }))}
+                value={settings.theme}
+                onChange={(theme) => handleUpdate({ theme })}
+              />
+            )}
           </SettingRow>
 
-          <SettingRow
-            label={t("settings.language")}
-            description={t("settings.languageDesc")}
-          >
+          <SettingRow label={t("settings.language")} description={t("settings.languageDesc")}>
             <Select
               value={settings.language}
               onChange={(e) => handleUpdate({ language: e.target.value })}
@@ -197,10 +190,7 @@ export default function Settings() {
             </Select>
           </SettingRow>
 
-          <SettingRow
-            label={t("settings.currency")}
-            description={t("settings.currencyDesc")}
-          >
+          <SettingRow label={t("settings.currency")} description={t("settings.currencyDesc")}>
             <Select
               value={settings.currency}
               onChange={(e) =>
@@ -218,60 +208,84 @@ export default function Settings() {
             </Select>
           </SettingRow>
 
+          <SettingRow label={t("settings.uiScale")} description={t("settings.uiScaleDesc")}>
+            {(labelId) => (
+              <div className="flex max-w-full items-center gap-2">
+                <Type aria-hidden="true" className="w-4 h-4 shrink-0 text-fg-subtle" />
+                <SegmentedControl
+                  labelledBy={labelId}
+                  options={UI_SCALE_KEYS.map((key) => ({
+                    value: key,
+                    label: t(`settings.uiScaleOptions.${key}`),
+                  }))}
+                  value={settings.ui_scale}
+                  onChange={(ui_scale) => handleUpdate({ ui_scale })}
+                />
+              </div>
+            )}
+          </SettingRow>
+
           <SettingRow
-            label={t("settings.uiScale")}
-            description={t("settings.uiScaleDesc")}
+            label={t("settings.sidebarWidth")}
+            description={t("settings.sidebarWidthDesc")}
           >
-            <div className="flex items-center gap-2">
-              <Type className="w-4 h-4 text-gray-400" />
+            {(labelId) => (
               <SegmentedControl
-                options={UI_SCALE_KEYS.map((key) => ({
+                labelledBy={labelId}
+                options={SIDEBAR_WIDTH_KEYS.map((key) => ({
                   value: key,
-                  label: t(`settings.uiScaleOptions.${key}`),
+                  label: t(`settings.sidebarWidthOptions.${key}`),
                 }))}
-                value={settings.ui_scale}
-                onChange={(v) =>
-                  handleUpdate({ ui_scale: v as AppSettings["ui_scale"] })
-                }
+                value={settings.sidebar_width}
+                onChange={(sidebar_width) => handleUpdate({ sidebar_width })}
               />
-            </div>
+            )}
+          </SettingRow>
+
+          <SettingRow
+            label={t("settings.sidebarBehaviour")}
+            description={t("settings.sidebarBehaviourDesc")}
+          >
+            {(labelId) => (
+              <SegmentedControl
+                labelledBy={labelId}
+                options={SIDEBAR_BEHAVIOUR_KEYS.map((key) => ({
+                  value: key,
+                  label: t(`settings.sidebarBehaviourOptions.${key}`),
+                }))}
+                value={settings.sidebar_behaviour}
+                onChange={(sidebar_behaviour) => handleUpdate({ sidebar_behaviour })}
+              />
+            )}
           </SettingRow>
 
           <SettingRow
             label={t("settings.highContrast")}
             description={t("settings.highContrastDesc")}
           >
-            <Toggle
-              checked={settings.high_contrast}
-              onChange={(v) => handleUpdate({ high_contrast: v })}
-            />
+            {(labelId) => (
+              <Switch
+                labelledBy={labelId}
+                checked={settings.high_contrast}
+                onChange={(high_contrast) => handleUpdate({ high_contrast })}
+              />
+            )}
           </SettingRow>
 
-          <SettingRow
-            label={t("settings.fullscreen")}
-            description={t("settings.fullscreenDesc")}
-          >
+          <SettingRow label={t("settings.fullscreen")} description={t("settings.fullscreenDesc")}>
             <button
+              type="button"
               onClick={toggleFullscreen}
               className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-100 dark:bg-navy-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-navy-600 text-sm font-heading font-bold uppercase tracking-wider transition-colors"
             >
-              {isFullscreen ? (
-                <Minimize className="w-4 h-4" />
-              ) : (
-                <Maximize className="w-4 h-4" />
-              )}
-              {isFullscreen
-                ? t("settings.exitFullscreen")
-                : t("settings.enterFullscreen")}
+              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+              {isFullscreen ? t("settings.exitFullscreen") : t("settings.enterFullscreen")}
             </button>
           </SettingRow>
         </Section>
 
         {/* ─── Gameplay ─── */}
-        <Section
-          title={t("settings.gameplay")}
-          icon={<Gamepad2 className="w-5 h-5" />}
-        >
+        <Section title={t("settings.gameplay")} icon={<Gamepad2 className="w-5 h-5" />}>
           <SettingRow
             label={t("settings.defaultMatchMode")}
             description={t("settings.defaultMatchModeDesc")}
@@ -280,8 +294,7 @@ export default function Settings() {
               value={settings.default_match_mode}
               onChange={(e) =>
                 handleUpdate({
-                  default_match_mode: e.target
-                    .value as AppSettings["default_match_mode"],
+                  default_match_mode: e.target.value as AppSettings["default_match_mode"],
                 })
               }
               className="min-w-48"
@@ -294,73 +307,88 @@ export default function Settings() {
             </Select>
           </SettingRow>
 
-          <SettingRow
-            label={t("settings.matchSpeed")}
-            description={t("settings.matchSpeedDesc")}
-          >
-            <SegmentedControl
-              options={MATCH_SPEED_KEYS.map((k) => ({
-                value: k,
-                label: t(`settings.speeds.${k}`),
-              }))}
-              value={settings.match_speed}
-              onChange={(v) =>
-                handleUpdate({ match_speed: v as AppSettings["match_speed"] })
-              }
-            />
+          <SettingRow label={t("settings.matchSpeed")} description={t("settings.matchSpeedDesc")}>
+            {(labelId) => (
+              <SegmentedControl
+                labelledBy={labelId}
+                options={MATCH_SPEED_KEYS.map((k) => ({
+                  value: k,
+                  label: t(`settings.speeds.${k}`),
+                }))}
+                value={settings.match_speed}
+                onChange={(match_speed) => handleUpdate({ match_speed })}
+              />
+            )}
           </SettingRow>
 
           <SettingRow
             label={t("settings.matchCommentary")}
             description={t("settings.matchCommentaryDesc")}
           >
-            <Toggle
-              checked={settings.show_match_commentary}
-              onChange={(v) => handleUpdate({ show_match_commentary: v })}
-            />
+            {(labelId) => (
+              <Switch
+                labelledBy={labelId}
+                checked={settings.show_match_commentary}
+                onChange={(show_match_commentary) => handleUpdate({ show_match_commentary })}
+              />
+            )}
           </SettingRow>
 
           <SettingRow
             label={t("settings.confirmAdvance")}
             description={t("settings.confirmAdvanceDesc")}
           >
-            <Toggle
-              checked={settings.confirm_advance}
-              onChange={(v) => handleUpdate({ confirm_advance: v })}
-            />
+            {(labelId) => (
+              <Switch
+                labelledBy={labelId}
+                checked={settings.confirm_advance}
+                onChange={(confirm_advance) => handleUpdate({ confirm_advance })}
+              />
+            )}
           </SettingRow>
 
           <SettingRow
             label={t("settings.continueToNextEvent")}
             description={t("settings.continueToNextEventDesc")}
           >
-            <Toggle
-              checked={settings.continue_to_next_event}
-              onChange={(v) => handleUpdate({ continue_to_next_event: v })}
-            />
+            {(labelId) => (
+              <Switch
+                labelledBy={labelId}
+                checked={settings.continue_to_next_event}
+                onChange={(continue_to_next_event) => handleUpdate({ continue_to_next_event })}
+              />
+            )}
+          </SettingRow>
+
+          <SettingRow
+            label={t("settings.skipShootoutPicker")}
+            description={t("settings.skipShootoutPickerDesc")}
+          >
+            {(labelId) => (
+              <Switch
+                labelledBy={labelId}
+                checked={settings.skip_shootout_picker}
+                onChange={(skip_shootout_picker) => handleUpdate({ skip_shootout_picker })}
+              />
+            )}
           </SettingRow>
         </Section>
 
         {/* ─── Saves & Data ─── */}
-        <Section
-          title={t("settings.savesData")}
-          icon={<Save className="w-5 h-5" />}
-        >
-          <SettingRow
-            label={t("settings.autoSave")}
-            description={t("settings.autoSaveDesc")}
-          >
-            <Toggle
-              checked={settings.auto_save}
-              onChange={(v) => handleUpdate({ auto_save: v })}
-            />
+        <Section title={t("settings.savesData")} icon={<Save className="w-5 h-5" />}>
+          <SettingRow label={t("settings.autoSave")} description={t("settings.autoSaveDesc")}>
+            {(labelId) => (
+              <Switch
+                labelledBy={labelId}
+                checked={settings.auto_save}
+                onChange={(auto_save) => handleUpdate({ auto_save })}
+              />
+            )}
           </SettingRow>
 
-          <SettingRow
-            label={t("settings.exportWorld")}
-            description={t("settings.exportWorldDesc")}
-          >
+          <SettingRow label={t("settings.exportWorld")} description={t("settings.exportWorldDesc")}>
             <button
+              type="button"
               onClick={handleExportWorld}
               className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary-500/10 text-primary-600 dark:text-primary-400 hover:bg-primary-500/20 text-sm font-heading font-bold uppercase tracking-wider transition-colors"
             >
@@ -383,12 +411,14 @@ export default function Settings() {
               {confirmClear ? (
                 <div className="flex items-center gap-2">
                   <button
+                    type="button"
                     onClick={handleClearSaves}
                     className="px-4 py-2 rounded-lg bg-red-500 text-white text-sm font-heading font-bold uppercase tracking-wider hover:bg-red-600 transition-colors"
                   >
                     {t("common.confirm")}
                   </button>
                   <button
+                    type="button"
                     onClick={() => setConfirmClear(false)}
                     className="px-4 py-2 rounded-lg bg-gray-200 dark:bg-navy-600 text-gray-700 dark:text-gray-300 text-sm font-heading font-bold uppercase tracking-wider hover:bg-gray-300 dark:hover:bg-navy-500 transition-colors"
                   >
@@ -401,6 +431,7 @@ export default function Settings() {
                 </span>
               ) : (
                 <button
+                  type="button"
                   onClick={() => setConfirmClear(true)}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500/20 text-sm font-heading font-bold uppercase tracking-wider transition-colors"
                 >
@@ -410,6 +441,21 @@ export default function Settings() {
               )}
             </SettingRow>
           </div>
+        </Section>
+
+        {/* ─── Help ─── */}
+        <Section title={t("settings.help")} icon={<Bug className="w-5 h-5" />}>
+          <SettingRow label={t("settings.reportBug")} description={t("settings.reportBugDesc")}>
+            <button
+              type="button"
+              onClick={() => setReportingBug(true)}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary-500/10 text-primary-600 dark:text-primary-400 hover:bg-primary-500/20 text-sm font-heading font-bold uppercase tracking-wider transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 dark:focus:ring-offset-navy-800"
+            >
+              <Bug className="w-4 h-4" />
+              {t("settings.report")}
+            </button>
+          </SettingRow>
+          <SubmittedReports refreshKey={reportsRefresh} />
         </Section>
 
         {/* ─── About ─── */}
@@ -429,107 +475,16 @@ export default function Settings() {
           </div>
         </Section>
       </div>
-    </div>
-  );
-}
 
-// ── Reusable sub-components ──
-
-function Section({
-  title,
-  icon,
-  children,
-}: {
-  title: string;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="bg-white dark:bg-navy-800 rounded-2xl border border-gray-200 dark:border-navy-700 shadow-sm overflow-hidden">
-      <div className="flex items-center gap-2 px-6 py-4 border-b border-gray-100 dark:border-navy-700">
-        <span className="text-primary-500">{icon}</span>
-        <h2 className="text-sm font-heading font-bold uppercase tracking-wider text-gray-800 dark:text-gray-200">
-          {title}
-        </h2>
-      </div>
-      <div className="px-6 py-4 flex flex-col gap-5">{children}</div>
-    </div>
-  );
-}
-
-function SettingRow({
-  label,
-  description,
-  danger,
-  children,
-}: {
-  label: string;
-  description: string;
-  danger?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="flex-1 min-w-0">
-        <p
-          className={`text-sm font-medium ${danger ? "text-red-500" : "text-gray-800 dark:text-gray-200"}`}
-        >
-          {label}
-        </p>
-        <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-          {description}
-        </p>
-      </div>
-      <div className="flex-shrink-0">{children}</div>
-    </div>
-  );
-}
-
-function Toggle({
-  checked,
-  onChange,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <button
-      onClick={() => onChange(!checked)}
-      className={`relative w-11 h-6 rounded-full transition-colors duration-200 ${checked ? "bg-primary-500" : "bg-gray-300 dark:bg-navy-600"
-        }`}
-    >
-      <div
-        className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform duration-200 ${checked ? "translate-x-[22px]" : "translate-x-0.5"
-          }`}
-      />
-    </button>
-  );
-}
-
-function SegmentedControl({
-  options,
-  value,
-  onChange,
-}: {
-  options: Array<{ value: string; label?: string; icon?: React.ReactNode }>;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex rounded-lg bg-gray-100 dark:bg-navy-700 p-0.5 border border-gray-200 dark:border-navy-600">
-      {options.map((opt) => (
-        <button
-          key={opt.value}
-          onClick={() => onChange(opt.value)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-heading font-bold uppercase tracking-wider transition-all ${value === opt.value
-            ? "bg-white dark:bg-navy-500 text-primary-600 dark:text-primary-400 shadow-sm"
-            : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
-            }`}
-        >
-          {opt.icon}
-          {opt.label || opt.value}
-        </button>
-      ))}
+      {reportingBug && (
+        <ReportBugModal
+          onClose={() => {
+            setReportingBug(false);
+            setReportsRefresh((count) => count + 1);
+          }}
+          onUploaded={() => setReportsRefresh((count) => count + 1)}
+        />
+      )}
     </div>
   );
 }

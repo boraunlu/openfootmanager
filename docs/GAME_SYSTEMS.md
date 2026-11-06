@@ -16,6 +16,8 @@ This document describes the major gameplay systems in OpenFoot Manager beyond ma
 - [World Generation](#world-generation)
 - [Finances](#finances)
 - [Transfers](#transfers)
+- [The Squad Floor](#the-squad-floor)
+- [Youth Intake](#youth-intake)
 
 ---
 
@@ -41,9 +43,15 @@ process_day(game)
 
 On match days, `simulate_matchday()`:
 
-1. Finds all scheduled fixtures for today
-2. For each fixture, converts domain `Player`/`Team` to engine `PlayerData`/`TeamData` via `build_engine_team()`
-3. Calls `engine::simulate()` to get a `MatchReport`
+1. Finds all scheduled fixtures for today in the active competitions
+2. For each fixture, plays it as an unwatched live-engine session, with an AI manager on both
+   touchlines: `live_match_manager::play_unwatched_fixture` kicks off through the squad floor's
+   gate, builds both sides with `turn::squad::build_team_with_bench` (an eleven and a bench, fit
+   players first), and each manager makes substitutions and tactical changes as the match goes.
+   Knockout ties play extra time and, if still level, a penalty shootout. A side nobody can field
+   at all is settled by scoreline instead, and logged. The player's own fixture, when delegated,
+   goes through the same function.
+3. Takes the finished match's `MatchReport`
 4. Updates fixture status to `Completed` with the `MatchResult`
 5. Updates `StandingEntry` for both teams (points: 3/1/0 for win/draw/loss)
 6. Calls `apply_player_stats()` to update individual `PlayerSeasonStats`
@@ -71,9 +79,9 @@ Training is processed daily on non-match days. The system is controlled by three
 | Focus | Attributes Trained | Notes |
 |-------|-------------------|-------|
 | **Physical** | pace, stamina, strength, agility | Full gain on all 4 |
-| **Technical** | passing, shooting, dribbling | Full gain on all 3 |
+| **Technical** | passing; shooting/dribbling (outfield) or handling/reflexes (GK) | Full gain on all 3 |
 | **Tactical** | positioning, vision, decisions, composure | Full gain on all 4 |
-| **Defending** | tackling, defending + strength, positioning (half gain) | Mixed defensive |
+| **Defending** | tackling/defending (outfield) or handling/reflexes (GK), plus strength/positioning (half gain) | Mixed defensive |
 | **Attacking** | shooting, dribbling + pace (half gain) | Mixed offensive |
 | **Recovery** | — (no attribute gains) | Maximum condition recovery |
 
@@ -118,14 +126,41 @@ The gain is **probabilistic**: a gain of 0.3 means a 30% chance of +1 to that at
 ### Condition & Recovery
 
 - **Training days**: condition depleted by cost, then partially recovered (base 3, boosted by physio)
-- **Rest days**: no cost, generous recovery (base 10, boosted by physio)
-- **Recovery focus**: no cost, highest recovery (base 12, boosted by physio)
+- **Rest days**: no cost, the most recovery of any day (base 10, boosted by physio)
+- **Recovery focus**: no cost, highest recovery (base 9, boosted by physio)
 - **Injured players**: receive 50% of base recovery, skip training
 
 Recovery is further modified by each player's stamina attribute:
 ```
 recovery = base × (0.5 + stamina/100 × 0.5)
 ```
+
+### The near-match taper
+
+No squad does a full session two days before a game, so this is not left to the
+manager. A club within `MATCH_TAPER_DAYS` (2) of its next fixture — in *any*
+competition — runs today's session one step lighter than its standing intensity,
+and a tapered session that lands on Low counts as recovery work rather than a load.
+
+A club facing two or more fixtures inside the coming week goes further: every
+session is recovery work, whatever its standing intensity. One step down from High
+is Medium, which still costs more than it restores, and a club that trained
+through a two-match week reached the second match with its squad below 80.
+
+The club's stored focus, intensity and schedule are **not** rewritten: the plan on
+the Training tab stays the manager's, and the taper is applied on top of it, per
+day. It applies to every club, the player's included.
+
+### The fatigue guard
+
+Below `FATIGUE_GUARD_CONDITION` (40) an individual player is rested regardless of
+the team's plan. Team intensity is one setting for a whole squad but the condition
+cost is per player, so without this an individually exhausted player in an
+otherwise-healthy squad keeps net-losing condition and never climbs out.
+
+This applies to every club too. It was AI-only until it turned out to be the
+difference between a squad that stabilises and one that reaches condition 2 within
+two months of the season starting.
 
 ### Fitness Warnings
 
@@ -298,7 +333,7 @@ The inbox system provides contextual communication from in-game characters. Mess
 | JobOffer | Board of Directors | Vacancy-driven approaches and application replies for unemployed managers |
 | Finance | (Future) | Budget updates |
 | Transfer | (Future) | Transfer offers |
-| Injury | (Future) | Injury reports |
+| Injury | After a club match that injures one of your players | The head physio's report: the injury and the expected time out (`be.msg.matchInjury.*`) |
 | Contract | (Future) | Contract negotiations |
 | ScoutReport | (Future) | Player scouting |
 | Media | (Future) | Press stories |
@@ -392,6 +427,10 @@ Match reports use randomized commentary templates (3 variations per article). Th
 League roundup articles summarize all matchday results with scores, standings update articles report the current top positions, managerial-change articles cover firings and appointments, and season preview articles frame the new campaign before kickoff.
 
 **Transfer rumours** are generated every Monday (alongside the weekly digest). Up to 2 notable AI-team players — those with a market value ≥ €800K, an expiring contract (≤ 12 months), or low morale — are picked and receive a speculative gossip article attributed to tabloid-leaning sources (Transfer Intelligence, Sports Gazette, or The Football Herald). These rumours do not correspond to actual pending transfer offers; they are flavour-driven speculation.
+
+### Match injuries
+
+The match engine records an injury event when a player is hurt on the pitch. `turn/match_injuries.rs` turns each one into a real injury on that player when the result is applied: one injury per player, never on someone already injured, and never one the engine did not produce. The injury comes from `player_wear::roll_injury`, shared with national-team friendlies: a severity band by weight, then a name and a number of days within it. The weights are the UEFA Elite Club Injury Study's injuries per team per season by days of absence (19 slight under 3 days, 15 minor 3-7, 14 moderate 8-28, 7 major over 28, out of 55). The roll is seeded from the day, the fixture and the player. An injury to a player of the user's club sends one physio message through the sent-ledger, keyed by fixture and player, so a deleted message is never resent.
 
 **Injury news** articles are generated whenever a notable player suffers a training-ground injury. Notability is defined as a market value ≥ €500K or membership of the user club's starting XI. The article reports the injury duration and is attributed to a factual source (League Wire, The Football Herald, or Match Day Press).
 
@@ -493,6 +532,75 @@ The `TransfersTab` provides 4 views:
 - **Loans** — Loan-listed players
 - **Offers** — Incoming and outgoing transfer offers
 
-### Transfer Mechanics
+---
 
-(Transfer resolution logic is planned for future development. The current system provides the UI framework and data structures.)
+## The Squad Floor
+
+A club never runs out of players. `ofm_core::squad_floor` holds the one rule: every club keeps at
+least **15 senior players** registered (`MIN_SENIOR_PLAYERS`), and within them at least **2
+goalkeepers, 4 defenders, 4 midfielders and 2 forwards** (`MIN_PLAYERS_PER_GROUP`). Injured players
+count; players out on loan count for their borrower; academy players do not — they are what a
+short club promotes.
+
+**The game never creates a player, or money, for a club** — the one way a player comes into the
+world is the season-end [youth intake](#youth-intake), into academies. A club short of the floor is
+filled only from players who exist: its own academy first, then the free-agent market, on wages the club pays
+even if its balance goes negative. When neither has anyone, the gap is reported (logged for an AI
+club, an inbox message for the player's club) and the day still finishes.
+
+Every way a club can lose a player answers to the floor:
+
+| Source | What happens |
+|---|---|
+| Sale, loan, contract termination | Refused if it would take the club below the floor, in the player's group or in all (`be.error.squadFloor.wouldLeaveShort`, `…wouldLeaveSeniorsShort`). Checked before an offer is marked agreed, and again when a scheduled deal falls due — a deal struck with players to spare lapses if the club has since lost them. The AI market does not shortlist a player whose club cannot sell him. An academy player can always leave. |
+| Contract expiry | AI clubs renew their own players first (`ai_contracts`, on each club's weekly review day, through the same offer and acceptance rules as the player's renewals). |
+| Ordinary AI squad planning | On the same review day an AI club graduates academy players past the academy age (`roster::YOUTH_ACADEMY_MAX_AGE`), then keeps one senior above the minimum in each group and 18 seniors in all (`PLANNING_TARGET_SENIORS`) — promoting from its academy first, then signing free agents the board lets it pay. This is what keeps the emergency below from ever firing. |
+| Expiry, retirement, loan returns — anything that cannot be refused | Once a day, after those steps, an AI club still below the floor is topped up — the emergency, recorded in the runtime-only `Game::squad_floor_top_ups`. The player's club is **not** filled for: it gets an inbox warning per shortage, once per season, shortage and count. |
+| Kick-off | Every club fixture passes `live_match_manager::prepare_kick_off` (the player's own matches through `kick_off_live_match`). An AI club still short is topped up and logged. The player's club is topped up only if it cannot field a side at all (fewer than eleven seniors, or no senior goalkeeper), and is told who came in and what nobody could fill. |
+| Loading a save, building a world | The same repair: AI clubs topped up, the player's club warned — unless it plays today, when kick-off handles it. |
+
+The board's wage policy yields in exactly one case (`contract_wage_policy::wage_policy_verdict`):
+when the club would be below the floor without the player. That rule is shared by the manager's
+renewals and free-agent signings, the assistant's delegated renewals, AI renewals and planning, and
+the top-up; the manager is told when it applied.
+
+## Youth Intake
+
+Every club, the player's included, takes new youngsters into its academy at each season's end
+(`ofm_core::youth_intake`). Without it a world only loses players: retirements outrun graduations,
+the academies the generator seeds are empty within a few seasons, and the free-agent pool drains
+after them.
+
+The rule is one pure function of a club's academy, `youth_intake::plan_for`: a club takes what it
+lacks of an academy of **1 goalkeeper, 2 defenders, 2 midfielders and 1 forward**
+(`ACADEMY_TARGET_PER_GROUP`), never fewer than **one** youngster a season (`MIN_INTAKE`) nor more
+than **three** (`MAX_INTAKE`). A keeper comes first when the academy has none; after that the
+thinnest groups. The plan says how many and where they play, with no randomness, so an academy
+cost can be attached to it later. No money moves today.
+
+`apply_youth_intake` then takes each club's intake (`take_youth_intake`, one club at a time). The
+youngsters are drawn at 15–17 (a birth late in the year makes some 14 by the 1 July count) from
+the save's own seed (`Game::rng_for("youth-intake/<club>", date)`), so a replayed season end takes
+in the same youngsters and two careers from one package do not. Each joins on a contract that
+starts that day, recorded in his history as a signing from no club, with a free shirt number. It
+runs last in the season end's squad turnover, after aging, retirements and every AI club's rebuild,
+so the rebuild cannot promote a youngster on the day he joins.
+
+**The board decides what a recruit is paid**, by the one wage rule every contract a club offers goes
+through, for the player's club and AI clubs alike (`contract_wage_policy::joining_wage_policy_verdict`,
+which counts a recruit's whole wage as new to the bill). He is offered what he asks, then the youth
+minimum of 500 a week; if the board will not pay even that, he is not taken, and neither is the rest
+of that club's plan. Nothing is created to fill the gap and no money moves. The player's club is told
+who joined, and when the board turned any away (`be.msg.youthIntake`).
+
+Measured on a three-nation pyramid of 80 clubs over five seasons and three seeds
+(`tests/youth_intake_wages_probe.rs`, ignored, run in release): the board turned away none of 2,240
+planned recruits. From the second season on, every club sits over its wage budget on the policy's
+25,000-a-week grace, which is allowed per decision, so a recruit at the minimum cannot be refused.
+`tests/squad_floor_seasons.rs` fails if a solvent AI club ever goes two season ends running without
+a youngster.
+
+Measured on a seeded compact world with a league: the world opens below the intake's equilibrium,
+grows for about a dozen seasons, and then holds at about a fifth above its opening size, with around
+six academy players and seven free agents per club. `tests/squad_floor_seasons.rs` asserts that
+band over twelve seasons on three seeds.

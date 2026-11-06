@@ -1,6 +1,6 @@
-import { getContractRiskLevel, getPlayerOvr } from "../../lib/helpers";
-import { PlayerData, GameStateData } from "../../store/gameStore";
-import { ArrowLeft } from "lucide-react";
+import { getPlayerOvr } from "../../lib/helpers";
+import { useContractRiskLevels } from "../../hooks/useContractWarningStages";
+import type { PlayerData, GameStateData } from "../../store/gameStore";
 import { useTranslation } from "react-i18next";
 import { Select } from "../ui";
 import { getRoleOptions } from "../../lib/playerRoles";
@@ -12,13 +12,19 @@ import TransferBidModal from "../transfers/TransferBidModal";
 import { useFreeAgentContractFlow } from "../transfers/useFreeAgentContractFlow";
 import { useTransferBidFlow } from "../transfers/useTransferBidFlow";
 import PlayerProfileActionsMenu from "./PlayerProfileActionsMenu";
-import { getPlayerAge, getPlayerTeamName } from "./PlayerProfile.helpers";
+import {
+  formatPlayerWage,
+  formatPlayerWageCompact,
+  getPlayerTeamName,
+} from "./PlayerProfile.helpers";
+import { useVisibleWage } from "../../hooks/useVisibleWage";
+import { answeredOr } from "../../hooks/useKnowledgeAnswer";
+import ProfileLoadFailed from "./ProfileLoadFailed";
 import { buildPlayerProfileRelationship } from "./PlayerProfile.viewModel";
 import PlayerProfileAdvancedStatsCard from "./PlayerProfileAdvancedStatsCard";
-import {
-  buildPlayerAttributeGroups,
-  isGoalkeeper,
-} from "./PlayerProfile.attributes";
+import { buildPlayerAttributeGroups, isGoalkeeper } from "./PlayerProfile.attributes";
+import { calcAgeOnDate } from "../../lib/valueFormatting";
+import { formatDate } from "../../lib/dateFormatting";
 import PlayerProfileAttributesCard from "./PlayerProfileAttributesCard";
 import PlayerProfileCareerHistoryCard from "./PlayerProfileCareerHistoryCard";
 import PlayerProfileContractCard from "./PlayerProfileContractCard";
@@ -30,11 +36,27 @@ import PlayerProfileRecentMatchesCard from "./PlayerProfileRecentMatchesCard";
 import PlayerProfileRenewalModal from "./PlayerProfileRenewalModal";
 import PlayerProfileSeasonStatsCard from "./PlayerProfileSeasonStatsCard";
 import PlayerProfileTerminationModal from "./PlayerProfileTerminationModal";
+import { useScoutedReport } from "./useScoutedReport";
+import PlayerProfilePotentialOpinion from "./PlayerProfilePotentialOpinion";
+import PlayerProfilePositionRatings from "./PlayerProfilePositionRatings";
+import { usePositionRatings } from "../../hooks/usePositionRatings";
+import { usePotentialOpinion } from "../../hooks/usePotentialOpinion";
 import { useContractActionsFlow } from "./useContractActionsFlow";
 import { useInitialModalIntent } from "./useInitialModalIntent";
 import { usePlayerProfileData } from "./usePlayerProfileData";
 import { useScoutPlayerFlow } from "./useScoutPlayerFlow";
 import { useContractRenewalFlow } from "./useContractRenewalFlow";
+import { naturalPositionOf } from "../../lib/positions";
+import {
+  gameKnowledgeRevision,
+  HIDDEN_WAGE,
+  knowsPlayerRating,
+  knowsPrivateState,
+  ownLineupRevision,
+  visibleTraits,
+  visibleWageText,
+} from "../../lib/playerKnowledge";
+import { usePlayerKnowledge } from "../../hooks/usePlayerKnowledge";
 
 interface PlayerProfileProps {
   player: PlayerData;
@@ -42,7 +64,6 @@ interface PlayerProfileProps {
   isOwnClub: boolean;
   startWithRenewalModal?: boolean;
   startWithTerminationModal?: boolean;
-  onClose: () => void;
   onSelectTeam?: (id: string) => void;
   onGameUpdate?: (g: GameStateData) => void;
 }
@@ -53,55 +74,67 @@ export default function PlayerProfile({
   isOwnClub,
   startWithRenewalModal = false,
   startWithTerminationModal = false,
-  onClose,
   onSelectTeam,
   onGameUpdate,
 }: PlayerProfileProps) {
   const { t, i18n } = useTranslation();
-  const weeklySuffix = t("finances.perWeekSuffix", "/wk");
-  const annualSuffix = t("finances.perYearSuffix", "/yr");
-  const primaryPosition = player.natural_position || player.position;
-  const footednessLabel = t(
-    `common.footedness.${player.footedness || "Right"}`,
-  );
+  const primaryPosition = naturalPositionOf(player);
+  const footednessLabel = t(`common.footedness.${player.footedness || "Right"}`);
   const weakFootValue = player.weak_foot ?? 2;
 
   const { advancedStats, recentMatches } = usePlayerProfileData({
     player,
-    gameState,
+    currentDate: gameState.clock.current_date,
   });
-  const { scoutAvailability, scoutStatus, scoutError, sendScout } =
-    useScoutPlayerFlow({ player, gameState, onGameUpdate });
+  const { scoutAvailability, scoutStatus, scoutError, sendScout } = useScoutPlayerFlow({
+    player,
+    gameState,
+    onGameUpdate,
+  });
   const ovr = getPlayerOvr(player);
-  const age = getPlayerAge(player.date_of_birth);
+  const age = calcAgeOnDate(player.date_of_birth, gameState.clock.current_date);
+  const revision = gameKnowledgeRevision(gameState, {
+    playerClubId: player.team_id,
+    wage: player.wage,
+  });
+  const knowledge = usePlayerKnowledge([player.id], revision)(player.id);
+  // Each answer is loading, answered or failed; a failed one shows "Couldn't load" and a retry,
+  // never the empty state that means the club knows nothing (#1108).
+  const wageAnswer = useVisibleWage(player.id, revision);
+  const visibleWage = answeredOr(wageAnswer, HIDDEN_WAGE);
+  const wageRetry = wageAnswer.status === "failed" ? wageAnswer.retry : undefined;
+  // The club's opinion of his potential: a range from his scout or his coaches, never the number.
+  const opinionAnswer = usePotentialOpinion(player.id, revision);
+  const potentialOpinion = answeredOr(opinionAnswer, null);
+  // The slot he is played in moves with the lineup, which the knowledge revision does not follow.
+  const ratingsAnswer = usePositionRatings(
+    player.id,
+    `${revision}|${ownLineupRevision(gameState)}`,
+  );
+  const positionRatings = answeredOr(ratingsAnswer, null);
+  const showsPrivateState = knowsPrivateState(knowledge);
   const playerTeam = gameState.teams.find((team) => team.id === player.team_id);
-  const currentTacticalRole: PlayerRole =
-    playerTeam?.player_roles?.[player.id] ?? "Standard";
+  const currentTacticalRole: PlayerRole = playerTeam?.player_roles?.[player.id] ?? "Standard";
   // Offer roles for the deployed slot when the player is in the starting XI —
   // the backend validates set_player_role against it, so natural-position
   // roles would be rejected for an out-of-position starter (issue #272).
   const roleValidationPosition =
-    (playerTeam && getDeployedPosition(playerTeam, player.id)) ||
-    primaryPosition;
-  const tacticalRoleOptions = getRoleOptions(
-    roleValidationPosition,
-    currentTacticalRole,
-  );
+    (playerTeam && getDeployedPosition(playerTeam, player.id)) || primaryPosition;
+  const tacticalRoleOptions = getRoleOptions(roleValidationPosition, currentTacticalRole);
   const teamName = getPlayerTeamName(gameState.teams, player.team_id, {
     freeAgent: t("common.freeAgent"),
     unknown: t("common.unknown"),
   });
-  const contractRiskLevel = getContractRiskLevel(
-    player.contract_end,
+  const contractRiskLevel = useContractRiskLevels(
+    [player],
     gameState.clock.current_date,
-  );
+  )(player.id);
   const contractRiskLabel =
     contractRiskLevel === "critical"
       ? t("finances.contractRiskCritical")
       : contractRiskLevel === "warning"
         ? t("finances.contractRiskWarning")
         : t("finances.contractRiskStable");
-  const attrGroups = buildPlayerAttributeGroups(player, t);
   const {
     managerTeamId,
     isManagerOwnedProfile,
@@ -140,6 +173,7 @@ export default function PlayerProfile({
     activeBidOffer,
     myTeam,
     hasExistingOffer,
+    talksResumeOn,
     bidSubmitDisabled,
     openBidNegotiation,
     closeBidNegotiation,
@@ -172,6 +206,15 @@ export default function PlayerProfile({
     hasAssistantManager,
     onGameUpdate,
   });
+  const scoutedReport = useScoutedReport(
+    player.id,
+    !isManagerSquadProfile,
+    gameState.clock.current_date,
+  );
+  const attributesPlayer = scoutedReport
+    ? { ...player, attributes: scoutedReport.attributes }
+    : player;
+  const attrGroups = buildPlayerAttributeGroups(attributesPlayer, t);
 
   const {
     contractActionSubmitting,
@@ -219,17 +262,8 @@ export default function PlayerProfile({
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <button
-          onClick={onClose}
-          className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          <span className="font-heading font-bold uppercase tracking-wider">
-            {t("common.back")}
-          </span>
-        </button>
-        {onGameUpdate ? (
+      {onGameUpdate ? (
+        <div className="mb-4 flex justify-end">
           <PlayerProfileActionsMenu
             player={player}
             gameState={gameState}
@@ -247,18 +281,23 @@ export default function PlayerProfile({
             onOpenFreeAgentContract={() => openFreeAgentContract(player)}
             onError={setContractActionError}
           />
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
       <PlayerProfileHeroCard
         player={player}
-        ovr={ovr}
+        ovr={knowsPlayerRating(knowledge) ? ovr : null}
+        wageText={
+          wageRetry
+            ? t("playerProfile.loadFailed")
+            : visibleWageText(visibleWage, formatPlayerWageCompact, t)
+        }
+        wageRetry={wageRetry}
         primaryPosition={primaryPosition}
         age={age}
         teamName={teamName}
         footednessLabel={footednessLabel}
         weakFootValue={weakFootValue}
-        annualSuffix={annualSuffix}
         language={i18n.language}
         isOwnClub={isManagerSquadProfile || !onGameUpdate}
         scoutAvailability={scoutAvailability}
@@ -267,6 +306,8 @@ export default function PlayerProfile({
         onScout={sendScout}
         onSelectTeam={onSelectTeam}
         team={playerTeam}
+        traits={visibleTraits(player.traits ?? [], potentialOpinion)}
+        showsPrivateState={showsPrivateState}
         t={t}
       />
 
@@ -281,9 +322,7 @@ export default function PlayerProfile({
       ) : null}
 
       {/* Injury banner */}
-      {player.injury ? (
-        <PlayerProfileInjuryBanner injury={player.injury} t={t} />
-      ) : null}
+      {player.injury ? <PlayerProfileInjuryBanner injury={player.injury} t={t} /> : null}
 
       {isOwnClub && onGameUpdate && (
         <div className="mb-4 flex items-center gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-navy-600 dark:bg-navy-800">
@@ -313,11 +352,15 @@ export default function PlayerProfile({
           dateOfBirth={player.date_of_birth}
           contractEnd={player.contract_end}
           currentDate={gameState.clock.current_date}
-          condition={player.condition}
-          morale={player.morale}
+          condition={showsPrivateState ? player.condition : null}
+          morale={showsPrivateState ? player.morale : null}
           marketValue={player.market_value}
-          wage={player.wage}
-          annualSuffix={annualSuffix}
+          wageText={
+            wageRetry
+              ? t("playerProfile.loadFailed")
+              : visibleWageText(visibleWage, formatPlayerWage, t)
+          }
+          wageRetry={wageRetry}
           language={i18n.language}
           contractRiskLevel={contractRiskLevel}
           contractRiskLabel={contractRiskLabel}
@@ -341,8 +384,19 @@ export default function PlayerProfile({
 
         <PlayerProfileAttributesCard
           attrGroups={attrGroups}
-          player={player}
-          isOwnClub={isManagerSquadProfile}
+          player={attributesPlayer}
+          attributesVisible={knowsPlayerRating(knowledge) || scoutedReport !== null}
+          scoutNote={
+            scoutedReport
+              ? {
+                  scoutedLabel: t("playerProfile.scoutedOn", {
+                    date: formatDate(scoutedReport.scouted_on, i18n.language),
+                  }),
+                  outOfDate: scoutedReport.out_of_date,
+                  outOfDateLabel: t("playerProfile.scoutReportOutOfDate"),
+                }
+              : undefined
+          }
           isGk={isGoalkeeper(player)}
           title={t("playerProfile.attributes")}
           averageLabel={t("common.average")}
@@ -350,12 +404,38 @@ export default function PlayerProfile({
           hiddenBody={t("playerProfile.scoutToView")}
           listLabel={t("common.listView")}
           radarLabel={t("common.radarView")}
+          potentialOpinion={
+            opinionAnswer.status === "failed" ? (
+              <ProfileLoadFailed t={t} onRetry={opinionAnswer.retry} />
+            ) : potentialOpinion ? (
+              <PlayerProfilePotentialOpinion
+                opinion={potentialOpinion}
+                locale={i18n.language}
+                t={t}
+              />
+            ) : null
+          }
+          positionRatings={
+            ratingsAnswer.status === "failed" ? (
+              <ProfileLoadFailed t={t} onRetry={ratingsAnswer.retry} />
+            ) : positionRatings ? (
+              <PlayerProfilePositionRatings
+                ratings={positionRatings}
+                locale={i18n.language}
+                t={t}
+              />
+            ) : null
+          }
         />
       </div>
 
       {/* Full-width data cards, stacked for a uniform page */}
       <div className="grid grid-cols-1 gap-5 mt-5">
-        <PlayerProfileSeasonStatsCard stats={player.stats} t={t} />
+        <PlayerProfileSeasonStatsCard
+          stats={player.stats}
+          seasonRatingRated={advancedStats.seasonRatingRated}
+          t={t}
+        />
 
         <PlayerProfileAdvancedStatsCard summary={advancedStats} t={t} />
 
@@ -363,6 +443,7 @@ export default function PlayerProfile({
 
         <PlayerProfileMovementHistoryCard
           movementHistory={player.movement_history ?? []}
+          showsWages={visibleWage.kind === "exact"}
           t={t}
         />
 
@@ -381,6 +462,7 @@ export default function PlayerProfile({
           bidFeedback={bidFeedback}
           activeBidOffer={activeBidOffer}
           hasExistingOffer={hasExistingOffer}
+          talksResumeOn={talksResumeOn}
           bidResult={bidResult}
           bidLoading={bidLoading}
           bidSubmitDisabled={bidSubmitDisabled}
@@ -411,7 +493,6 @@ export default function PlayerProfile({
         show={showRenewalModal}
         playerName={player.full_name}
         t={t}
-        weeklySuffix={weeklySuffix}
         renewalWage={renewalWage}
         renewalLength={renewalLength}
         renewalIsTerminal={renewalIsTerminal}

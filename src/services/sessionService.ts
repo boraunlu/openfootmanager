@@ -1,4 +1,5 @@
 import type {
+  GameStateData,
   BoardObjective,
   FixtureData,
   ManagerData,
@@ -8,6 +9,24 @@ import type {
   TeamData,
   YouthScoutingAssignment,
 } from "../store/types";
+import { invoke } from "@tauri-apps/api/core";
+import { invokeForCareer } from "./careerInvoke";
+
+export function getActiveGame(): Promise<GameStateData> {
+  return invoke("get_active_game");
+}
+
+export function getActiveSaveId(): Promise<string | null> {
+  return invoke("get_active_save_id");
+}
+
+export function saveGame(): Promise<void> {
+  return invokeForCareer("save_game");
+}
+
+export function exitToMenu(): Promise<void> {
+  return invoke("exit_to_menu");
+}
 
 /** Standing row with team name already resolved by the backend. */
 export interface StandingRow extends StandingData {
@@ -47,4 +66,3 @@ export interface SessionState {
   unread_messages_count: number;
   user_competition: UserCompetitionSummary | null;
 }
-

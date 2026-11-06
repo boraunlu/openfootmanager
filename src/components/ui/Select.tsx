@@ -35,7 +35,6 @@ interface SelectProps {
   required?: boolean;
   title?: string;
   tabIndex?: number;
-  autoFocus?: boolean;
   onBlur?: FocusEventHandler<HTMLButtonElement>;
   onFocus?: FocusEventHandler<HTMLButtonElement>;
   "aria-label"?: string;
@@ -67,6 +66,26 @@ interface NativeOptionProps {
   children?: ReactNode;
 }
 
+/** What the user highlighted: where, and which value sat there. */
+interface Highlight {
+  index: number;
+  value: string;
+}
+
+/**
+ * The highlight's index, or -1 when it no longer points at what the user
+ * highlighted: the option was removed, disabled, or the list was reordered so
+ * another option now sits at that index. Deliberately not a fallback to some
+ * other option: Enter would then commit something the user never highlighted.
+ */
+function resolveActiveIndex(options: SelectOption[], wanted: Highlight | null): number {
+  if (!wanted) {
+    return -1;
+  }
+  const option = options[wanted.index];
+  return option && !option.disabled && option.value === wanted.value ? wanted.index : -1;
+}
+
 export function Select({
   selectSize = "md",
   variant = "default",
@@ -85,7 +104,6 @@ export function Select({
   required,
   title,
   tabIndex,
-  autoFocus,
   onBlur,
   onFocus,
   "aria-label": ariaLabel,
@@ -106,9 +124,7 @@ export function Select({
       if (child.type === "optgroup") {
         const optgroup = child as ReactElement<NativeOptgroupProps>;
         const label = optgroup.props.label;
-        return Children.toArray(optgroup.props.children).flatMap((nested) =>
-          read(nested, label),
-        );
+        return Children.toArray(optgroup.props.children).flatMap((nested) => read(nested, label));
       }
 
       if (child.type !== "option") {
@@ -162,14 +178,19 @@ export function Select({
     return options[0]?.value ?? "";
   });
   const [isOpen, setIsOpen] = useState(false);
+  // The highlighted option while the list is open. Separate from the committed
+  // value: arrow keys move this, only Enter/Space/click commit.
+  const [highlight, setHighlight] = useState<Highlight | null>(null);
 
   const currentValue = controlledValue ?? uncontrolledValue;
   const selectedOption =
-    options.find((option) => option.value === currentValue) ??
-    options[0] ??
-    null;
+    options.find((option) => option.value === currentValue) ?? options[0] ?? null;
   const selectedValue = selectedOption?.value ?? "";
   const enabledOptions = options.filter((option) => !option.disabled);
+  // Revalidated on every render rather than trusted: `children` can change
+  // while the list is open, and a removed or newly disabled highlight must not
+  // stay active. Index, not value, so options sharing a value stay distinct.
+  const activeIndex = isOpen ? resolveActiveIndex(options, highlight) : -1;
 
   useEffect(() => {
     if (controlledValue !== undefined || options.length === 0) {
@@ -186,10 +207,7 @@ export function Select({
       const target = event.target as Node;
       // The menu is portaled to <body>, so a press inside it is "outside" the
       // wrapper — it must not dismiss the menu before the option click lands.
-      if (
-        !wrapperRef.current?.contains(target) &&
-        !menuRef.current?.contains(target)
-      ) {
+      if (!wrapperRef.current?.contains(target) && !menuRef.current?.contains(target)) {
         setIsOpen(false);
       }
     };
@@ -233,8 +251,7 @@ export function Select({
       const availableBelow = window.innerHeight - margin - rect.bottom - gap;
       const availableAbove = rect.top - gap - margin;
       const naturalHeight = menu.offsetHeight;
-      const openUp =
-        naturalHeight > availableBelow && availableAbove > availableBelow;
+      const openUp = naturalHeight > availableBelow && availableAbove > availableBelow;
       const available = openUp ? availableAbove : availableBelow;
       if (list && naturalHeight > available) {
         const chrome = naturalHeight - list.offsetHeight;
@@ -243,9 +260,7 @@ export function Select({
 
       const menuHeight = menu.offsetHeight;
       const menuWidth = menu.offsetWidth;
-      menu.style.top = openUp
-        ? `${rect.top - gap - menuHeight}px`
-        : `${rect.bottom + gap}px`;
+      menu.style.top = openUp ? `${rect.top - gap - menuHeight}px` : `${rect.bottom + gap}px`;
       menu.style.left = `${Math.max(
         margin,
         Math.min(rect.left, window.innerWidth - menuWidth - margin),
@@ -296,75 +311,126 @@ export function Select({
     setIsOpen(false);
   };
 
-  const toggleOpen = () => {
+  const setActiveIndex = (index: number) =>
+    setHighlight(index >= 0 ? { index, value: options[index].value } : null);
+
+  const optionId = (index: number) => `${listboxId}-option-${index}`;
+
+  // Opening highlights the committed option (or the first enabled one when the
+  // committed option is disabled), as a native select does.
+  const openList = () => {
     if (disabled || options.length === 0) {
       return;
     }
 
-    setIsOpen((open) => !open);
+    const committedIndex = options.findIndex(
+      (option) => option.value === selectedValue && !option.disabled,
+    );
+    setActiveIndex(committedIndex >= 0 ? committedIndex : options.findIndex((o) => !o.disabled));
+    setIsOpen(true);
   };
 
-  const moveSelection = (direction: 1 | -1) => {
+  const toggleOpen = () => {
+    if (isOpen) {
+      setIsOpen(false);
+      return;
+    }
+
+    openList();
+  };
+
+  /**
+   * Moves the highlight only — committing is Enter, Space or a click. A screen
+   * reader follows it through `aria-activedescendant`, so browsing the list
+   * must not write the value (#568): each commit fires `onChange`, and callers
+   * like the formation picker persist on every change.
+   */
+  const moveActive = (target: "next" | "previous" | "first" | "last") => {
     if (enabledOptions.length === 0) {
       return;
     }
 
-    const currentIndex = enabledOptions.findIndex(
-      (option) => option.value === selectedValue,
-    );
-    const baseIndex = currentIndex >= 0 ? currentIndex : 0;
-    const nextIndex =
-      (baseIndex + direction + enabledOptions.length) % enabledOptions.length;
-    handleSelect(enabledOptions[nextIndex].value);
+    const enabledIndexes = options.flatMap((option, index) => (option.disabled ? [] : [index]));
+    const lastPosition = enabledIndexes.length - 1;
+    const position = enabledIndexes.indexOf(activeIndex);
+    const nextPosition = {
+      first: 0,
+      last: lastPosition,
+      next: Math.min(position + 1, lastPosition),
+      previous: Math.max(position - 1, 0),
+    }[target];
+    setActiveIndex(enabledIndexes[nextPosition]);
   };
 
   const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      moveSelection(1);
+    if (!isOpen) {
+      if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        openList();
+      }
       return;
     }
 
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      moveSelection(-1);
-      return;
-    }
-
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      setIsOpen(true);
-      return;
-    }
-
-    if (event.key === "Escape") {
-      setIsOpen(false);
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        moveActive("next");
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        moveActive("previous");
+        break;
+      case "Home":
+        event.preventDefault();
+        moveActive("first");
+        break;
+      case "End":
+        event.preventDefault();
+        moveActive("last");
+        break;
+      case "Enter":
+      case " ":
+        event.preventDefault();
+        if (activeIndex >= 0) {
+          handleSelect(options[activeIndex].value);
+        } else {
+          setIsOpen(false);
+        }
+        break;
+      case "Escape":
+        event.preventDefault();
+        setIsOpen(false);
+        break;
+      case "Tab":
+        setIsOpen(false);
+        break;
     }
   };
 
+  useEffect(() => {
+    if (activeIndex >= 0) {
+      document.getElementById(optionId(activeIndex))?.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [activeIndex]);
+
   const base =
-    "rounded-lg border transition-all focus:outline-none focus:ring-2 focus:ring-primary-500/30 disabled:opacity-50 disabled:cursor-not-allowed";
+    "rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-page disabled:opacity-50 disabled:cursor-not-allowed";
 
   const variants = {
-    default:
-      "bg-white dark:bg-navy-800 border-gray-200 dark:border-navy-600 text-gray-700 dark:text-gray-200",
-    subtle:
-      "bg-gray-100 dark:bg-navy-700 border-gray-200 dark:border-navy-600 text-gray-600 dark:text-gray-300",
-    muted:
-      "bg-gray-50 dark:bg-navy-700 border-gray-200 dark:border-navy-600 text-gray-700 dark:text-gray-300",
-    highlighted:
-      "bg-primary-50 dark:bg-primary-500/10 border-primary-300 dark:border-primary-500/40 text-primary-700 dark:text-primary-300 font-bold",
-    placeholder:
-      "bg-gray-50 dark:bg-navy-700 border-gray-200 dark:border-navy-600 text-gray-400 dark:text-gray-500",
-    ghost:
-      "bg-white/10 border-white/10 text-white hover:bg-white/20",
+    default: "bg-panel border-line text-fg",
+    subtle: "bg-sunken border-line text-fg-muted",
+    muted: "bg-sunken border-line text-fg",
+    highlighted: "bg-selected-tint border-selected text-selected font-bold",
+    placeholder: "bg-sunken border-line text-fg-subtle",
+    // On chrome or the turf only: on-brand text is white, so on a light panel it can't be read.
+    ghost: "bg-on-brand/10 border-on-brand/10 text-on-brand hover:bg-on-brand/20",
   };
 
   const sizes = {
-    "2xs": "py-0.5 text-[9px]",
-    xs: "py-0.5 text-[10px]",
-    sm: "py-1.5 text-xs",
-    md: "py-2 text-sm",
+    "2xs": "py-0.5 text-caption",
+    xs: "py-0.5 text-caption",
+    sm: "py-1.5 text-caption",
+    md: "py-2 text-body",
   };
 
   const leftPadding = icon
@@ -379,26 +445,19 @@ export function Select({
   const chevronSize = { "2xs": "w-2.5 h-2.5", xs: "w-3 h-3", sm: "w-4 h-4", md: "w-4 h-4" }[
     selectSize
   ];
-  const optionTextSize = { "2xs": "text-[9px]", xs: "text-[10px]", sm: "text-xs", md: "text-sm" }[
-    selectSize
-  ];
+  const optionTextSize = {
+    "2xs": "text-caption",
+    xs: "text-caption",
+    sm: "text-caption",
+    md: "text-body",
+  }[selectSize];
 
   return (
-    <div
-      ref={wrapperRef}
-      className={`relative ${fullWidth ? "w-full" : ""} ${wrapperClassName}`}
-    >
-      {name ? (
-        <input
-          type="hidden"
-          name={name}
-          value={selectedValue}
-          disabled={disabled}
-        />
-      ) : null}
+    <div ref={wrapperRef} className={`relative ${fullWidth ? "w-full" : ""} ${wrapperClassName}`}>
+      {name ? <input type="hidden" name={name} value={selectedValue} disabled={disabled} /> : null}
       {icon ? (
         <span
-          className={`pointer-events-none absolute inset-y-0 ${iconInset} flex items-center text-gray-400 dark:text-gray-500`}
+          className={`pointer-events-none absolute inset-y-0 ${iconInset} flex items-center text-fg-subtle`}
           aria-hidden="true"
         >
           <span className="[&>svg]:w-4 [&>svg]:h-4">{icon}</span>
@@ -416,8 +475,8 @@ export function Select({
         aria-expanded={isOpen}
         aria-haspopup="listbox"
         aria-controls={listboxId}
+        aria-activedescendant={activeIndex >= 0 ? optionId(activeIndex) : undefined}
         tabIndex={tabIndex}
-        autoFocus={autoFocus}
         className={`${base} ${variants[variant]} ${sizes[selectSize]} ${leftPadding} ${rightPadding} ${fullWidth ? "w-full" : ""} ${className} flex items-center justify-between text-left`}
         style={style}
         onClick={(event) => {
@@ -431,75 +490,87 @@ export function Select({
         <span className="truncate">{selectedOption?.label ?? ""}</span>
       </button>
       <span
-        className={`pointer-events-none absolute inset-y-0 ${chevronInset} flex items-center text-gray-400 dark:text-gray-500 transition-transform ${isOpen ? "rotate-180" : ""}`}
+        className={`pointer-events-none absolute inset-y-0 ${chevronInset} flex items-center text-fg-subtle transition-transform ${isOpen ? "rotate-180" : ""}`}
         aria-hidden="true"
       >
         <ChevronDown className={chevronSize} />
       </span>
 
-      {isOpen ? createPortal(
-        <div
-          ref={menuRef}
-          className="fixed z-50 w-max overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl dark:border-navy-600 dark:bg-navy-800"
-        >
-          <div
-            id={listboxId}
-            role="listbox"
-            aria-required={required}
-            className="max-h-60 overflow-y-auto p-1"
-          >
-            {groupedOptions.map((section, sectionIndex) => {
-              const rendered = section.options.map((option) => {
-              const isSelected = option.value === currentValue;
+      {isOpen
+        ? createPortal(
+            <div
+              ref={menuRef}
+              className="fixed z-50 w-max overflow-hidden rounded-lg border border-line bg-panel shadow-xl"
+            >
+              <div
+                id={listboxId}
+                role="listbox"
+                aria-required={required}
+                className="max-h-60 overflow-y-auto p-1"
+              >
+                {groupedOptions.map((section, sectionIndex) => {
+                  const rendered = section.options.map((option) => {
+                    const isSelected = option.value === currentValue;
+                    const optionIndex = options.indexOf(option);
+                    const isActive = optionIndex === activeIndex;
 
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  disabled={option.disabled}
-                  className={`${optionTextSize} flex w-full items-center justify-between rounded-lg px-3 py-2 text-left transition-colors ${isSelected ? "bg-primary-50 text-primary-600 dark:bg-primary-500/10 dark:text-primary-400" : "text-gray-700 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-navy-700"} ${option.disabled ? "cursor-not-allowed opacity-50" : ""}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (!option.disabled) {
-                      handleSelect(option.value);
-                    }
-                  }}
-                >
-                  <span className="truncate">{option.label}</span>
-                  {isSelected ? (
-                    <Check className="ml-2 h-4 w-4 shrink-0" />
-                  ) : null}
-                </button>
-              );
-              });
+                    return (
+                      <button
+                        key={optionIndex}
+                        id={optionId(optionIndex)}
+                        type="button"
+                        role="option"
+                        // DOM focus stays on the trigger; the highlight is
+                        // announced through its aria-activedescendant.
+                        tabIndex={-1}
+                        aria-selected={isSelected}
+                        disabled={option.disabled}
+                        className={`${optionTextSize} flex w-full items-center justify-between rounded-lg px-3 py-2 text-left transition-colors ${isSelected ? "bg-selected-tint text-selected" : "text-fg hover:bg-hover"} ${isActive && !isSelected ? "bg-hover" : ""} ${isActive ? "ring-2 ring-inset ring-focus" : ""} ${option.disabled ? "cursor-not-allowed opacity-50" : ""}`}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onMouseEnter={() => {
+                          if (!option.disabled) {
+                            setActiveIndex(optionIndex);
+                          }
+                        }}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (!option.disabled) {
+                            handleSelect(option.value);
+                          }
+                        }}
+                      >
+                        <span className="truncate">{option.label}</span>
+                        {isSelected ? <Check className="ml-2 h-4 w-4 shrink-0" /> : null}
+                      </button>
+                    );
+                  });
 
-              // Ungrouped options sit directly in the listbox, exactly as
-              // before — only a named `<optgroup>` adds a wrapper.
-              if (section.label === undefined) {
-                return rendered;
-              }
+                  // Ungrouped options sit directly in the listbox, exactly as
+                  // before — only a named `<optgroup>` adds a wrapper.
+                  if (section.label === undefined) {
+                    return rendered;
+                  }
 
-              return (
-                // Keyed by position, not by label: two `optgroup`s may carry the
-                // same label without being adjacent, and keying on the label
-                // would give them the same key.
-                <div key={`group-${sectionIndex}`} role="group" aria-label={section.label}>
-                  <div
-                    aria-hidden="true"
-                    className="px-3 pb-1 pt-2 text-[10px] font-heading font-bold uppercase tracking-[0.18em] text-gray-400 dark:text-gray-500"
-                  >
-                    {section.label}
-                  </div>
-                  {rendered}
-                </div>
-              );
-            })}
-          </div>
-        </div>,
-        document.body,
-      ) : null}
+                  return (
+                    // Keyed by position, not by label: two `optgroup`s may carry the
+                    // same label without being adjacent, and keying on the label
+                    // would give them the same key.
+                    <div key={`group-${sectionIndex}`} role="group" aria-label={section.label}>
+                      <div
+                        aria-hidden="true"
+                        className="px-3 pb-1 pt-2 text-caption font-semibold text-fg-subtle"
+                      >
+                        {section.label}
+                      </div>
+                      {rendered}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

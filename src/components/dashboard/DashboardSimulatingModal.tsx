@@ -1,5 +1,5 @@
 import type { JSX } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import {
   AlertTriangle,
   ArrowRightLeft,
@@ -20,7 +20,7 @@ import { getCategoryIcon } from "../inbox/inboxHelpers";
 import { formatVal } from "../../lib/valueFormatting";
 import { resolveBackendText } from "../../utils/backendI18n";
 import { getBlockerTabLabel } from "../../utils/blockerUtils";
-import DashboardModalFrame from "./DashboardModalFrame";
+import { Dialog } from "../ui";
 
 interface DashboardSimulatingModalProps {
   // Digest-mode props (optional — omit for a plain single-advance spinner)
@@ -63,7 +63,9 @@ function ResultBadge({ result }: { result: RecapMatch["userResult"] }): JSX.Elem
     loss: t("common.lost"),
   } as const;
   return (
-    <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${styles[result]}`}>
+    <span
+      className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${styles[result]}`}
+    >
       {labels[result]}
     </span>
   );
@@ -98,7 +100,14 @@ function MatchCard({ match, idx }: { match: RecapMatch; idx: number }): JSX.Elem
   );
 }
 
-function TransferCard({ player, from, to, fee, involvesUser, idx }: {
+function TransferCard({
+  player,
+  from,
+  to,
+  fee,
+  involvesUser,
+  idx,
+}: {
   player: string;
   from: string;
   to: string;
@@ -116,10 +125,14 @@ function TransferCard({ player, from, to, fee, involvesUser, idx }: {
         <ArrowRightLeft className="h-3.5 w-3.5" />
       </div>
       <div className="min-w-0 flex-1">
-        <p className={`text-xs truncate ${involvesUser ? "font-bold text-primary-600 dark:text-primary-400" : "font-medium text-gray-800 dark:text-gray-200"}`}>
+        <p
+          className={`text-xs truncate ${involvesUser ? "font-bold text-primary-600 dark:text-primary-400" : "font-medium text-gray-800 dark:text-gray-200"}`}
+        >
           {player}
         </p>
-        <p className="text-[11px] text-gray-500 dark:text-gray-400 truncate">{from} → {to}</p>
+        <p className="text-[11px] text-gray-500 dark:text-gray-400 truncate">
+          {from} → {to}
+        </p>
       </div>
       {feeLabel && (
         <span className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
@@ -144,7 +157,15 @@ function NewsCard({ text, idx }: { text: string; idx: number }): JSX.Element {
   );
 }
 
-function InboxCard({ text, category, idx }: { text: string; category?: string; idx: number }): JSX.Element {
+function InboxCard({
+  text,
+  category,
+  idx,
+}: {
+  text: string;
+  category?: string;
+  idx: number;
+}): JSX.Element {
   // Always go through getCategoryIcon so the fallback (System/Info) stays consistent with the inbox
   const icon = getCategoryIcon(category ?? "System");
   return (
@@ -155,7 +176,9 @@ function InboxCard({ text, category, idx }: { text: string; category?: string; i
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-600 dark:bg-amber-900/40 dark:text-amber-400">
         {icon}
       </div>
-      <p className="min-w-0 flex-1 text-xs font-medium text-amber-800 dark:text-amber-300 line-clamp-2">{text}</p>
+      <p className="min-w-0 flex-1 text-xs font-medium text-amber-800 dark:text-amber-300 line-clamp-2">
+        {text}
+      </p>
       <Square className="h-2 w-2 shrink-0 fill-current text-amber-500 dark:text-amber-400" />
     </div>
   );
@@ -196,7 +219,11 @@ function DigestDayRow({ entry }: { entry: DigestEntry }): JSX.Element {
 
       <div className="space-y-1">
         {recap.matches.map((match, i) => (
-          <MatchCard key={`${match.date}-${match.home_team}-${match.away_team}`} match={match} idx={matchOffset + i} />
+          <MatchCard
+            key={`${match.date}-${match.home_team}-${match.away_team}`}
+            match={match}
+            idx={matchOffset + i}
+          />
         ))}
 
         {recap.transfers.map((transfer, i) => (
@@ -212,17 +239,13 @@ function DigestDayRow({ entry }: { entry: DigestEntry }): JSX.Element {
         ))}
 
         {recap.news.map((article, i) => (
-          <NewsCard
-            key={article.id}
-            text={article.textKey ? t(article.textKey, article.params ?? {}) : article.text}
-            idx={newsOffset + i}
-          />
+          <NewsCard key={article.id} text={article.text} idx={newsOffset + i} />
         ))}
 
         {recap.inbox.map((item, i) => (
           <InboxCard
             key={item.id}
-            text={item.textKey ? t(item.textKey, item.params ?? {}) : item.text}
+            text={item.text}
             category={item.category}
             idx={inboxOffset + i}
           />
@@ -245,11 +268,10 @@ export default function DashboardSimulatingModal({
   onResume,
 }: DashboardSimulatingModalProps): JSX.Element {
   const { t } = useTranslation();
+  const titleId = useId();
   const listEndRef = useRef<HTMLDivElement>(null);
   const isDigestMode =
-    digestEntries !== undefined ||
-    isDigestRunning === true ||
-    stopReason != null;
+    digestEntries !== undefined || isDigestRunning === true || stopReason != null;
   const isRunning = isDigestRunning ?? false;
   const isInProgress = isRunning || (isBatchAdvancing ?? false);
 
@@ -259,26 +281,36 @@ export default function DashboardSimulatingModal({
 
   // Plain single-advance spinner (no digest data yet)
   if (!isDigestMode) {
+    // A single day is advancing and can't be stopped: no onClose, so Escape asks for nothing.
     return (
-      <DashboardModalFrame maxWidthClassName="max-w-sm">
+      <Dialog labelledBy={titleId} busy className="w-full max-w-sm rounded-2xl p-6">
         <div className="flex flex-col items-center text-center">
           <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary-100 text-primary-600 dark:bg-primary-500/15 dark:text-primary-300">
             <Loader2 className="h-7 w-7 animate-spin" />
           </div>
-          <h3 className="mt-4 text-lg font-heading font-bold uppercase tracking-wide text-gray-900 dark:text-white">
+          <h3
+            id={titleId}
+            className="mt-4 text-lg font-heading font-bold uppercase tracking-wide text-gray-900 dark:text-white"
+          >
             {t("dashboard.simulating")}
           </h3>
           <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
             {t("dashboard.simulatingMessage")}
           </p>
         </div>
-      </DashboardModalFrame>
+      </Dialog>
     );
   }
 
-  // Digest mode: scrollable feed with action buttons at the bottom
+  // Digest mode: scrollable feed with action buttons at the bottom. While the advance runs, Escape
+  // asks for nothing (Stop is the way to end it); once it has stopped, Escape closes it.
   return (
-    <DashboardModalFrame maxWidthClassName="max-w-2xl">
+    <Dialog
+      labelledBy={titleId}
+      onClose={isInProgress ? undefined : onDismiss}
+      busy={isInProgress}
+      className="w-full max-w-2xl rounded-2xl p-6"
+    >
       <div className="flex flex-col" style={{ maxHeight: "80vh" }}>
         {/* Header */}
         <div className="flex items-center gap-3 pb-4 border-b border-gray-200 dark:border-navy-700 shrink-0">
@@ -289,10 +321,11 @@ export default function DashboardSimulatingModal({
               <CheckCircle2 className="h-5 w-5" />
             )}
           </div>
-          <h3 className="flex-1 text-base font-heading font-bold uppercase tracking-wide text-gray-900 dark:text-white">
-            {isInProgress
-              ? t("dashboard.digestAdvancing")
-              : t("dashboard.digestDone")}
+          <h3
+            id={titleId}
+            className="flex-1 text-base font-heading font-bold uppercase tracking-wide text-gray-900 dark:text-white"
+          >
+            {isInProgress ? t("dashboard.digestAdvancing") : t("dashboard.digestDone")}
           </h3>
           {isRunning && onStop && (
             <button
@@ -428,7 +461,10 @@ export default function DashboardSimulatingModal({
                       <button
                         key={blocker.id}
                         type="button"
-                        onClick={() => { onDismiss?.(); onNavigate?.(blocker.tab); }}
+                        onClick={() => {
+                          onDismiss?.();
+                          onNavigate?.(blocker.tab);
+                        }}
                         className="w-full rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-left hover:bg-amber-500/10 transition-colors"
                       >
                         <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
@@ -507,6 +543,6 @@ export default function DashboardSimulatingModal({
           </div>
         )}
       </div>
-    </DashboardModalFrame>
+    </Dialog>
   );
 }

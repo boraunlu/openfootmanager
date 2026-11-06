@@ -34,6 +34,10 @@ pub struct McpConfig {
 
     /// Allowed hosts for DNS rebinding protection.
     pub allowed_hosts: Vec<String>,
+
+    /// Registers `dev_full_game_state`, the whole game as JSON, for the end-to-end harness. Test
+    /// infrastructure: refused in competition mode, where an agent must not hold the oracle.
+    pub dev_full_state: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +47,21 @@ pub struct AutoStartConfig {
     /// exported world's user manager has no team. Optional for HistoricalSnapshot
     /// worlds where the manager already has a team assigned.
     pub team_id: Option<String>,
+    pub options: crate::commands::game::McpCareerOptions,
+}
+
+fn apply_career_option(
+    options: &mut crate::commands::game::McpCareerOptions,
+    flag: &str,
+    value: &str,
+) -> Result<(), String> {
+    let invalid = || format!("Invalid {flag} '{value}'");
+    match flag {
+        "--mcp-seed" => options.seed = Some(value.parse().map_err(|_| invalid())?),
+        "--mcp-start-year" => options.start_year = Some(value.parse().map_err(|_| invalid())?),
+        _ => options.start_phase = Some(value.to_string()),
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +89,33 @@ impl McpMode {
                 "game_export_world",
                 "game_exit",
                 "game_load_save",
+                // The raw dump holds every club's players and finances; competition agents follow
+                // the same knowledge rule as players (maintainer ruling, 22 Oct).
+                "info_game_state",
+                "dev_full_game_state",
             ],
         }
+    }
+}
+
+/// The tool that exists only for the end-to-end harness (see [`McpConfig::dev_full_state`]).
+pub const DEV_FULL_STATE_TOOL: &str = "dev_full_game_state";
+
+impl McpConfig {
+    /// Every tool left out of `tools/list`: the mode's restrictions, the `--mcp-disable-tools`
+    /// list, and the dev dump unless `--dev-full-state` asked for it.
+    pub fn hidden_tools(&self) -> Vec<String> {
+        let mut hidden: Vec<String> = self
+            .mode
+            .disabled_tools()
+            .iter()
+            .map(|tool| tool.to_string())
+            .collect();
+        hidden.extend(self.disabled_tools.iter().cloned());
+        if !self.dev_full_state {
+            hidden.push(DEV_FULL_STATE_TOOL.to_string());
+        }
+        hidden
     }
 }
 
@@ -99,7 +143,9 @@ where
     let mut mode: Option<McpMode> = None;
     let mut disabled_tools = Vec::new();
     let mut auto_start: Option<AutoStartConfig> = None;
+    let mut career_options = crate::commands::game::McpCareerOptions::default();
     let mut no_gui = false;
+    let mut dev_full_state = false;
     let mut min_tick_delay_ms: u64 = 0;
     let mut auto_save_interval_days: u32 = 7;
     let mut manager_name: Option<String> = None;
@@ -145,11 +191,21 @@ where
                     auto_start = Some(AutoStartConfig {
                         world_path: parts[0].to_string(),
                         team_id: parts.get(1).map(|s| s.to_string()),
+                        options: Default::default(),
                     });
                 }
             }
+            "--mcp-seed" | "--mcp-start-year" | "--mcp-start-phase" => {
+                let flag = args[i].clone();
+                i += 1;
+                let value = args.get(i).ok_or_else(|| format!("{flag} needs a value"))?;
+                apply_career_option(&mut career_options, &flag, value)?;
+            }
             "--no-gui" => {
                 no_gui = true;
+            }
+            "--dev-full-state" => {
+                dev_full_state = true;
             }
             "--min-tick-delay-ms" => {
                 i += 1;
@@ -204,10 +260,30 @@ where
 
     let mode = mode.unwrap_or(McpMode::Sandbox);
 
+    match auto_start.as_mut() {
+        Some(auto_start) => auto_start.options = career_options,
+        None if career_options != Default::default() => {
+            return Err(
+                "--mcp-seed, --mcp-start-year and --mcp-start-phase need --mcp-auto-start"
+                    .to_string(),
+            );
+        }
+        None => {}
+    }
+
     // Validate: competition mode requires --mcp-auto-start
     if mode == McpMode::Competition && auto_start.is_none() {
         return Err(
             "--mcp-mode competition requires --mcp-auto-start (world.json[,team_id])".to_string(),
+        );
+    }
+
+    // The full dump lets an agent read every club's players and finances, which competition mode
+    // exists to withhold: an agent must not be able to start its own server with it.
+    if mode == McpMode::Competition && dev_full_state {
+        return Err(
+            "--dev-full-state is test infrastructure and cannot be combined with --mcp-mode competition"
+                .to_string(),
         );
     }
 
@@ -223,6 +299,7 @@ where
         manager_last_name,
         manager_nationality,
         allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "::1".into()],
+        dev_full_state,
     }))
 }
 
@@ -266,6 +343,52 @@ mod tests {
         assert!(config.auto_start.is_some());
     }
 
+    /// Given the app launched with a seed, start year and phase after `--mcp-auto-start`
+    /// When the arguments are parsed
+    /// Then the auto-start carries the same options `game_new` takes.
+    #[test]
+    fn auto_start_accepts_the_same_options() {
+        let config = parse_mcp_config_from_iter([
+            "--mcp-port",
+            "3000",
+            "--mcp-auto-start",
+            "random,team_abc",
+            "--mcp-seed",
+            "7",
+            "--mcp-start-year",
+            "2030",
+            "--mcp-start-phase",
+            "midSeason",
+        ])
+        .unwrap()
+        .expect("config");
+
+        let options = config.auto_start.expect("auto_start").options;
+        assert_eq!(options.seed, Some(7));
+        assert_eq!(options.start_year, Some(2030));
+        assert_eq!(options.start_phase.as_deref(), Some("midSeason"));
+    }
+
+    /// Given a career flag with no value after it
+    /// When the arguments are parsed
+    /// Then startup is refused rather than the flag being ignored.
+    #[test]
+    fn a_career_flag_without_a_value_is_refused() {
+        let refused = parse_mcp_config_from_iter(["--mcp-port", "3000", "--mcp-seed"]);
+
+        assert_eq!(refused.unwrap_err(), "--mcp-seed needs a value");
+    }
+
+    /// Given career flags but no `--mcp-auto-start`
+    /// When the arguments are parsed
+    /// Then startup is refused rather than the flags being dropped.
+    #[test]
+    fn career_flags_without_auto_start_are_refused() {
+        let refused = parse_mcp_config_from_iter(["--mcp-port", "3000", "--mcp-seed", "7"]);
+
+        assert!(refused.unwrap_err().contains("need --mcp-auto-start"));
+    }
+
     #[test]
     fn parse_mcp_config_all_args() {
         let config = parse_mcp_config_from_iter([
@@ -302,13 +425,86 @@ mod tests {
         assert_eq!(config.manager_nationality.as_deref(), Some("England"));
     }
 
+    /// Given competition mode, when the mode restrictions are collected,
+    /// then the five setup tools and the two state dumps are hidden.
     #[test]
-    fn competition_mode_disabled_tools() {
-        assert!(McpMode::Competition.disabled_tools().contains(&"game_new"));
-        assert!(!McpMode::Competition
-            .disabled_tools()
-            .contains(&"info_game_state"));
+    fn competition_hides_the_setup_tools_and_the_state_dumps() {
+        assert_eq!(
+            McpMode::Competition.disabled_tools(),
+            [
+                "game_new",
+                "game_select_team",
+                "game_export_world",
+                "game_exit",
+                "game_load_save",
+                "info_game_state",
+                "dev_full_game_state",
+            ]
+        );
         assert!(McpMode::Sandbox.disabled_tools().is_empty());
+    }
+
+    /// Given the dev flag is not passed, in either mode
+    /// When the hidden tools are listed
+    /// Then the dev dump is hidden, and with the flag in sandbox mode it is not.
+    #[test]
+    fn the_dev_dump_exists_only_when_asked_for() {
+        let config = |args: &[&str]| {
+            let mut all = vec!["--mcp-port", "3001"];
+            all.extend_from_slice(args);
+            parse_mcp_config_from_iter(all).unwrap().expect("config")
+        };
+
+        assert!(config(&[])
+            .hidden_tools()
+            .contains(&DEV_FULL_STATE_TOOL.to_string()));
+        let with_flag = config(&["--dev-full-state"]);
+        assert!(with_flag.dev_full_state);
+        assert!(!with_flag
+            .hidden_tools()
+            .contains(&DEV_FULL_STATE_TOOL.to_string()));
+    }
+
+    /// Given the dev flag together with competition mode
+    /// When the arguments are parsed
+    /// Then startup is refused: a competition agent cannot launch its own server with the oracle.
+    #[test]
+    fn the_dev_flag_cannot_be_combined_with_competition_mode() {
+        let refused = parse_mcp_config_from_iter([
+            "--mcp-port",
+            "3001",
+            "--mcp-mode",
+            "competition",
+            "--mcp-auto-start",
+            "world.json",
+            "--dev-full-state",
+        ]);
+
+        let message = refused.expect_err("the combination is refused");
+        assert!(message.contains("--dev-full-state"), "{message}");
+    }
+
+    /// Given competition mode
+    /// When the hidden tools are listed
+    /// Then neither state dump is available to the agent.
+    #[test]
+    fn competition_never_lists_a_state_dump() {
+        let config = parse_mcp_config_from_iter([
+            "--mcp-port",
+            "3001",
+            "--mcp-mode",
+            "competition",
+            "--mcp-auto-start",
+            "world.json",
+        ])
+        .unwrap()
+        .expect("config");
+
+        let hidden = config.hidden_tools();
+
+        for tool in ["info_game_state", DEV_FULL_STATE_TOOL] {
+            assert!(hidden.contains(&tool.to_string()), "{tool} is available");
+        }
     }
 
     #[test]

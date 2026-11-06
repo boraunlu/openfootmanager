@@ -1,3 +1,5 @@
+import { useRatingTiers } from "../../hooks/useRatingTiers";
+import { isEliteTier, ratingTierClass, ratingTierLetterKey } from "../../lib/ratingTier";
 import { useEffect, useRef, useState } from "react";
 import type { GameStateData } from "../../store/gameStore";
 import { useGameStore } from "../../store/gameStore";
@@ -13,25 +15,38 @@ import {
   Button,
   PlayerAvatar,
 } from "../ui";
-import { calcAge, positionBadgeVariant } from "../../lib/helpers";
+import { calcAge } from "../../lib/helpers";
 import { canDelegateToYouthAcademy, isYouthAcademyPlayer } from "../../lib/playerSquad";
 import { TraitList } from "../TraitBadge";
 import { useTranslation } from "react-i18next";
 import { countryName } from "../../lib/countries";
 import { translatePositionAbbreviation } from "../squad/SquadTab.helpers";
 import ContextMenu, { type ContextMenuHandle } from "../ContextMenu";
-import { buildPromoteToSeniorSquadMenuItem, buildViewProfileMenuItem } from "../playerActions/playerContextMenuItems";
+import {
+  buildPromoteToSeniorSquadMenuItem,
+  buildViewProfileMenuItem,
+} from "../playerActions/playerContextMenuItems";
 import { setPlayerSquadRole } from "../../services/squadService";
 import {
   cancelYouthScouting,
   reassignYouthScouting,
   startYouthScouting,
 } from "../../services/scoutingService";
-import { GraduationCap, ScanSearch, TrendingUp, Star, Users, Sparkles, MoreVertical } from "lucide-react";
+import {
+  GraduationCap,
+  ScanSearch,
+  TrendingUp,
+  Star,
+  Users,
+  Sparkles,
+  MoreVertical,
+} from "lucide-react";
 import type { DashboardNavigateContext } from "../dashboard/dashboardProfileNavigation";
 import type { PlayerSquadRole } from "../../store/types";
 import { calculateAvailableScouts } from "../scouting/ScoutingTab.helpers";
 import ScoutingYouthRecruitmentCard from "../scouting/ScoutingYouthRecruitmentCard";
+import { naturalPositionOf } from "../../lib/positions";
+import PlayerPositionBadge from "../PlayerPositionBadge";
 
 interface YouthAcademyTabProps {
   gameState: GameStateData | null;
@@ -40,27 +55,13 @@ interface YouthAcademyTabProps {
   onNavigate?: (tab: string, context?: DashboardNavigateContext) => void;
 }
 
-function getPotentialLabel(
-  potential: number,
-  t: (key: string) => string,
-): { label: string; color: string } {
-  if (potential >= 85)
-    return { label: t("youthAcademy.potWorldClass"), color: "text-accent-400" };
-  if (potential >= 75)
-    return { label: t("youthAcademy.potExcellent"), color: "text-green-400" };
-  if (potential >= 65)
-    return { label: t("youthAcademy.potPromising"), color: "text-primary-400" };
-  if (potential >= 55)
-    return { label: t("youthAcademy.potDecent"), color: "text-gray-400" };
-  return { label: t("youthAcademy.potLimited"), color: "text-gray-500" };
-}
-
 export default function YouthAcademyTab({
   gameState,
   onSelectPlayer,
   onGameUpdate,
   onNavigate,
 }: YouthAcademyTabProps) {
+  const tierOf = useRatingTiers();
   const { t, i18n } = useTranslation();
   const { sessionState } = useGameStore();
   const [fetchedStaff, setFetchedStaff] = useState<StaffSlice | null>(null);
@@ -114,8 +115,7 @@ export default function YouthAcademyTab({
     setSelectedYouthScoutId(availableScouts[0]?.id ?? "");
   }, [availableScouts, selectedYouthScoutId]);
 
-  const roster =
-    fetchedSquad ?? gameState?.players.filter((p) => p.team_id === teamId) ?? [];
+  const roster = fetchedSquad ?? gameState?.players.filter((p) => p.team_id === teamId) ?? [];
   const youthPlayers = roster
     .filter((player) => isYouthAcademyPlayer(player))
     .map((p) => ({
@@ -131,25 +131,17 @@ export default function YouthAcademyTab({
       ...player,
       age: calcAge(player.date_of_birth),
     }))
-    .sort(
-      (left, right) =>
-        left.age - right.age || left.full_name.localeCompare(right.full_name),
-    );
+    .sort((left, right) => left.age - right.age || left.full_name.localeCompare(right.full_name));
 
   const avgOvr =
     youthPlayers.length > 0
-      ? Math.round(
-        youthPlayers.reduce((s, p) => s + p.ovr, 0) / youthPlayers.length,
-      )
+      ? Math.round(youthPlayers.reduce((s, p) => s + p.ovr, 0) / youthPlayers.length)
       : 0;
   const avgPotential =
     youthPlayers.length > 0
-      ? Math.round(
-        youthPlayers.reduce((s, p) => s + p.potential, 0) /
-        youthPlayers.length,
-      )
+      ? Math.round(youthPlayers.reduce((s, p) => s + p.potential, 0) / youthPlayers.length)
       : 0;
-  const highPotential = youthPlayers.filter((p) => p.potential >= 75).length;
+  const highPotential = youthPlayers.filter((p) => isEliteTier(tierOf(p.potential))).length;
 
   // Youth development staff
   const youthCoach =
@@ -162,10 +154,10 @@ export default function YouthAcademyTab({
     setFetchedStaff((prev) =>
       prev
         ? {
-          ...prev,
-          scouting_assignments: updated.scouting_assignments,
-          youth_scouting_assignments: updated.youth_scouting_assignments ?? [],
-        }
+            ...prev,
+            scouting_assignments: updated.scouting_assignments,
+            youth_scouting_assignments: updated.youth_scouting_assignments ?? [],
+          }
         : null,
     );
   };
@@ -173,10 +165,7 @@ export default function YouthAcademyTab({
   // Both squad-role moves must also patch the cached squad: the prospects and
   // recovery lists render from `fetchedSquad`, which only refetches on remount
   // or when the game clock advances (issue #250).
-  const handleSetSquadRole = async (
-    playerId: string,
-    squadRole: PlayerSquadRole,
-  ) => {
+  const handleSetSquadRole = async (playerId: string, squadRole: PlayerSquadRole) => {
     try {
       const updated = await setPlayerSquadRole(playerId, squadRole);
       onGameUpdate?.(updated);
@@ -216,10 +205,7 @@ export default function YouthAcademyTab({
     }
   };
 
-  const handleReassignYouthScouting = async (
-    assignmentId: string,
-    scoutId: string,
-  ) => {
+  const handleReassignYouthScouting = async (assignmentId: string, scoutId: string) => {
     setYouthSearchError(null);
     try {
       applyScoutingUpdate(await reassignYouthScouting(assignmentId, scoutId));
@@ -286,9 +272,7 @@ export default function YouthAcademyTab({
           <CardBody>
             <div className="text-center">
               <Sparkles className="w-5 h-5 text-accent-400 mx-auto mb-1" />
-              <p className="font-heading font-bold text-2xl text-accent-500">
-                {highPotential}
-              </p>
+              <p className="font-heading font-bold text-2xl text-accent-500">{highPotential}</p>
               <p className="text-[10px] text-gray-400 dark:text-gray-500 font-heading uppercase tracking-wider">
                 {t("youthAcademy.highPotential")}
               </p>
@@ -337,16 +321,15 @@ export default function YouthAcademyTab({
                       <PlayerAvatar player={player} />
                       <div className="min-w-0">
                         <button
+                          type="button"
                           onClick={() => onSelectPlayer?.(player.id)}
                           className="text-left font-heading font-bold text-sm text-gray-800 dark:text-gray-100 hover:text-primary-500 transition-colors truncate block"
                         >
                           {player.full_name}
                         </button>
                         <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                          {translatePositionAbbreviation(
-                            t,
-                            player.natural_position || player.position,
-                          )} · {t("youthAcademy.age")} {player.age}
+                          {translatePositionAbbreviation(t, naturalPositionOf(player))} ·{" "}
+                          {t("youthAcademy.age")} {player.age}
                         </p>
                       </div>
                     </div>
@@ -411,7 +394,7 @@ export default function YouthAcademyTab({
               </span>
               {youthCoach.map((s) => (
                 <Badge key={s.id} variant="primary" size="sm">
-                  {s.first_name} {s.last_name} ({s.attributes.coaching})
+                  {s.display_name} ({s.attributes.coaching})
                 </Badge>
               ))}
             </div>
@@ -465,7 +448,8 @@ export default function YouthAcademyTab({
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-navy-600">
                 {youthPlayers.map((player) => {
-                  const potLabel = getPotentialLabel(player.potential, t);
+                  const potTier = tierOf(player.potential);
+                  const potLetterKey = ratingTierLetterKey(potTier);
                   const growthRoom = player.potential - player.ovr;
                   const contextItems = [
                     buildViewProfileMenuItem(t, () => onSelectPlayer?.(player.id)),
@@ -506,25 +490,13 @@ export default function YouthAcademyTab({
                                   locale={i18n.language}
                                   className="text-xs leading-none"
                                 />
-                                <span>
-                                  {countryName(player.nationality, i18n.language)}
-                                </span>
+                                <span>{countryName(player.nationality, i18n.language)}</span>
                               </div>
                             </div>
                           </div>
                         </td>
                         <td className="py-2.5 px-4">
-                          <Badge
-                            variant={positionBadgeVariant(
-                              player.natural_position || player.position,
-                            )}
-                            size="sm"
-                          >
-                            {translatePositionAbbreviation(
-                              t,
-                              player.natural_position || player.position,
-                            )}
-                          </Badge>
+                          <PlayerPositionBadge position={naturalPositionOf(player)} />
                         </td>
                         <td className="py-2.5 px-4 text-center">
                           <span className="text-sm font-heading font-bold text-gray-700 dark:text-gray-300 tabular-nums">
@@ -538,29 +510,24 @@ export default function YouthAcademyTab({
                         </td>
                         <td className="py-2.5 px-4 text-center">
                           <span
-                            className={`text-sm font-heading font-bold tabular-nums ${potLabel.color}`}
+                            className={`text-sm font-heading font-bold tabular-nums ${ratingTierClass(potTier, "text")}`}
                           >
                             {player.potential}
                           </span>
-                          <p
-                            className={`text-[9px] font-heading uppercase tracking-wider ${potLabel.color}`}
-                          >
-                            {potLabel.label}
-                          </p>
+                          {potLetterKey && (
+                            <p
+                              className={`text-caption font-heading uppercase tracking-wider ${ratingTierClass(potTier, "text")}`}
+                            >
+                              {t(potLetterKey)}
+                            </p>
+                          )}
                         </td>
                         <td className="py-2.5 px-4">
                           <div className="flex items-center gap-2">
                             <ProgressBar
-                              value={Math.min(
-                                100,
-                                (player.ovr / player.potential) * 100,
-                              )}
+                              value={Math.min(100, (player.ovr / player.potential) * 100)}
                               variant={
-                                growthRoom > 15
-                                  ? "accent"
-                                  : growthRoom > 5
-                                    ? "primary"
-                                    : "auto"
+                                growthRoom > 15 ? "accent" : growthRoom > 5 ? "primary" : "auto"
                               }
                               size="sm"
                             />
@@ -574,12 +541,13 @@ export default function YouthAcademyTab({
                         </td>
                         <td className="py-2.5 px-4 text-center">
                           <span
-                            className={`text-xs font-heading font-bold tabular-nums ${player.condition >= 70
-                              ? "text-green-500"
-                              : player.condition >= 40
-                                ? "text-yellow-500"
-                                : "text-red-500"
-                              }`}
+                            className={`text-xs font-heading font-bold tabular-nums ${
+                              player.condition >= 70
+                                ? "text-green-500"
+                                : player.condition >= 40
+                                  ? "text-yellow-500"
+                                  : "text-red-500"
+                            }`}
                           >
                             {player.condition}%
                           </span>

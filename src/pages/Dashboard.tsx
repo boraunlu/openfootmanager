@@ -1,8 +1,13 @@
+import { useSquadFitness } from "../hooks/useSquadFitness";
+import { prefetchFamiliarity, useFamiliarityRevision } from "../hooks/useFamiliarity";
+import { usePositionTable } from "../hooks/usePositionGroups";
+import { routeForActiveCareer } from "../services/careerService";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyExtraTranslations } from "../lib/extraTranslations";
 import type { JSX } from "react";
 import { useNavigate } from "react-router-dom";
-import { invoke } from "@tauri-apps/api/core";
+import { getActiveGame, getActiveSaveId, saveGame, exitToMenu } from "../services/sessionService";
+import { resolveBackendError } from "../utils/backendI18n";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import type { MatchModeType } from "../hooks/useAdvanceTime";
@@ -22,6 +27,7 @@ import {
   navigateDashboardProfiles,
   openDashboardSearchPlayer,
   openDashboardSearchTeam,
+  openProfileTitle,
   selectDashboardPlayer,
   selectDashboardTeam,
   type DashboardNavigateContext,
@@ -39,25 +45,34 @@ import {
 import {
   getDashboardAlerts,
   getDashboardSearchResults,
+  clubCompetitionLabel,
   getManagerTeamName,
   getTodayMatchFixture,
   getUnreadMessagesCount,
 } from "../components/dashboard/dashboardHelpers";
 import { useAdvanceTime } from "../hooks/useAdvanceTime";
 import { Cpu, Eye, Gamepad2 } from "lucide-react";
-import {
-  formatDateFull,
-  getPrimaryCompetition,
-  isSeasonComplete as isLeagueSeasonComplete,
-} from "../lib/helpers";
+import { formatDate, formatDateFull, getFixtureCompetitionName } from "../lib/helpers";
 import { useTranslation } from "react-i18next";
+import { useClubLeagueStanding } from "../components/teamProfile/useClubLeagueStanding";
 import { useSettingsStore } from "../store/settingsStore";
 import {
   getBackgroundPortraitPrewarmKey,
   queueBackgroundPortraitPrewarm,
 } from "../services/portraitService";
+import { getFinanceSnapshot, type TeamFinanceSnapshotData } from "../services/financeService";
+import { isSeasonComplete } from "../lib/seasonContext";
 
-const CLUB_TABS = new Set(["Squad", "Tactics", "Training", "Staff", "Scouting", "Youth", "Finances", "Transfers"]);
+const CLUB_TABS = new Set([
+  "Squad",
+  "Tactics",
+  "Training",
+  "Staff",
+  "Scouting",
+  "Youth",
+  "Finances",
+  "Transfers",
+]);
 
 const TAB_TRANSLATION_KEYS: Record<string, string> = {
   Home: "dashboard.home",
@@ -81,7 +96,12 @@ const TAB_TRANSLATION_KEYS: Record<string, string> = {
   Youth: "dashboard.youthAcademy",
 };
 
-export default function Dashboard(): JSX.Element {
+interface DashboardProps {
+  /** The tab it opens on. The app always opens on Home; the dev page harness mounts other pages. */
+  initialTab?: string;
+}
+
+export default function Dashboard({ initialTab = "Home" }: DashboardProps): JSX.Element {
   const navigate = useNavigate();
   const {
     hasActiveGame,
@@ -94,7 +114,11 @@ export default function Dashboard(): JSX.Element {
     markClean,
   } = useGameStore();
   const { t } = useTranslation();
-  const { settings, loaded: settingsLoaded, loadSettings } = useSettingsStore();
+  const positionTable = usePositionTable();
+  // Asked for at mount, next to the position table, so the squad and tactics screens find it there.
+  const familiarityRevision = useFamiliarityRevision();
+  useEffect(() => prefetchFamiliarity(familiarityRevision), [familiarityRevision]);
+  const { settings, loaded: settingsLoaded, loadSettings, updateSettings } = useSettingsStore();
   const latestGameStateRef = useRef<GameStateData | null>(null);
   latestGameStateRef.current = gameState ?? null;
 
@@ -104,24 +128,61 @@ export default function Dashboard(): JSX.Element {
   }, [settingsLoaded, loadSettings]);
   const [isSaving, setIsSaving] = useState(false);
   const [saveFlash, setSaveFlash] = useState(false);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [saveError, setSaveError] = useState<unknown>(null);
+  // Counts the pages chosen from the sidebar's drawer: the drawer closes, and the page's heading
+  // takes the focus so a keyboard player lands on the page, not back on the sidebar. A count, not a
+  // flag, so choosing the page already open asks again, and nothing is left owed to a later
+  // navigation that didn't come from the drawer.
+  const [drawerChoices, setDrawerChoices] = useState(0);
   const [profileNavigation, setProfileNavigation] = useState(() =>
-    createDashboardProfileNavigationState("Home"),
+    createDashboardProfileNavigationState(initialTab),
   );
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [isExitingToMenu, setIsExitingToMenu] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
-  const [visitedOnboardingTabs, setVisitedOnboardingTabs] = useState<
-    Set<string>
-  >(new Set<string>());
+  const [visitedOnboardingTabs, setVisitedOnboardingTabs] = useState<Set<string>>(
+    new Set<string>(),
+  );
   const [activeSaveId, setActiveSaveId] = useState<string | null>(null);
-  const [squadListSortState, setSquadListSortState] =
-    useState<SquadListSortState>(DEFAULT_SQUAD_LIST_SORT_STATE);
+  const [squadListSortState, setSquadListSortState] = useState<SquadListSortState>(
+    DEFAULT_SQUAD_LIST_SORT_STATE,
+  );
+  const squadFitness = useSquadFitness(gameState);
+  const [financeVerdict, setFinanceVerdict] = useState<{
+    teamId: string;
+    snapshot: TeamFinanceSnapshotData;
+  } | null>(null);
+
+  useEffect(() => {
+    const teamId = gameState?.manager.team_id;
+    if (!gameState || !teamId) {
+      setFinanceVerdict(null);
+      return;
+    }
+
+    let cancelled = false;
+    void getFinanceSnapshot(teamId)
+      .then(({ snapshot }) => {
+        if (!cancelled) {
+          setFinanceVerdict({ teamId, snapshot });
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to load dashboard finance snapshot:", error);
+        if (!cancelled) {
+          setFinanceVerdict(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [gameState]);
   const loadActiveGameState = useCallback(async () => {
     const [stateResult, saveIdResult] = await Promise.allSettled([
-      invoke<GameStateData>("get_active_game"),
-      invoke<string | null>("get_active_save_id"),
+      getActiveGame(),
+      getActiveSaveId(),
     ]);
 
     if (stateResult.status === "rejected") {
@@ -137,7 +198,12 @@ export default function Dashboard(): JSX.Element {
     } else {
       setActiveSaveId(null);
     }
-  }, [setGameState]);
+
+    const route = await routeForActiveCareer();
+    if (route !== "/dashboard") {
+      navigate(route);
+    }
+  }, [setGameState, navigate]);
 
   // Fetch initial state
   useEffect(() => {
@@ -175,6 +241,10 @@ export default function Dashboard(): JSX.Element {
 
   const isUnemployed = gameState?.manager.team_id === null;
   const todayMatchFixture = gameState ? getTodayMatchFixture(gameState) : null;
+  const todayMatchCompetitionName =
+    gameState && todayMatchFixture
+      ? getFixtureCompetitionName(gameState, todayMatchFixture, t)
+      : undefined;
   const hasMatchToday = todayMatchFixture !== null;
   const backgroundPortraitPrewarmKey = gameState
     ? getBackgroundPortraitPrewarmKey(gameState)
@@ -194,12 +264,7 @@ export default function Dashboard(): JSX.Element {
       managerTeamId: gameState.manager.team_id,
       matchMode: settings.default_match_mode,
     });
-  }, [
-    gameState,
-    hasMatchToday,
-    settings.default_match_mode,
-    todayMatchFixture,
-  ]);
+  }, [gameState, hasMatchToday, settings.default_match_mode, todayMatchFixture]);
 
   useEffect(() => {
     if (!gameState) {
@@ -207,9 +272,7 @@ export default function Dashboard(): JSX.Element {
       return;
     }
 
-    setVisitedOnboardingTabs(
-      loadVisitedOnboardingTabs(gameState, undefined, activeSaveId),
-    );
+    setVisitedOnboardingTabs(loadVisitedOnboardingTabs(gameState, undefined, activeSaveId));
   }, [gameState, activeSaveId]);
 
   useEffect(() => {
@@ -257,9 +320,13 @@ export default function Dashboard(): JSX.Element {
     }
   }, [isUnemployed, profileNavigation.activeTab]);
 
-  const seasonComplete = isLeagueSeasonComplete(
-    gameState ? getPrimaryCompetition(gameState) : null,
-  );
+  // The backend decides this, because it is the same answer
+  // `advance_to_next_season` enforces before it will roll the season over.
+  // Deriving it here from `competitions[0]` asked whichever competition sorted
+  // first — a foreign league on another calendar — so an English career whose
+  // season ended in April waited on an Argentine Apertura running to October,
+  // the end-of-season screen never appeared, and the player could not continue.
+  const seasonComplete = gameState ? isSeasonComplete(gameState) : false;
 
   // Advance-time hook
   const {
@@ -295,13 +362,16 @@ export default function Dashboard(): JSX.Element {
 
   const handleSave = useCallback(async () => {
     setIsSaving(true);
+    setSaveError(null);
+    setSaveFlash(false);
     try {
-      await invoke("save_game");
+      await saveGame();
       markClean();
       setSaveFlash(true);
       setTimeout(() => setSaveFlash(false), 2000);
     } catch (err) {
       console.error("Failed to save:", err);
+      setSaveError(err);
     } finally {
       setIsSaving(false);
     }
@@ -325,16 +395,19 @@ export default function Dashboard(): JSX.Element {
   }, [isDirty]);
 
   const handleCloseQuit = async (save: boolean) => {
-    isClosingRef.current = true;
     setShowCloseConfirm(false);
+    setSaveError(null);
     if (save) {
       try {
-        await invoke("save_game");
+        await saveGame();
         markClean();
       } catch (err) {
         console.error("Auto-save on close failed:", err);
+        setSaveError(err);
+        return;
       }
     }
+    isClosingRef.current = true;
     await getCurrentWindow().destroy();
   };
 
@@ -343,43 +416,38 @@ export default function Dashboard(): JSX.Element {
       label: t("continueMenu.goToField"),
       icon: <Gamepad2 className="w-4 h-4" />,
       desc: t("continueMenu.goToFieldDesc"),
-      buttonColorClass: "from-primary-500 to-primary-600",
-      dropdownColorClass: "from-primary-600 to-primary-700",
     },
     spectator: {
       label: t("continueMenu.watchSpectator"),
       icon: <Eye className="w-4 h-4" />,
       desc: t("continueMenu.watchSpectatorDesc"),
-      buttonColorClass: "from-indigo-500 to-indigo-600",
-      dropdownColorClass: "from-indigo-600 to-indigo-700",
     },
     delegate: {
       label: t("continueMenu.delegateAssistant"),
       icon: <Cpu className="w-4 h-4" />,
       desc: t("continueMenu.delegateAssistantDesc"),
-      buttonColorClass: "from-amber-500 to-amber-600",
-      dropdownColorClass: "from-amber-600 to-amber-700",
     },
   };
 
   const currentModeMeta = MODE_META[matchMode];
 
-  function handleNavClick(tab: string): void {
-    setProfileNavigation((currentState) =>
-      navigateDashboardProfiles(currentState, tab),
-    );
+  function handleNavClick(tab: string, options?: { fromDrawer: boolean }): void {
+    if (options?.fromDrawer) setDrawerChoices((count) => count + 1);
+    setProfileNavigation((currentState) => navigateDashboardProfiles(currentState, tab));
   }
 
+  // After the render that shows the chosen page, so its heading is the one focused.
+  useEffect(() => {
+    if (drawerChoices === 0) return;
+    document.querySelector<HTMLElement>("[data-page-title]")?.focus();
+  }, [drawerChoices]);
+
   function handleNavigate(tab: string, context?: DashboardNavigateContext): void {
-    setProfileNavigation((currentState) =>
-      navigateDashboardProfiles(currentState, tab, context),
-    );
+    setProfileNavigation((currentState) => navigateDashboardProfiles(currentState, tab, context));
   }
 
   function handleBack(): void {
-    setProfileNavigation((currentState) =>
-      goBackDashboardProfile(currentState),
-    );
+    setProfileNavigation((currentState) => goBackDashboardProfile(currentState));
   }
 
   const handleExitToMenu = async () => {
@@ -388,27 +456,25 @@ export default function Dashboard(): JSX.Element {
     }
 
     setIsExitingToMenu(true);
+    setSaveError(null);
     try {
-      await invoke("exit_to_menu");
+      await exitToMenu();
       clearGame();
       navigate("/");
     } catch (err) {
       console.error("Failed to exit:", err);
-      clearGame();
-      navigate("/");
+      setSaveError(err);
+    } finally {
+      setIsExitingToMenu(false);
     }
   };
 
   function selectPlayer(id: string, options?: PlayerSelectionOptions): void {
-    setProfileNavigation((currentState) =>
-      selectDashboardPlayer(currentState, id, options),
-    );
+    setProfileNavigation((currentState) => selectDashboardPlayer(currentState, id, options));
   }
 
   function selectTeam(id: string): void {
-    setProfileNavigation((currentState) =>
-      selectDashboardTeam(currentState, id),
-    );
+    setProfileNavigation((currentState) => selectDashboardTeam(currentState, id));
   }
 
   function handleSearchFocus(): void {
@@ -424,16 +490,12 @@ export default function Dashboard(): JSX.Element {
   }
 
   function handleSelectSearchPlayer(playerId: string): void {
-    setProfileNavigation((currentState) =>
-      openDashboardSearchPlayer(currentState, playerId),
-    );
+    setProfileNavigation((currentState) => openDashboardSearchPlayer(currentState, playerId));
     setSearchQuery("");
   }
 
   function handleSelectSearchTeam(teamId: string): void {
-    setProfileNavigation((currentState) =>
-      openDashboardSearchTeam(currentState, teamId),
-    );
+    setProfileNavigation((currentState) => openDashboardSearchTeam(currentState, teamId));
     setSearchQuery("");
   }
 
@@ -450,12 +512,17 @@ export default function Dashboard(): JSX.Element {
     navigate("/settings", { state: { from: "/dashboard" } });
   }
 
+  const clubStanding = useClubLeagueStanding(
+    gameState?.manager.team_id ?? "",
+    gameState?.clock.current_date ?? "",
+  );
+
   if (!gameState) {
     return (
-      <div className="min-h-screen bg-gray-100 dark:bg-navy-900 flex items-center justify-center transition-colors">
+      <div className="flex min-h-screen items-center justify-center bg-page">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-4 border-primary-500 border-t-transparent rounded-full animate-spin" />
-          <span className="text-gray-500 dark:text-gray-400 font-heading uppercase tracking-wider text-sm">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary-700 border-t-transparent motion-reduce:animate-none" />
+          <span className="font-heading text-body uppercase tracking-label text-fg-muted">
             {t("dashboard.loading")}
           </span>
         </div>
@@ -463,18 +530,30 @@ export default function Dashboard(): JSX.Element {
     );
   }
 
-  const currentDate = formatDateFull(
-    gameState.clock.current_date,
-    settings.language,
-  );
-  const unreadMessagesCount = sessionState?.unread_messages_count ?? getUnreadMessagesCount(gameState);
+  const currentDate = formatDateFull(gameState.clock.current_date, settings.language);
+  const currentDateShort = formatDate(gameState.clock.current_date, settings.language);
+  const unreadMessagesCount =
+    sessionState?.unread_messages_count ?? getUnreadMessagesCount(gameState);
   const myTeamName = getManagerTeamName(gameState);
+  const myCompetitionName = clubCompetitionLabel(gameState, clubStanding.standing, t);
   const searchResults = getDashboardSearchResults(gameState, searchQuery);
-  const dashboardAlerts = getDashboardAlerts(gameState, hasMatchToday, t);
+  const currentFinanceVerdict =
+    financeVerdict?.teamId === gameState.manager.team_id ? financeVerdict.snapshot : null;
+  const dashboardAlerts = getDashboardAlerts(
+    gameState,
+    positionTable,
+    hasMatchToday,
+    t,
+    currentFinanceVerdict,
+    squadFitness,
+  );
   const hasProfileHistory = hasDashboardProfileHistory(profileNavigation);
   const activeTabLabel = TAB_TRANSLATION_KEYS[profileNavigation.activeTab]
     ? t(TAB_TRANSLATION_KEYS[profileNavigation.activeTab])
     : profileNavigation.activeTab;
+  const headerTitle =
+    openProfileTitle(profileNavigation, gameState) ??
+    (profileNavigation.selectedPlayerId !== null ? t("common.player") : activeTabLabel);
   const dashboardTabContentModel = createDashboardTabContentModel({
     activeTab: profileNavigation.activeTab,
     gameState,
@@ -492,18 +571,21 @@ export default function Dashboard(): JSX.Element {
   });
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-navy-900 flex transition-colors duration-300">
+    <div className="flex min-h-screen bg-page">
       <DashboardSidebar
         activeTab={profileNavigation.activeTab}
-        collapsed={isSidebarCollapsed}
+        width={settings.sidebar_width}
+        behaviour={settings.sidebar_behaviour}
+        collapsed={settings.sidebar_collapsed}
         onNavClick={handleNavClick}
         onToggleCollapse={() => {
-          setIsSidebarCollapsed((currentValue) => !currentValue);
+          void updateSettings({ sidebar_collapsed: !settings.sidebar_collapsed });
         }}
         unreadMessagesCount={unreadMessagesCount}
         todayHasMatch={hasMatchToday}
         managerName={managerName}
         teamName={myTeamName}
+        competitionName={myCompetitionName}
         onNavigateSettings={handleNavigateSettings}
         isUnemployed={isUnemployed ?? false}
         onExitClick={() => {
@@ -532,6 +614,7 @@ export default function Dashboard(): JSX.Element {
         showMatchConfirm={showMatchConfirm}
         teams={gameState.teams}
         todayMatchFixture={todayMatchFixture}
+        todayMatchCompetitionName={todayMatchCompetitionName}
         digestEntries={digestEntries}
         digestStopReason={digestStopReason}
         isDigestVisible={isDigestVisible}
@@ -545,10 +628,20 @@ export default function Dashboard(): JSX.Element {
       <FiredModal />
 
       {/* Main Content Area */}
-      <main className="flex-1 flex flex-col h-screen overflow-hidden">
+      {/* min-w-0: a wide page (a table) must not widen <main>, and with it the window (layout rule L1). */}
+      <main className="flex h-screen min-w-0 flex-1 flex-col overflow-hidden">
+        {saveError !== null ? (
+          <p
+            role="alert"
+            className="m-3 rounded-lg border border-line bg-warning-tint px-4 py-3 text-body text-warning"
+          >
+            {resolveBackendError(saveError)}
+          </p>
+        ) : null}
         <DashboardHeader
-          activeTabLabel={activeTabLabel}
+          title={headerTitle}
           currentDate={currentDate}
+          currentDateShort={currentDateShort}
           hasProfileHistory={hasProfileHistory}
           hasMatchToday={hasMatchToday}
           isAdvancing={isAdvancing}
@@ -582,7 +675,6 @@ export default function Dashboard(): JSX.Element {
           gameState={gameState}
           profileNavigation={profileNavigation}
           dashboardTabContentModel={dashboardTabContentModel}
-          onBack={handleBack}
           onNavigate={handleNavigate}
           onSelectPlayer={selectPlayer}
           onSelectTeam={selectTeam}

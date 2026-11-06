@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { PlayerData, TransferOfferData } from "../../store/gameStore";
+import en from "../../i18n/locales/en.json";
+import type { TransferOfferData } from "../../store/gameStore";
 import {
   buildLoanPeriodOptions,
   buildResumedBidFeedback,
@@ -8,7 +9,6 @@ import {
   formatTransferFeeInput,
   getDefaultLoanPeriodId,
   getLoanPeriodIdForEndDate,
-  getOutgoingNegotiationOffer,
   getTransferOfferBadgeVariant,
   getTransferOfferStatusLabel,
   mapTransferNegotiationError,
@@ -16,9 +16,7 @@ import {
   parseTransferFeeInput,
 } from "./TransfersTab.helpers";
 
-function createOffer(
-  overrides: Partial<TransferOfferData> = {},
-): TransferOfferData {
+function createOffer(overrides: Partial<TransferOfferData> = {}): TransferOfferData {
   return {
     id: "offer-1",
     from_team_id: "team-2",
@@ -33,80 +31,78 @@ function createOffer(
   };
 }
 
-function createPlayer(
-  overrides: Partial<PlayerData> = {},
-): PlayerData {
-  return {
-    id: "player-1",
-    match_name: "J. Smith",
-    full_name: "John Smith",
-    date_of_birth: "2000-01-01",
-    nationality: "England",
-    position: "Forward",
-    natural_position: "Forward",
-    alternate_positions: [],
-    training_focus: null,
-    attributes: {
-      pace: 60,
-      stamina: 60,
-      strength: 60,
-      agility: 60,
-      passing: 60,
-      shooting: 60,
-      tackling: 60,
-      dribbling: 60,
-      defending: 60,
-      positioning: 60,
-      vision: 60,
-      decisions: 60,
-      composure: 60,
-      aggression: 60,
-      teamwork: 60,
-      leadership: 60,
-      handling: 30,
-      reflexes: 30,
-      aerial: 60,
-    },
-    condition: 90,
-    morale: 70,
-    injury: null,
-    team_id: "team-1",
-    retired: false,
-    contract_end: "2028-06-30",
-    wage: 1000,
-    market_value: 1000000,
-    stats: {
-      appearances: 0,
-      goals: 0,
-      assists: 0,
-      clean_sheets: 0,
-      yellow_cards: 0,
-      red_cards: 0,
-      avg_rating: 0,
-      minutes_played: 0,
-    },
-    career: [],
-    transfer_listed: false,
-    loan_listed: false,
-    transfer_offers: [createOffer()],
-    traits: [],
-    ...overrides,
-  };
-}
-
 const t = (key: string) => key;
 
-describe("TransfersTab.helpers", () => {
-  it("returns the pending outgoing offer for the user team", () => {
-    const player = createPlayer({
-      transfer_offers: [
-        createOffer({ id: "offer-1", from_team_id: "team-3", status: "Rejected" }),
-        createOffer({ id: "offer-2", from_team_id: "team-1", status: "Pending" }),
-      ],
-    });
+function translateEnglishOfferLabel(key: string): string {
+  const name = key.slice("transfers.".length) as keyof typeof en.transfers;
+  return en.transfers[name] ?? key;
+}
 
-    expect(getOutgoingNegotiationOffer(player, "team-1")?.id).toBe("offer-2");
-    expect(getOutgoingNegotiationOffer(player, null)).toBeNull();
+describe("TransfersTab.helpers", () => {
+  // Given a funds-related registration void, when displaying it, then its label explains the funds failure.
+  it("labels an unaffordable registration with its funds reason", () => {
+    expect(
+      getTransferOfferStatusLabel(translateEnglishOfferLabel, "Withdrawn", "InsufficientFunds"),
+    ).toBe("Registration failed: insufficient buyer funds");
+  });
+
+  // Given a loan conflict, when displaying the voided transfer, then the label names the conflict.
+  it("labels a loan conflict as a registration failure", () => {
+    expect(
+      getTransferOfferStatusLabel(translateEnglishOfferLabel, "Withdrawn", "LoanConflict"),
+    ).toBe("Registration failed: loan conflict");
+  });
+
+  // Given an unavailable player, when displaying the voided transfer, then the label names that reason.
+  it("labels an unavailable player as a registration failure", () => {
+    expect(
+      getTransferOfferStatusLabel(translateEnglishOfferLabel, "Withdrawn", "PlayerUnavailable"),
+    ).toBe("Registration failed: player unavailable");
+  });
+
+  // Given a final execution refusal, when displaying the voided transfer, then it is shown as blocked registration.
+  it("labels a final refusal as blocked registration", () => {
+    expect(
+      getTransferOfferStatusLabel(translateEnglishOfferLabel, "Withdrawn", "RegistrationBlocked"),
+    ).toBe("Registration blocked");
+  });
+
+  // Given ordinary withdrawn talks without a registration reason, when displaying them, then the cooled-off label remains.
+  it("keeps the cooled-off label for ordinary or legacy withdrawals", () => {
+    expect(getTransferOfferStatusLabel((key) => key, "Withdrawn")).toBe(
+      "transfers.offerStatusWithdrawn",
+    );
+  });
+
+  // Given a successful offer, when displaying its status, then a stale reason cannot override acceptance.
+  it("keeps accepted offers labelled as accepted", () => {
+    expect(getTransferOfferStatusLabel((key) => key, "Accepted", "InsufficientFunds")).toBe(
+      "transfers.offerStatusAccepted",
+    );
+  });
+
+  // Given an unknown backend failure reason, when displaying it, then a localized registration label replaces the raw key.
+  it("falls back to a localized label for an unknown registration reason", () => {
+    expect(
+      getTransferOfferStatusLabel(translateEnglishOfferLabel, "Withdrawn", "FutureReason"),
+    ).toBe("Registration blocked");
+  });
+
+  /**
+   * Given a negotiation the club refused (a rejected offer, round 2)
+   * When the panel resumes it
+   * Then the feedback says the club turned the bid down rather than that it is waiting for the next
+   *      move; a live offer keeps the waiting copy.
+   */
+  it("words a refused negotiation as refused, not as waiting", () => {
+    const refused = buildResumedBidFeedback(
+      createOffer({ status: "Rejected", negotiation_round: 2 }),
+    );
+    const live = buildResumedBidFeedback(createOffer({ status: "Pending", negotiation_round: 2 }));
+
+    expect(refused?.headline_key).toBe("transfers.resumeRefusedHeadline");
+    expect(refused?.detail_key).toBe("transfers.resumeRefusedDetail");
+    expect(live?.headline_key).toBe("transfers.resumeNegotiationHeadline");
   });
 
   it("builds resumed bid feedback from the latest club signal", () => {
@@ -140,10 +136,7 @@ describe("TransfersTab.helpers", () => {
   });
 
   it("builds loan period presets from the current game date", () => {
-    const options = buildLoanPeriodOptions(
-      "2026-08-01T12:00:00Z",
-      "2028-06-30",
-    );
+    const options = buildLoanPeriodOptions("2026-08-01T12:00:00Z", "2028-06-30");
 
     expect(options.map((option) => [option.id, option.endDate])).toEqual([
       ["three_months", "2026-10-30"],
@@ -152,16 +145,11 @@ describe("TransfersTab.helpers", () => {
       ["twelve_months", "2027-08-01"],
     ]);
     expect(options.every((option) => !option.disabled)).toBe(true);
-    expect(getDefaultLoanPeriodId("2026-08-01T12:00:00Z", "2028-06-30")).toBe(
-      "january_window",
-    );
+    expect(getDefaultLoanPeriodId("2026-08-01T12:00:00Z", "2028-06-30")).toBe("january_window");
   });
 
   it("disables loan period presets that outlive the player contract", () => {
-    const options = buildLoanPeriodOptions(
-      "2026-08-01T12:00:00Z",
-      "2026-11-15",
-    );
+    const options = buildLoanPeriodOptions("2026-08-01T12:00:00Z", "2026-11-15");
 
     expect(options.find((option) => option.id === "three_months")).toMatchObject({
       disabled: false,
@@ -170,17 +158,60 @@ describe("TransfersTab.helpers", () => {
       disabled: true,
       disabledReasonKey: "transfers.loanPeriodUnavailableContract",
     });
-    expect(getDefaultLoanPeriodId("2026-08-01T12:00:00Z", "2026-11-15")).toBe(
-      "three_months",
-    );
+    expect(getDefaultLoanPeriodId("2026-08-01T12:00:00Z", "2026-11-15")).toBe("three_months");
+  });
+
+  // Given one year left on a contract, when choosing a year-long loan,
+  // then the preset ending on the contract date remains available.
+  it("allows a twelve month loan ending on the contract date", () => {
+    const options = buildLoanPeriodOptions("2026-08-01", "2027-08-01");
+
+    expect(options.find((option) => option.id === "twelve_months")).toMatchObject({
+      endDate: "2027-08-01",
+      disabled: false,
+      disabledReasonKey: null,
+    });
+  });
+
+  // Given a contract ending this season, when choosing the season-end loan,
+  // then the matching preset is available and becomes the default in January.
+  it("allows a season end loan ending on the contract date", () => {
+    const options = buildLoanPeriodOptions("2027-01-01", "2027-06-30");
+
+    expect(options.find((option) => option.id === "end_of_season")).toMatchObject({
+      disabled: false,
+      disabledReasonKey: null,
+    });
+    expect(getDefaultLoanPeriodId("2027-01-01", "2027-06-30")).toBe("end_of_season");
+  });
+
+  // Given an incoming offer ending with the contract, when resuming its counter,
+  // then its unmatched current period remains selectable.
+  it("allows an incoming loan period ending on the contract date", () => {
+    const options = buildLoanPeriodOptions("2026-08-01", "2027-01-28", "2027-01-28");
+
+    expect(options[0]).toMatchObject({
+      id: "current_offer",
+      disabled: false,
+      disabledReasonKey: null,
+    });
+  });
+
+  // Given a matching contract date outside the permitted loan duration,
+  // when presenting the current offer, then duration rules still block it.
+  it("keeps duration limits for loans ending on the contract date", () => {
+    for (const endDate of ["2026-08-30", "2027-08-07"]) {
+      const options = buildLoanPeriodOptions("2026-08-01", endDate, endDate);
+      expect(options[0]).toMatchObject({
+        id: "current_offer",
+        disabled: true,
+        disabledReasonKey: "transfers.loanPeriodUnavailableRules",
+      });
+    }
   });
 
   it("preserves unmatched incoming loan offer dates as counter periods", () => {
-    const options = buildLoanPeriodOptions(
-      "2026-08-01T12:00:00Z",
-      "2028-06-30",
-      "2027-01-28",
-    );
+    const options = buildLoanPeriodOptions("2026-08-01T12:00:00Z", "2028-06-30", "2027-01-28");
 
     expect(options[0]).toMatchObject({
       id: "current_offer",
@@ -188,13 +219,9 @@ describe("TransfersTab.helpers", () => {
       endDate: "2027-01-28",
       disabled: false,
     });
-    expect(
-      getLoanPeriodIdForEndDate(
-        "2026-08-01T12:00:00Z",
-        "2028-06-30",
-        "2027-01-28",
-      ),
-    ).toBe("current_offer");
+    expect(getLoanPeriodIdForEndDate("2026-08-01T12:00:00Z", "2028-06-30", "2027-01-28")).toBe(
+      "current_offer",
+    );
   });
 
   it("normalizes transfer feedback fee params for display", () => {
@@ -216,15 +243,13 @@ describe("TransfersTab.helpers", () => {
   it("maps statuses to transfer offer badge variants and labels", () => {
     expect(getTransferOfferBadgeVariant("Pending")).toBe("accent");
     expect(getTransferOfferBadgeVariant("Accepted")).toBe("success");
-    expect(getTransferOfferStatusLabel(t, "Withdrawn")).toBe(
-      "transfers.offerStatusWithdrawn",
-    );
+    expect(getTransferOfferStatusLabel(t, "Withdrawn")).toBe("transfers.offerStatusWithdrawn");
   });
 
   it("maps expired negotiation errors to the localized message", () => {
-    expect(
-      mapTransferNegotiationError(t, "Offer not found or not pending"),
-    ).toBe("transfers.negotiationExpiredError");
+    expect(mapTransferNegotiationError(t, "Offer not found or not pending")).toBe(
+      "transfers.negotiationExpiredError",
+    );
     expect(mapTransferNegotiationError(t, "other error")).toBe("other error");
   });
 });

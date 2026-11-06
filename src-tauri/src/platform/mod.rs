@@ -9,15 +9,25 @@
 mod linux_graphics;
 
 #[cfg(target_os = "linux")]
+mod web_process;
+
+#[cfg(target_os = "linux")]
 pub use linux_graphics::{configure_graphics, watch_startup};
+
+#[cfg(target_os = "linux")]
+pub use web_process::watch_web_processes;
 
 /// Windows renders through WebView2 and macOS through WKWebView. Neither has the WebKitGTK
 /// DMABuf/NVIDIA problem that `linux_graphics` exists to work around, and neither reads the
 /// environment variables it sets — so there is deliberately nothing to do here.
 #[cfg(not(target_os = "linux"))]
-pub fn configure_graphics() {}
+pub fn configure_graphics(_headless: bool) {}
 
 /// See [`configure_graphics`] — no rendering policy is chosen off Linux, so there is no
 /// startup attempt to record and nothing to clear.
 #[cfg(not(target_os = "linux"))]
 pub fn watch_startup() {}
+
+/// Only Linux uses WebKitGTK's web-process-terminated signal.
+#[cfg(not(target_os = "linux"))]
+pub fn watch_web_processes(_app: &tauri::App) {}

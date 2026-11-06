@@ -1,7 +1,8 @@
-import i18n from '../i18n';
-import { formatExactMoney, formatVal } from "../lib/helpers";
+import i18n from "../i18n";
+import { formatExactMoney, formatPreciseCompact } from "../lib/helpers";
 import { formatDate } from "../lib/dateFormatting";
 import { countryName } from "../lib/countries";
+import { competitionDisplayName } from "../lib/competitionName";
 import { useSettingsStore } from "../store/settingsStore";
 import type {
   MessageActionOption,
@@ -9,22 +10,26 @@ import type {
   MessageAction,
   NewsArticle,
   BoardObjective,
-} from '../store/gameStore';
+} from "../store/gameStore";
 import {
   inferLegacyDelegatedRenewalsParams,
   normalizeNewsParams,
   resolveLegacyTakeoverContractReviewMessage,
   resolveLegacyDelegatedRenewalsMessage,
-} from './backendI18n.legacy';
+} from "./backendI18n.legacy";
 import {
   inferPlayerEventActionLabelKey,
   inferPlayerEventOptionBaseKey,
-} from './backendI18nPlayerEvents.ts';
+} from "./backendI18nPlayerEvents.ts";
 
 /**
  * Resolve a backend i18n key with params, falling back to the raw string.
  */
-function resolve(key: string | undefined, fallback: string, params?: Record<string, string>): string {
+function resolve(
+  key: string | undefined,
+  fallback: string,
+  params?: Record<string, string>,
+): string {
   if (!key) return fallback;
   const resolved = i18n.t(key, params ?? {});
   // i18next returns the key itself if not found — fall back to raw string
@@ -33,7 +38,7 @@ function resolve(key: string | undefined, fallback: string, params?: Record<stri
 }
 
 function isTranslationKey(value: string): boolean {
-  return value.includes('.') && i18n.t(value) !== value;
+  return value.includes(".") && i18n.t(value) !== value;
 }
 
 function extractErrorMessage(error: unknown): string {
@@ -104,18 +109,18 @@ export function resolveBackendError(error: unknown): string {
   const message = extractErrorMessage(error).trim();
   if (!message) return "";
   const parsed = parseBackendMessage(message);
-  return resolve(parsed.key, parsed.fallback, resolveParamValues(parsed.params));
+  return resolve(parsed.key, parsed.fallback, resolveParamValues(parsed.params, "exact"));
 }
 
 function boardObjectiveFallback(objective: BoardObjective): string {
   switch (objective.objective_type) {
-    case 'LeaguePosition':
+    case "LeaguePosition":
       return `Finish in the top ${objective.target}`;
-    case 'Wins':
+    case "Wins":
       return `Win at least ${objective.target} matches`;
-    case 'GoalsScored':
+    case "GoalsScored":
       return `Score at least ${objective.target} goals`;
-    case 'FinancialStability':
+    case "FinancialStability":
       return `Keep wage spending at or below ${objective.target}% of budget`;
     default:
       return objective.description;
@@ -128,8 +133,8 @@ function boardObjectiveFallback(objective: BoardObjective): string {
  */
 const MONEY_PARAM_KEYS = new Set([
   "amount",
-  "annualWages",
   "budget",
+  "buyOption",
   "campaignCost",
   "cost",
   "fee",
@@ -138,22 +143,18 @@ const MONEY_PARAM_KEYS = new Set([
   "transferBudgetReduction",
   "wage",
   "wageBudget",
+  "weeklyWageBill",
   "weeklyWages",
 ]);
 
-const COUNTRY_PARAM_KEYS = new Set([
-  "country",
-  "nationality",
-]);
+const COUNTRY_PARAM_KEYS = new Set(["country", "nationality"]);
 
 /**
  * Params the backend sends as a locale-neutral ISO day (`2026-08-01`), for us
  * to render in the player's own locale. The backend cannot do this itself —
  * a month name formatted there would be English whatever language they picked.
  */
-const DATE_PARAM_KEYS = new Set([
-  "start",
-]);
+const DATE_PARAM_KEYS = new Set(["start", "end"]);
 
 function parseMoneyValue(value: string): { amount: number; compact: boolean } | null {
   const trimmed = value.trim();
@@ -168,8 +169,8 @@ function parseMoneyValue(value: string): { amount: number; compact: boolean } | 
   const symbol = match.groups.symbol;
   const sourceExchangeRate = symbol
     ? Object.values(useSettingsStore.getState().supportedCurrencies).find(
-      (currency) => currency.symbol === symbol,
-    )?.exchange_rate
+        (currency) => currency.symbol === symbol,
+      )?.exchange_rate
     : 1;
 
   if (!sourceExchangeRate) {
@@ -196,7 +197,13 @@ function parseMoneyValue(value: string): { amount: number; compact: boolean } | 
   };
 }
 
-function resolveMoneyParamValue(key: string, value: string): string {
+/**
+ * How a whole-number money param is shown. The lines of the inbox and the news read it in passing,
+ * so they get it compact but precise; an error has to say exactly what is short, so it is exact.
+ */
+type MoneyStyle = "compact" | "exact";
+
+function resolveMoneyParamValue(key: string, value: string, style: MoneyStyle): string {
   if (!MONEY_PARAM_KEYS.has(key)) {
     return value;
   }
@@ -206,9 +213,13 @@ function resolveMoneyParamValue(key: string, value: string): string {
     return value;
   }
 
-  return parsed.compact
-    ? formatVal(parsed.amount)
-    : formatExactMoney(parsed.amount);
+  // A string the backend shortened itself (an old saved message: "€1.25M") is read back as the
+  // number it says and shown compact to three digits, so it keeps the digits it carries (and is
+  // not made to look exact, which it never was).
+  if (parsed.compact) {
+    return formatPreciseCompact(parsed.amount, "round");
+  }
+  return style === "exact" ? formatExactMoney(parsed.amount) : formatPreciseCompact(parsed.amount);
 }
 
 function resolveCountryParamValue(key: string, value: string): string {
@@ -232,11 +243,26 @@ function resolveDateParamValue(key: string, value: string): string {
   return formatDate(value, i18n.resolvedLanguage || i18n.language || "en");
 }
 
-function resolveParamValues(params?: Record<string, string>): Record<string, string> | undefined {
+/**
+ * Param names the backend used to send under another name. Messages already saved carry the old
+ * name, and the translated text now names the new one, so a saved message is read under both.
+ * `annualWages` held the WEEKLY wage bill all along.
+ */
+const LEGACY_PARAM_NAMES: Record<string, string> = { annualWages: "weeklyWageBill" };
+
+function resolveParamValues(
+  params?: Record<string, string>,
+  moneyStyle: MoneyStyle = "compact",
+): Record<string, string> | undefined {
   if (!params) return params;
   const resolved = { ...params };
+  for (const [legacy, current] of Object.entries(LEGACY_PARAM_NAMES)) {
+    if (legacy in resolved && !(current in resolved)) {
+      resolved[current] = resolved[legacy];
+    }
+  }
   for (const [key, value] of Object.entries(resolved)) {
-    if (value.includes('.')) {
+    if (value.includes(".")) {
       const attempted = i18n.t(value);
       if (attempted !== value) {
         resolved[key] = attempted;
@@ -246,10 +272,7 @@ function resolveParamValues(params?: Record<string, string>): Record<string, str
 
     resolved[key] = resolveDateParamValue(
       key,
-      resolveCountryParamValue(
-        key,
-        resolveMoneyParamValue(key, resolved[key]),
-      ),
+      resolveCountryParamValue(key, resolveMoneyParamValue(key, resolved[key], moneyStyle)),
     );
   }
   return resolved;
@@ -300,16 +323,16 @@ function resolveResultsData(data: string, resolveKey: string): string | null {
       .map((result) =>
         resolve(
           resolveKey,
-          `  ${result.home} ${result.home_goals ?? result.homeGoals ?? ''} - ${result.away_goals ?? result.awayGoals ?? ''} ${result.away}`,
+          `  ${result.home} ${result.home_goals ?? result.homeGoals ?? ""} - ${result.away_goals ?? result.awayGoals ?? ""} ${result.away}`,
           {
             home: result.home,
-            homeGoals: String(result.home_goals ?? result.homeGoals ?? ''),
+            homeGoals: String(result.home_goals ?? result.homeGoals ?? ""),
             away: result.away,
-            awayGoals: String(result.away_goals ?? result.awayGoals ?? ''),
+            awayGoals: String(result.away_goals ?? result.awayGoals ?? ""),
           },
         ),
       )
-      .join('\n');
+      .join("\n");
   } catch {
     return null;
   }
@@ -320,8 +343,8 @@ function normalizePreseasonDigestParams(
   params?: Record<string, string>,
 ): Record<string, string> | undefined {
   if (
-    article.body_key !== 'be.news.preseasonDigest.bodyNoResults' &&
-    article.body_key !== 'be.news.preseasonDigest.bodyWithResults'
+    article.body_key !== "be.news.preseasonDigest.bodyNoResults" &&
+    article.body_key !== "be.news.preseasonDigest.bodyWithResults"
   ) {
     return params;
   }
@@ -334,28 +357,31 @@ function normalizePreseasonDigestParams(
 
   type ListFormatConstructor = new (
     locales?: string | string[],
-    options?: { style?: 'long' | 'short' | 'narrow'; type?: 'conjunction' | 'disjunction' | 'unit' },
+    options?: {
+      style?: "long" | "short" | "narrow";
+      type?: "conjunction" | "disjunction" | "unit";
+    },
   ) => { format(items: string[]): string };
 
   const formatTeamList = (teams: string[]): string => {
     const listFormat = (Intl as typeof Intl & { ListFormat?: ListFormatConstructor }).ListFormat;
 
-    if (typeof Intl !== 'undefined' && typeof listFormat === 'function') {
+    if (typeof Intl !== "undefined" && typeof listFormat === "function") {
       return new listFormat(i18n.resolvedLanguage || i18n.language || undefined, {
-        style: 'long',
-        type: 'conjunction',
+        style: "long",
+        type: "conjunction",
       }).format(teams);
     }
 
     if (teams.length <= 1) {
-      return teams[0] ?? '';
+      return teams[0] ?? "";
     }
 
-    return `${teams.slice(0, -1).join(', ')} and ${teams[teams.length - 1]}`;
+    return `${teams.slice(0, -1).join(", ")} and ${teams[teams.length - 1]}`;
   };
 
   if (params.resultsData) {
-    const resolved = resolveResultsData(params.resultsData, 'be.news.preseasonDigest.resultLine');
+    const resolved = resolveResultsData(params.resultsData, "be.news.preseasonDigest.resultLine");
     if (resolved === null) return params;
     normalized.results = resolved;
   }
@@ -364,25 +390,26 @@ function normalizePreseasonDigestParams(
     try {
       const teams = JSON.parse(params.unbeatenTeamsData) as string[];
       const teamList = formatTeamList(teams);
-      normalized.unbeatenLine = teams.length === 0
-        ? ''
-        : teams.length === 1
-          ? resolve(
-            'be.news.preseasonDigest.unbeatenLine.one',
-            `\n\n${teams[0]} remain unbeaten in preseason.`,
-            { team: teams[0] },
-          )
-          : teams.length === 2
+      normalized.unbeatenLine =
+        teams.length === 0
+          ? ""
+          : teams.length === 1
             ? resolve(
-              'be.news.preseasonDigest.unbeatenLine.two',
-              `\n\n${teams[0]} and ${teams[1]} remain unbeaten in preseason.`,
-              { first: teams[0], second: teams[1] },
-            )
-            : resolve(
-              'be.news.preseasonDigest.unbeatenLine.multiple',
-              `\n\n${teamList} remain unbeaten in preseason.`,
-              { teams: teamList, count: String(teams.length) },
-            );
+                "be.news.preseasonDigest.unbeatenLine.one",
+                `\n\n${teams[0]} remain unbeaten in preseason.`,
+                { team: teams[0] },
+              )
+            : teams.length === 2
+              ? resolve(
+                  "be.news.preseasonDigest.unbeatenLine.two",
+                  `\n\n${teams[0]} and ${teams[1]} remain unbeaten in preseason.`,
+                  { first: teams[0], second: teams[1] },
+                )
+              : resolve(
+                  "be.news.preseasonDigest.unbeatenLine.multiple",
+                  `\n\n${teamList} remain unbeaten in preseason.`,
+                  { teams: teamList, count: String(teams.length) },
+                );
     } catch {
       return params;
     }
@@ -395,25 +422,25 @@ function normalizeRoundupParams(
   article: NewsArticle,
   params?: Record<string, string>,
 ): Record<string, string> | undefined {
-  if (article.body_key !== 'be.news.roundup.body' || !params) {
+  if (article.body_key !== "be.news.roundup.body" || !params) {
     return params;
   }
 
   const normalized = { ...params };
 
   if (params.resultsData) {
-    const resolved = resolveResultsData(params.resultsData, 'be.news.roundup.resultLine');
+    const resolved = resolveResultsData(params.resultsData, "be.news.roundup.resultLine");
     if (resolved === null) return params;
     normalized.results = resolved;
   }
 
   normalized.biggestWinnerLine = params.biggestWinner?.trim()
     ? resolve(
-      'be.news.roundup.biggestWinnerLine',
-      ` ${params.biggestWinner} recorded the biggest win of the day.`,
-      { biggestWinner: params.biggestWinner },
-    )
-    : '';
+        "be.news.roundup.biggestWinnerLine",
+        ` ${params.biggestWinner} recorded the biggest win of the day.`,
+        { biggestWinner: params.biggestWinner },
+      )
+    : "";
 
   return normalized;
 }
@@ -422,7 +449,7 @@ function normalizeStandingsParams(
   article: NewsArticle,
   params?: Record<string, string>,
 ): Record<string, string> | undefined {
-  if (article.body_key !== 'be.news.standings.body' || !params?.standingsData) {
+  if (article.body_key !== "be.news.standings.body" || !params?.standingsData) {
     return params;
   }
 
@@ -433,21 +460,51 @@ function normalizeStandingsParams(
       standings: entries
         .map((entry) =>
           resolve(
-            'be.news.standings.entry',
-            `  ${entry.rank}. ${entry.team} — ${entry.points} pts (GD: ${entry.goal_difference ?? entry.goalDifference ?? ''})`,
+            "be.news.standings.entry",
+            `  ${entry.rank}. ${entry.team} — ${entry.points} pts (GD: ${entry.goal_difference ?? entry.goalDifference ?? ""})`,
             {
               rank: String(entry.rank),
               team: entry.team,
               points: String(entry.points),
-              goalDifference: String(entry.goal_difference ?? entry.goalDifference ?? ''),
+              goalDifference: String(entry.goal_difference ?? entry.goalDifference ?? ""),
             },
           ),
         )
-        .join('\n'),
+        .join("\n"),
     };
   } catch {
     return params;
   }
+}
+
+/**
+ * A generated competition is stored under an English template name ("Germany Cup"); its
+ * report carries the name key, country and season so it reads as every other screen names it.
+ */
+function normalizeReportCompetitionName(
+  article: NewsArticle,
+  params?: Record<string, string>,
+): Record<string, string> | undefined {
+  if (
+    article.body_key !== "be.news.matchReport.reportCompetition.body" ||
+    !params?.competitionKey
+  ) {
+    return params;
+  }
+
+  const season = Number(params.competitionSeason);
+  return {
+    ...params,
+    competition: competitionDisplayName(
+      {
+        name: params.competition,
+        name_key: params.competitionKey,
+        country_id: params.competitionCountry ?? null,
+        season: Number.isFinite(season) ? season : undefined,
+      },
+      (key, options) => i18n.t(key, options),
+    ),
+  };
 }
 
 function normalizeMatchReportParams(
@@ -455,9 +512,10 @@ function normalizeMatchReportParams(
   params?: Record<string, string>,
 ): Record<string, string> | undefined {
   if (
-    !article.body_key?.startsWith('be.news.matchReport.body') &&
-    article.body_key !== 'be.news.matchReport.reportFriendly.body' &&
-    article.body_key !== 'be.news.matchReport.reportPreseason.body'
+    !article.body_key?.startsWith("be.news.matchReport.body") &&
+    article.body_key !== "be.news.matchReport.reportFriendly.body" &&
+    article.body_key !== "be.news.matchReport.reportPreseason.body" &&
+    article.body_key !== "be.news.matchReport.reportCompetition.body"
   ) {
     return params;
   }
@@ -472,29 +530,31 @@ function normalizeMatchReportParams(
     if (scorers.length === 0) {
       return {
         ...params,
-        scorers: '',
-        scorersSection: '',
+        scorers: "",
+        scorersSection: "",
       };
     }
 
     const scorersText = scorers
       .map((scorer) =>
-        resolve('be.news.matchReport.scorer', `${scorer.player} (${scorer.minute}', ${scorer.team})`, {
-          player: scorer.player,
-          minute: String(scorer.minute),
-          team: scorer.team,
-        }),
+        resolve(
+          "be.news.matchReport.scorer",
+          `${scorer.player} (${scorer.minute}', ${scorer.team})`,
+          {
+            player: scorer.player,
+            minute: String(scorer.minute),
+            team: scorer.team,
+          },
+        ),
       )
-      .join(', ');
+      .join(", ");
 
     return {
       ...params,
       scorers: scorersText,
-      scorersSection: resolve(
-        'be.news.matchReport.scorersSection',
-        `\n\nGoals: ${scorersText}`,
-        { scorers: scorersText },
-      ),
+      scorersSection: resolve("be.news.matchReport.scorersSection", `\n\nGoals: ${scorersText}`, {
+        scorers: scorersText,
+      }),
     };
   } catch {
     return params;
@@ -505,8 +565,9 @@ function normalizePressConferenceParams(
   article: NewsArticle,
   params?: Record<string, string>,
 ): Record<string, string> | undefined {
-  const isPressConferenceArticle = article.headline_key?.startsWith('be.news.pressConference.')
-    || article.body_key?.startsWith('be.news.pressConference.');
+  const isPressConferenceArticle =
+    article.headline_key?.startsWith("be.news.pressConference.") ||
+    article.body_key?.startsWith("be.news.pressConference.");
 
   if (!isPressConferenceArticle || !params?.quotesData) {
     return params;
@@ -515,13 +576,7 @@ function normalizePressConferenceParams(
   try {
     const quotes = JSON.parse(params.quotesData) as PressConferenceQuoteParam[];
     const resolvedQuotes = quotes
-      .map((quote) =>
-        resolve(
-          quote.key,
-          quote.fallback ?? '',
-          resolveParamValues(quote.params),
-        ),
-      )
+      .map((quote) => resolve(quote.key, quote.fallback ?? "", resolveParamValues(quote.params)))
       .filter((quote) => quote.length > 0);
 
     if (resolvedQuotes.length === 0) {
@@ -531,7 +586,7 @@ function normalizePressConferenceParams(
     return {
       ...params,
       quote: resolvedQuotes[0],
-      quotes: resolvedQuotes.map((quote) => `• "${quote}"`).join('\n'),
+      quotes: resolvedQuotes.map((quote) => `• "${quote}"`).join("\n"),
     };
   } catch {
     return params;
@@ -542,7 +597,7 @@ function normalizeTransferRoundupParams(
   article: NewsArticle,
   params?: Record<string, string>,
 ): Record<string, string> | undefined {
-  if (article.body_key !== 'be.news.transferRoundup.body' || !params?.dealsData) {
+  if (article.body_key !== "be.news.transferRoundup.body" || !params?.dealsData) {
     return params;
   }
 
@@ -554,16 +609,16 @@ function normalizeTransferRoundupParams(
         .map((deal) => {
           const resolvedDeal = {
             ...deal,
-            fee: resolveMoneyParamValue("fee", deal.fee),
+            fee: resolveMoneyParamValue("fee", deal.fee, "compact"),
           };
 
           return resolve(
-            'be.news.transferRoundup.dealLine',
+            "be.news.transferRoundup.dealLine",
             `  ${resolvedDeal.player}: ${resolvedDeal.fromTeam} -> ${resolvedDeal.toTeam} (${resolvedDeal.fee})`,
             resolvedDeal,
           );
         })
-        .join('\n'),
+        .join("\n"),
     };
   } catch {
     return params;
@@ -610,9 +665,9 @@ function resolveActionWithResolvedParams(
   messageId?: string,
   params?: Record<string, string>,
 ): MessageAction {
-  const labelKey = action.label_key ?? inferPlayerEventActionLabelKey(messageId ?? '', action.id);
+  const labelKey = action.label_key ?? inferPlayerEventActionLabelKey(messageId ?? "", action.id);
 
-  if (typeof action.action_type === 'object' && 'ChooseOption' in action.action_type) {
+  if (typeof action.action_type === "object" && "ChooseOption" in action.action_type) {
     return {
       ...action,
       label: resolve(labelKey, action.label, params),
@@ -637,7 +692,7 @@ function resolveActionOption(
   messageId?: string,
   params?: Record<string, string>,
 ): MessageActionOption {
-  const baseKey = inferPlayerEventOptionBaseKey(messageId ?? '', option.id);
+  const baseKey = inferPlayerEventOptionBaseKey(messageId ?? "", option.id);
   const labelKey = option.label_key ?? (baseKey ? `${baseKey}.label` : undefined);
   const descriptionKey = option.description_key ?? (baseKey ? `${baseKey}.description` : undefined);
 
@@ -663,6 +718,7 @@ const ARTICLE_PARAM_NORMALIZERS: ArticleParamNormalizer[] = [
   normalizeRoundupParams,
   normalizeStandingsParams,
   normalizeMatchReportParams,
+  normalizeReportCompetitionName,
   normalizePressConferenceParams,
   normalizeTransferRoundupParams,
 ];

@@ -1,8 +1,10 @@
 # Match Simulation
 
-This document describes how OpenFoot Manager simulates football matches. The simulation has two modes: **instant** (used for AI-vs-AI matches during day advancement) and **live** (step-by-step, used when the player watches or controls a match).
+This document describes how OpenFoot Manager simulates football matches. There are two engines. The **live** engine (`live_match/`) plays a match a minute at a time and accepts commands between minutes — substitutions, formation changes, tactical instructions, half-time talks — and depletes condition per minute. The **instant** engine (`engine.rs`) resolves a whole match in one call and takes no commands.
 
-Both modes share the same core resolution logic, but the live system adds interactivity — substitutions, formation changes, halftime talks — and per-minute stamina depletion.
+**Every fixture in an actively simulated competition is played by the live engine**, whether or not anybody is watching. The difference between the player's own match and the other nine on the same date is who is in the dugout, not which engine plays it: an unwatched match simply has an AI manager on both touchlines. Competitions outside the player's active scope are a third, much cheaper tier — a scoreline model, not a match engine (`turn/dormant.rs`).
+
+The instant engine is now used only by the tools: `sim-bench` (including its `--phase-sweep` dial table and the control arm of its A/B) and the `sim_lab` developer command. Numbers measured through it describe the same resolution logic but not the same match — no bench, no manager, no per-minute condition.
 
 ## Historical Context
 
@@ -73,9 +75,11 @@ Each simulated minute follows this sequence:
 
 When the ball reaches the attacking box, a shot is taken:
 
-1. **Accuracy check** — base accuracy (configurable, default 45%) adjusted by the shooter's `shooting + composure + decisions` rating. Clamped to 15%–85%.
+1. **Accuracy check** — base accuracy (configurable, default 24.5%) plus `(shooter_rating - 50) / 200`, from the shooter's `shooting + composure + decisions`. Clamped to 15%–85%.
    - **Miss**: 40% chance the shot is blocked, 60% chance off target.
-2. **Conversion check** — base conversion (default 30%) adjusted by `(shooter_rating - goalkeeper_rating) / 150`. Clamped to 10%–70%.
+2. **Conversion check** — base conversion (default 25%, times the defending side's defensive-line modifier and divided by its short-handed cover) plus `(shooter_rating - goalkeeper_rating) / 150`. Clamped to 10%–70%.
+
+Both bases are calibrated (#1132). Between two equal 70-rated sides, 46% of unblocked shots go on target, inside the Premier League's 45.10% over two decades to 49.96% in 2023/24 (premierleague.com, "Season trends: Clinical finishing key to record goals total", 27 May 2024; accuracy excluding blocks). This figure is cited, not derived. No open source gives a league-wide share of shots on target scored, so the conversion base is calibrated instead to the derived goal total: the shipped world's season lands in all five of #1001's scoreline bands (openfootball, CC0), at about 2.9 goals a game. It was set again after #1139's ceiling quantile map put more good players into the world: at 28% a season played 3.1 goals a game, with home clean sheets under their band. `engine/tests/shot_rate_tests.rs` pins both shares.
    - **Score**: Goal event emitted with scorer + assister.
    - **Save**: Shot saved event.
 
@@ -83,13 +87,32 @@ When the ball reaches the attacking box, a shot is taken:
 
 Fouls can occur after tackles in midfield and the attacking third:
 
-1. **Foul probability** — base 12%, modified by the fouler's `aggression` attribute and the `HotHead` / `CoolHead` traits.
-2. **If foul occurs in the box** → 8% chance of a **penalty** being awarded.
-3. **Card probability** — 30% chance of a yellow, modified by aggression. 4% chance a card is upgraded to red.
+1. **Foul probability** — base 40% (`foul_probability`), scaled by the fouler's `aggression` (`0.6 + aggression / 100 × 0.8`), the `HotHead` / `CoolHead` traits and the defending side's pressing and marking. Every shot also carries a fixed 3.6% chance of a foul in the box.
+2. **If foul occurs in the box** → 50% chance of a **penalty** being awarded (`penalty_probability`).
+3. **Card probability** — 20% chance of a card per foul, scaled by aggression (`0.5 + aggression / 100`), and a fifth of that for a player already booked. 2% of cards are a straight red.
 4. **Second yellow** → automatic red card and sending off.
+
+The card rates are calibrated against CIES Football Observatory Monthly Report n°57 (Poli, Ravenel and Besson, 2020; cited, not derived): the Big Five show 3.39 to 5.27 yellows and 0.12 to 0.27 reds a match. The shipped world shows about 4.0 and 0.21, with about 19% of matches having a red card. Without the booked player's caution, the real yellow rate would send about twice the real number of players off on a second yellow, since fouls fall on the few players in each duel. `engine/tests/card_rate_tests.rs` pins the rates.
 5. **Injury** — 3% chance per foul that the fouled player is injured.
 
 Sent-off players are excluded from all future player selection for their team.
+
+#### A player out of position
+
+In a club match a player's match rating carries a factor for the line he plays in, from his familiarity with it (`player_rating::familiarity`, the screens' three words): 1.0 where he is natural, **0.967** where he can play (an alternate, another position in his own line, or a winger at wide midfield on his flank), **0.90** out of position (another line, including a keeper outfield or an outfielder in goal). The live engine applies it at each duel that rates a player through `condition_adjusted_skill`, and to each line's strength (`position_attr_avg`, `line_strength`). Three sites read raw attributes instead, so neither familiarity nor condition reaches them: the header after a cross (aerial against aerial), in-match penalties, and shootout kicks.
+
+`ofm_core/src/turn/squad/familiarity.rs` sets the factors. The line he kicks off in reads his exact slot, so a right-back at left-back pays from the first minute; every other line reads his best familiarity in it, because the engine moves players only between lines (a substitution, a change of shape). The engine's `PlayerData::line_familiarity` defaults to 1.0 in every line, so a caller that does not set it, and the instant engine's synthetic players (sim-bench, the sim lab), play exactly as before. The instant engine's duels ignore it.
+
+The size is calibrated: the largest cost that keeps a shipped-world season's outcomes inside run-to-run noise, and under the AI's own price for the same move (`compatibility_penalty`: 14 points for another line, about twice what 10% of a 70 rating costs). Post-match ratings barely react to it, because the rating counts events (passes, tackles, shots), and a duel lost a little more often moves them little.
+
+#### A side down to ten
+
+In the live engine a player who has left the pitch (`is_on_the_pitch` is the one test for it) costs his side twice:
+
+- **An empty slot in his line.** The midfield rating and the press divide the line's players on the pitch by the line's slots in the side's current shape, so a line one short plays weaker until a change of shape takes the empty slot away. A substitution can't fill it: a sent-off player can't be replaced, and a substitute takes the line of the player he replaces. A line with nobody off is its plain average, whatever the shape names.
+- **Ground to cover when it defends.** Its press, its tackles in midfield and the attacking third, and the conversion chance of shots against it are scaled by a cover factor `1 / (1 + 0.7 × players missing)`. A change of shape doesn't lift it: the side is still a man down. Its attacking is untouched.
+
+`engine/tests/short_handed_tests.rs` calibrates both against the literature on red cards. After a red at minute 30, the side left with eleven scores about twice as often (Ridder, Cramer and Hopstaken 1994: ×1.88; Červený, van Ours and van Tuijl 2018: ×2.2). The side down to ten scores about 0.9 times as often, the Ridder end of the band (Ridder: unchanged; Červený: ×0.53). The instant engine (sim-bench, the sim lab) does not model it.
 
 ---
 
@@ -172,11 +195,23 @@ per-minute possession contest.
 | counter_press | possession flip: losing side may re-win the ball | Long regains possession more |
 | break_speed | possession flip: winner may counter into the final third | Fast turns turnovers into chances |
 
+The weekly AI tactical review in `ofm_core::ai_tactics` treats at least 2.4
+goals conceded per game as leaky and at most 0.8 scored as blunt: the same tail
+(about 15% and 19%) of the five-match windows `tactical_adaptation_probe` reads, calibrated when a club
+scored about **1.6 goals a game** (#1132). The probe's guard test fails when the
+scoring rate moves away from that, so a scoring change re-reads the window table
+before the cutoffs are trusted.
+
 Both the instant engine (`engine/`) and the live engine (`live_match/`) consume
-the dials identically; the stamina cost of pressing applies only to the live
-engine, which tracks per-minute condition. Magnitudes live in `engine::shared`
-and are tuned with `cargo run -p sim-bench -- --phase-sweep`, which tabulates
-each dial's effect on possession %, shots and goals against a neutral opponent.
+the dials identically, with one exception: the stamina cost of pressing needs
+per-minute condition, so it exists only in the live engine — which, since every
+competitive fixture goes through that engine, means it is now charged in every
+match the game plays. Magnitudes live in `engine::shared` and are tabulated by
+`cargo run -p sim-bench -- --phase-sweep`, each dial's effect on possession %,
+shots and goals against a neutral opponent. Read that table with its path in
+mind: the sweep runs through the instant engine, so it prices a dial in a match
+with no bench and no pressing cost. `tests/tactical_identity_probe.rs` is the
+measurement taken on the path the game actually plays.
 
 ---
 
@@ -211,13 +246,13 @@ All probabilities and multipliers are tuneable via `MatchConfig`:
 | Parameter | Default | Description |
 |---|---|---|
 | `home_advantage` | 1.08 | Multiplier for home team ratings |
-| `shot_accuracy_base` | 0.45 | Base chance a shot is on target |
-| `goal_conversion_base` | 0.30 | Base chance an on-target shot scores |
-| `fatigue_per_minute` | 0.15 | Condition loss per minute (live mode) |
-| `foul_probability` | 0.12 | Base chance a tackle results in a foul |
-| `yellow_card_probability` | 0.30 | Chance a foul produces a yellow |
-| `red_card_probability` | 0.04 | Chance a card is direct red |
-| `penalty_probability` | 0.08 | Chance a box foul is a penalty |
+| `shot_accuracy_base` | 0.245 | Base chance a shot is on target |
+| `goal_conversion_base` | 0.25 | Base chance an on-target shot scores |
+| `fatigue_per_minute` | 0.20 | Condition loss per minute (live mode) |
+| `foul_probability` | 0.40 | Base chance a tackle results in a foul |
+| `yellow_card_probability` | 0.20 | Chance a foul produces a yellow |
+| `red_card_probability` | 0.02 | Chance a card is direct red |
+| `penalty_probability` | 0.50 | Chance a box foul is a penalty |
 | `stoppage_time_max` | 4 | Max stoppage time minutes per half |
 | `injury_probability` | 0.03 | Chance of injury per foul |
 
@@ -254,7 +289,7 @@ PreKickOff → FirstHalf → HalfTime → SecondHalf → FullTime
 Users (and AI) can inject commands between minutes:
 
 - **Substitute** — swap a player on the pitch with a bench player (max 5 subs per match)
-- **ChangeFormation** — change the team's formation (e.g. "4-3-3" → "3-5-2"), which reassigns player positions
+- **ChangeFormation** — change the team's formation (e.g. "4-3-3" → "3-5-2"). Players stay in their line while the new shape has room for them; a line with too many passes its best-suited player one line toward the line that is short, so a back five takes its extra defender from midfield and a gap two lines away is filled through the middle. A change to the same shape moves nobody, and the eleven is regrouped back to front so player i keeps slot i.
 - **ChangePlayStyle** — switch between the 6 play styles
 - **SetFreeKickTaker / SetCornerTaker / SetPenaltyTaker / SetCaptain** — assign set piece roles
 
@@ -262,11 +297,20 @@ Users (and AI) can inject commands between minutes:
 
 In live mode, player condition depletes each minute based on `fatigue_per_minute`. A `condition_adjusted_skill()` function scales all attribute checks by the player's current condition, so fatigued players perform worse. This makes substitutions tactically meaningful.
 
+### In-match penalties
+
+A penalty awarded during play is taken by the side's designated penalty taker while that player is on the pitch. Otherwise, or when the taker has been sent off or substituted off, it goes to a forward. With no forward left it goes to a midfielder, then a defender, and the goalkeeper takes it only when nobody else is left.
+
 ### Penalty Shootout
 
 If a match is drawn after extra time (when allowed), a penalty shootout is resolved:
-- 5 rounds of alternating penalties
-- If still tied, sudden death rounds continue until one team leads after equal attempts
+- 5 rounds of alternating penalties, home first. Within them, the shootout ends as soon as one side can no longer catch up, even mid-round: its remaining kicks, all scored, would still leave it behind (the Laws of the Game). The away side can then end one kick short
+- If still tied, sudden death rounds continue until one team leads after equal attempts: a sudden-death round is always completed
+- Each side kicks in an order fixed at the final whistle: the players on the pitch who were not sent off, with the designated penalty taker first, then the rest by penalty skill (shooting + composure, what the kick uses), and the goalkeeper last. Everyone kicks once before anyone kicks twice: the order carries on through sudden death and wraps to the top only after the last kicker has kicked
+- Both sides use only as many kickers as the side with fewer players on the pitch; the side with more drops the end of its order
+- A side with nobody left on the pitch does not hold the other side to nobody: the other then kicks in its full order
+- No substitutions are allowed from the final whistle of extra time, so the players who kick are the ones on the pitch when it blew
+- Before the first kick, a manager may reorder their own side with `MatchCommand::SetShootoutOrder` (every eligible player, reordered; the players past the kicker count sit out). AI managers keep the automatic order. The live session shows a manager only their own side's order (`PenaltyShootoutSnapshot.home_order` / `away_order`); the opponent's stays hidden until each kick is taken
 
 ### Match Snapshot
 
@@ -276,41 +320,105 @@ At any point, a `MatchSnapshot` can be taken — a serializable view of the enti
 
 ## AI Manager
 
-The AI manager (`ai.rs`) controls non-player sides during live matches. It evaluates the match state once per minute and can issue substitution and tactical commands.
+The AI manager (`ai.rs`) controls non-player sides during live matches. It is consulted once a
+minute and can issue substitution and tactical commands. It reads the match through
+`AiObservation` — a borrowed, side-relative view built by `LiveMatchState::observe()`, not a
+`MatchSnapshot`.
 
 ### AI Profile
 
 Each AI manager has:
 - **Reputation** (0–1000) — higher = more sophisticated decisions
-- **Experience** (0–100) — affects timing and quality of choices
+- **Experience** (0–100) — decides which checkpoints he works to, how early he replaces a spent
+  player, and how often he gets a close call wrong
+- **Personality** — `Pragmatist` waits for the scheduled moments; `Visionary` reaches for a
+  different shape before a different label and looks up when a goal goes against him; `Reactive`
+  takes stock every time the score changes
 
-### Decision Logic
+### When the manager looks up
 
-**Substitutions:**
-- After minute 55: replace most fatigued players (condition < threshold based on experience)
-- After minute 65 (losing): tactical subs — bring on attacking players
-- After minute 80 (winning): defensive subs — bring on fresh defenders/midfielders
+Reactions are **not** rolled for each minute. A manager takes stock at fixed moments and
+immediately when the match changes under him:
 
-**Tactical changes:**
-- Losing by 2+ goals after minute 60: switch to Attacking
-- Winning by 2+ goals after minute 75: switch to Defensive
-- Close game: maintain current style
+| Moment | Who |
+|---|---|
+| Half-time, and the interval in extra time | every manager |
+| 80' | every manager |
+| 70' | experience ≥ 40 |
+| 60' | experience ≥ 70 |
+| 113' | every manager — the last look before penalties |
+| A sending-off, either side | every manager, that minute |
+| A goal, either way | `Reactive` always; `Visionary` when it went against him |
+| Nobody left in goal | every manager, every minute, ahead of everything else |
 
-The experience factor scales how early and aggressively the AI makes decisions.
+Exhaustion is judged **every** minute rather than at a checkpoint: a spent player is not a
+judgement call, and the condition economy is calibrated on that branch firing the minute a
+starter crosses the line.
+
+### What he decides
+
+**Substitutions** (one per evaluation, in this order):
+1. No available goalkeeper on the pitch — a bench keeper comes on for the most spent outfielder,
+   forwards first. He keeps `Position::Goalkeeper` rather than inheriting the vacated slot.
+2. Any starter below the fatigue threshold (55 − experience×10 from 75', 45 − experience×8 from
+   60', otherwise 35) — replaced in kind.
+3. Chasing — two goals down at any checkpoint, one goal down from 60'. A forward comes on for the
+   most spent defender or midfielder, never breaking up a back four below three.
+4. Protecting a lead from 80' — a defender comes on for the most spent forward, always leaving one
+   up front.
+
+Who comes off is whoever has least left to give. Two players within 10 condition points look
+identical from the touchline, and a manager takes the wrong one off with probability
+(1 − experience/100)/2 — the in-match twin of the lineup picker's misjudgement. It never decides
+*whether* he acts.
+
+**Tactical changes** (one per evaluation):
+- A `Visionary` who is losing after 60' changes shape first: 4-4-2 → 4-3-3 → 4-2-3-1. The chain
+  ends, so this fires at most twice.
+- Otherwise a target play style: Attacking two goals down, or one goal down from 60' unless already
+  HighPress; Defensive with a lead from 80', or pinned in one's own half for 7 of the last 10
+  minutes with nothing to chase.
+- If the style is already right, one dial underneath it (`ChangeTacticalDial`). Chasing: a higher
+  line, then a faster break, then a harder press. Protecting: a lower line, then a compact shape,
+  then a passive press — subject to the ration on under-priced dials, at most two per side. The
+  rule lives once, in `engine::ai::under_priced_dials` and `MAX_UNDER_PRICED_DIALS`; `ai_tactics`
+  applies the same one between matches by asking the engine.
+
+**Nothing here ever issues a command to undo an earlier one.** A position that has stopped calling
+for a change produces no target rather than the opposite one, so a side that dropped deep under
+pressure stays deep when the pressure lifts. That is the hysteresis.
+
+All five substitutions are available to every branch; `max_subs` is the only limit.
 
 ---
 
 ## Integration: Domain ↔ Engine
 
-The `turn.rs` module in `ofm_core` handles the conversion:
+The `ofm_core/turn/` bridge is the only place the conversion is allowed to live —
+`engine` never imports `domain`, so every domain type is translated here.
 
-1. **`build_engine_team()`** — converts domain `Player`/`Team` objects into engine `PlayerData`/`TeamData`, mapping positions, play styles, and all 19 attributes + traits.
-2. **`simulate_matchday()`** — for each fixture on a match day, builds engine teams and calls `engine::simulate()`.
+1. **`turn/squad.rs`** — the single domain→engine squad builder, shared by both match
+   paths. `build_team_with_bench()` picks eleven slot-aligned starters from the club's fit
+   players and returns the bench separately, so only actual participants are handed to the
+   engine. Who picks them depends on whose club it is: the user's own club goes through
+   `select_starting_xi()`, which honours the saved XI and rebuilds one only when fewer than
+   eight saved starters are still available; every other club goes through
+   `ai_select_starting_xi()`, a reputation-driven policy that rotates for freshness. A club
+   with too few fit players to fill the formation makes the shortfall up from its injured
+   list rather than fielding a short side — the engine has no forfeit, and an empty side
+   would crash it. The builder also maps positions, play styles, roles, the nine tactical
+   dials, and all 19 attributes + traits.
+2. **`simulate_matchday()`** — for each fixture on a match day, opens a `LiveMatchSession`
+   through `create_live_match()` and runs it to completion. The bench comes with it, so an
+   unwatched match has substitutions and tactical changes like any other; `user_side` is
+   cleared, because with nobody watching, both dugouts are the AI's — including the player's
+   own club when the day was advanced past its fixture. A knockout tie plays extra time and,
+   if still level, the engine's penalty shootout.
 3. **`apply_match_report()`** — writes results back to the domain: fixture status, match result, standings updates, player season stats (goals, assists, cards, rating, clean sheets).
 4. **`apply_player_stats()`** — updates individual `PlayerSeasonStats` from the engine's `PlayerMatchStats`.
 
 For live matches, `live_match_manager.rs` provides:
-- **`create_live_match()`** — builds a `LiveMatchSession` from the current game state, splitting players into starting XI and bench based on the team's formation
+- **`create_live_match()`** — builds a `LiveMatchSession` from the current game state, using the same `turn/squad.rs` builder and keeping the bench for substitutions
 - **`LiveMatchSession`** — wraps `LiveMatchState` with an RNG, AI profiles for both sides, and metadata. Provides `step()`, `step_many()`, `run_to_completion()`, `snapshot()`, and `apply_command()` methods.
 
 ---

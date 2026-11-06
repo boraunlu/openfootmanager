@@ -8,7 +8,7 @@ use ofm_core::finances::{
     TeamFinanceSnapshot,
 };
 use ofm_core::game::Game;
-use ofm_core::state::StateManager;
+use ofm_core::state::{Career, StateManager};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FinanceSnapshotCommandResponse {
@@ -48,112 +48,112 @@ pub fn get_finance_snapshot_internal(
 ) -> Result<FinanceSnapshotCommandResponse, String> {
     info!("[cmd] get_finance_snapshot: team_id={:?}", team_id);
 
-    let game = state
-        .get_game(|g: &Game| g.clone())
-        .ok_or("be.error.noActiveGameSession".to_string())?;
+    state
+        .get_game(|game| {
+            let resolved_team_id = match team_id {
+                Some(team_id) => team_id.to_string(),
+                None => game
+                    .manager
+                    .team_id
+                    .clone()
+                    .ok_or_else(|| "be.error.noTeamAssigned".to_string())?,
+            };
 
-    let resolved_team_id = match team_id {
-        Some(team_id) => team_id.to_string(),
-        None => game
-            .manager
-            .team_id
-            .clone()
-            .ok_or("be.error.noTeamAssigned".to_string())?,
-    };
+            let snapshot = ofm_core::finances::team_finance_snapshot(game, &resolved_team_id)
+                .ok_or_else(|| "be.error.managedTeamNotFound".to_string())?;
+            let previews = ofm_core::finances::finance_action_previews(game, &resolved_team_id)
+                .unwrap_or_default();
 
-    let snapshot = ofm_core::finances::team_finance_snapshot(&game, &resolved_team_id)
-        .ok_or("be.error.managedTeamNotFound".to_string())?;
-    let previews =
-        ofm_core::finances::finance_action_previews(&game, &resolved_team_id).unwrap_or_default();
-
-    Ok(FinanceSnapshotCommandResponse { snapshot, previews })
+            Ok(FinanceSnapshotCommandResponse { snapshot, previews })
+        })
+        .ok_or_else(|| "be.error.noActiveGameSession".to_string())?
 }
 
 #[tauri::command]
 pub async fn request_board_support(
     state: State<'_, Arc<StateManager>>,
+    career_token: u64,
 ) -> Result<BoardSupportCommandResponse, String> {
-    request_board_support_internal(&state)
+    request_board_support_internal(&state, Career::Token(career_token))
 }
 
 #[tauri::command]
 pub async fn request_sponsor_pitch(
     state: State<'_, Arc<StateManager>>,
+    career_token: u64,
 ) -> Result<SponsorPitchCommandResponse, String> {
-    request_sponsor_pitch_internal(&state)
+    request_sponsor_pitch_internal(&state, Career::Token(career_token))
 }
 
 #[tauri::command]
 pub async fn request_marketing_campaign(
     state: State<'_, Arc<StateManager>>,
+    career_token: u64,
 ) -> Result<MarketingCampaignCommandResponse, String> {
-    request_marketing_campaign_internal(&state)
+    request_marketing_campaign_internal(&state, Career::Token(career_token))
 }
 
 pub fn request_board_support_internal(
     state: &StateManager,
+    career: Career,
 ) -> Result<BoardSupportCommandResponse, String> {
     info!("[cmd] request_board_support");
 
-    state
-        .update_game(|game| {
-            let team_id = game
-                .manager
-                .team_id
-                .clone()
-                .ok_or("be.error.noTeamAssigned".to_string())?;
+    state.update_game_for(career, |game| {
+        let team_id = game
+            .manager
+            .team_id
+            .clone()
+            .ok_or("be.error.noTeamAssigned".to_string())?;
 
-            let result = ofm_core::finances::request_board_support(game, &team_id)?;
-            Ok(BoardSupportCommandResponse {
-                game: game.clone(),
-                result,
-            })
+        let result = ofm_core::finances::request_board_support(game, &team_id)?;
+        Ok(BoardSupportCommandResponse {
+            game: game.clone(),
+            result,
         })
-        .ok_or("be.error.noActiveGameSession".to_string())?
+    })?
 }
 
 pub fn request_sponsor_pitch_internal(
     state: &StateManager,
+    career: Career,
 ) -> Result<SponsorPitchCommandResponse, String> {
     info!("[cmd] request_sponsor_pitch");
 
-    state
-        .update_game(|game| {
-            let team_id = game
-                .manager
-                .team_id
-                .clone()
-                .ok_or("be.error.noTeamAssigned".to_string())?;
+    state.update_game_for(career, |game| {
+        let team_id = game
+            .manager
+            .team_id
+            .clone()
+            .ok_or("be.error.noTeamAssigned".to_string())?;
 
-            let result = ofm_core::finances::request_sponsor_pitch(game, &team_id)?;
-            Ok(SponsorPitchCommandResponse {
-                game: game.clone(),
-                result,
-            })
+        let result = ofm_core::finances::request_sponsor_pitch(game, &team_id)?;
+        Ok(SponsorPitchCommandResponse {
+            game: game.clone(),
+            result,
         })
-        .ok_or("be.error.noActiveGameSession".to_string())?
+    })?
 }
 
 pub fn request_marketing_campaign_internal(
     state: &StateManager,
+    career: Career,
 ) -> Result<MarketingCampaignCommandResponse, String> {
     info!("[cmd] request_marketing_campaign");
 
-    state
-        .update_game(|game| {
-            let team_id = game
-                .manager
-                .team_id
-                .clone()
-                .ok_or("be.error.noTeamAssigned".to_string())?;
+    state.update_game_for(career, |game| {
+        let team_id = game
+            .manager
+            .team_id
+            .clone()
+            .ok_or("be.error.noTeamAssigned".to_string())?;
 
-            let result = ofm_core::finances::request_marketing_campaign(game, &team_id)?;
-            Ok(MarketingCampaignCommandResponse {
-                game: game.clone(),
-                result,
-            })
+        let result = ofm_core::finances::request_marketing_campaign(game, &team_id)?;
+        Ok(MarketingCampaignCommandResponse {
+            game: game.clone(),
+            result,
         })
-        .ok_or("be.error.noActiveGameSession".to_string())?
+    })?
 }
 
 #[cfg(test)]
@@ -168,6 +168,7 @@ mod tests {
     use domain::team::Team;
     use ofm_core::clock::GameClock;
     use ofm_core::game::Game;
+    use ofm_core::state::Career;
     use ofm_core::state::StateManager;
 
     fn make_team() -> Team {
@@ -219,7 +220,7 @@ mod tests {
             attrs,
         );
         player.team_id = Some("team-1".to_string());
-        player.wage = 52_000;
+        player.stage_wage(1_000);
         player
     }
 
@@ -244,6 +245,30 @@ mod tests {
         )
     }
 
+    /// Given career B is active (token 2) and a screen holds career A's token (1)
+    /// When the board-support, sponsor-pitch and marketing requests arrive with A's token
+    /// Then each is refused with the career-changed key and career B's books are untouched.
+    #[test]
+    fn finance_requests_for_a_replaced_career_are_refused() {
+        let state = StateManager::new();
+        let mut game = make_game();
+        game.career_token = 2;
+        state.set_game(game);
+        let before = serde_json::to_value(state.get_game(|g| g.clone()).unwrap()).unwrap();
+        let stale = Career::Token(1);
+        let key = Some("be.error.careerChanged".to_string());
+
+        assert_eq!(request_board_support_internal(&state, stale).err(), key);
+        assert_eq!(request_sponsor_pitch_internal(&state, stale).err(), key);
+        assert_eq!(
+            request_marketing_campaign_internal(&state, stale).err(),
+            key
+        );
+
+        let after = serde_json::to_value(state.get_game(|g| g.clone()).unwrap()).unwrap();
+        assert_eq!(after, before);
+    }
+
     #[test]
     fn get_finance_snapshot_internal_returns_managed_team_snapshot() {
         let state = StateManager::new();
@@ -251,9 +276,9 @@ mod tests {
 
         let response = get_finance_snapshot_internal(&state, None).expect("response");
 
-        assert_eq!(response.snapshot.annual_wage_bill, 52_000);
+        assert_eq!(response.snapshot.annual_wage_bill, 1_000);
         assert_eq!(response.snapshot.weekly_wage_spend, 1_000);
-        assert_eq!(response.snapshot.weekly_wage_budget, 120_000 / 52);
+        assert_eq!(response.snapshot.weekly_wage_budget, 120_000);
         assert!(response.previews.board_support.is_none());
         assert!(response.previews.sponsor_pitch.is_none());
         assert!(response.previews.marketing_campaign.is_none());
@@ -282,7 +307,7 @@ mod tests {
         game.manager.satisfaction = 70;
         state.set_game(game);
 
-        let response = request_board_support_internal(&state).expect("response");
+        let response = request_board_support_internal(&state, Career::Active).expect("response");
 
         assert!(response.result.support_amount >= 150_000);
         assert!(response.game.teams[0].finance > 0);
@@ -299,10 +324,10 @@ mod tests {
     fn request_sponsor_pitch_internal_creates_pending_offer() {
         let state = StateManager::new();
         let mut game = make_game();
-        game.teams[0].wage_budget = 50_000;
+        game.teams[0].wage_budget = 500;
         state.set_game(game);
 
-        let response = request_sponsor_pitch_internal(&state).expect("response");
+        let response = request_sponsor_pitch_internal(&state, Career::Active).expect("response");
 
         assert!(response.result.weekly_amount >= 40_000);
         assert!(response
@@ -328,7 +353,8 @@ mod tests {
         game.teams[0].finance = -40_000;
         state.set_game(game);
 
-        let response = request_marketing_campaign_internal(&state).expect("response");
+        let response =
+            request_marketing_campaign_internal(&state, Career::Active).expect("response");
 
         assert!(response.result.net_income > 0);
         assert_eq!(

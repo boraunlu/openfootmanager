@@ -2,7 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { usePackageAssetSrc } from "../../hooks/usePackageAssetSrc";
 import AssetImage from "./AssetImage";
-import GeneratedCrest from "./GeneratedCrest";
+import { GeneratedCrest } from "./GeneratedCrest";
 
 interface TeamLogoTeam {
   name: string;
@@ -26,7 +26,7 @@ interface TeamLogoProps {
 
 export function TeamLogo({
   team,
-  className = "h-12 w-12 shrink-0 overflow-hidden rounded-lg bg-white/10 flex items-center justify-center font-heading font-bold text-lg text-white",
+  className = "h-12 w-12 shrink-0 overflow-hidden rounded-lg bg-sunken flex items-center justify-center font-heading font-bold text-heading text-fg",
   imageClassName = "h-10 w-10 object-contain drop-shadow",
   fallback,
   style,

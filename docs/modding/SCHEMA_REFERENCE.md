@@ -120,6 +120,14 @@ to `"database"`, so only an explicitly empty value fails.
 runs validation first and refuses to build an archive while any of these are
 missing, so a package can no longer be written to an unnamed file.
 
+Because it becomes a filename, the `id` must be a plain one, or validation
+reports `be.error.package.invalidPackageId`: it cannot start with a dot, end
+with a dot or a space, contain `/`, `\`, `..`, control characters or
+Windows-reserved punctuation (`<`, `>`, `:`, `"`, `|`, `?`, `*`), exceed
+251 bytes, be a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+`LPT1`–`LPT9`, `COM¹`–`COM³`, `LPT¹`–`LPT³`, in any case and with any extension),
+or be `assets`.
+
 ---
 
 ## `team` — Club Definition
@@ -170,7 +178,7 @@ Defines a specific player. Reference teams and countries by their `id`.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `id` | string | no | _(auto-UUID)_ | Stable slug. Auto-generated from `name` if empty. |
-| `name` | string | no | `""` | Full display name (used as fallback if `firstName`/`lastName` are empty). |
+| `name` | string | no | `""` | What the player is called. With `firstName`/`lastName` it is the on-pitch and schedule name: `"Pelé"` stays `"Pelé"`, and a name that starts with the first name drops those words (`"Alfredo Di Stefano"` with `firstName: "Alfredo"` is `"Di Stefano"`, `"Nicolás de la Cruz"` is `"de la Cruz"`). The squad and finance tables show the real name, `firstName` + `lastName`. Alone, without `firstName`/`lastName`, it is split at the first space into first and last name. If `name` is omitted or empty, the on-pitch name falls back to `lastName`, then the full name. |
 | `firstName` | string | no | `""` | First name. Used for display and name pool lookup. |
 | `lastName` | string | no | `""` | Last name. |
 | `club` | string | no | `""` | Team `id` this player starts at. Must match an existing team. |
@@ -184,8 +192,71 @@ Defines a specific player. Reference teams and countries by their `id`.
 | `overall` | integer (1–99) or null | no | `null` | Overall ability rating. The engine generates a realistic attribute spread from this value. |
 | `potential` | integer (1–99) or null | no | `null` | Career ceiling. Omit it and the engine rolls one from the player's ability and age. See below. |
 | `attributes` | object or null | no | `null` | Explicit attribute block. Replaces `overall`-based generation entirely — this is not a partial override, so any of the 19 attributes you omit takes its serde default (8 are optional; the other 11 are required). |
+| `contractStart` | string or null | no | `null` | ISO date (`"YYYY-MM-DD"`) the current contract began. Omit it and the start is given when a career opens. See [Contracts](#contracts). |
+| `contractEnd` | string or null | no | `null` | ISO date the contract ends. Give this **or** `contractLength`, not both. |
+| `contractLength` | integer (1–5) or null | no | `null` | Contract length in whole years, as an alternative to `contractEnd`. |
+| `wage` | integer or null | no | `null` | **Weekly** wage in the game's money. Omit it and it is sized from the player's value. |
+| `value` | integer (0–9007199254740991) or null | no | `null` | Market value in the game's money. Omit it and it is sized from ability and age. |
+| `weakFoot` | integer (1–5) or null | no | `null` | Weak-foot skill. Only kept for a specific `position`; see [Identity fields](#identity-fields). |
+| `alternatePositions` | array of positions | no | `[]` | Other positions the player can cover. Same restriction as `weakFoot`. |
+| `condition` | integer (0–100) or null | no | `null` | Match sharpness. Omit it and it is rolled in a realistic band. |
+| `morale` | integer (0–100) or null | no | `null` | Morale. Omit it and it is rolled in a realistic band. |
+| `careerHistory` | array of career entries | no | `[]` | Earlier clubs. See [Career history](#career-history). |
 
 > **Tip**: You only need to specify `overall` *or* `attributes` — not both. For most authored players, `overall` is sufficient. Use `attributes` for precise control.
+
+### Contracts
+
+A contract runs from a start to an end, and you can write either or both ends of it.
+
+- **`contractEnd`** is an absolute date. It is exactly right for the period you wrote the package
+  for, and nonsense outside it: a squad built for 2010 and played in 2026 has every contract long
+  expired. Use it when you want that.
+- **`contractLength`** is a number of whole years, 1 to 5 (the same ceiling negotiation uses). It is
+  counted from `contractStart` when you give one, and otherwise from the year the career opens in,
+  ending on 30 June like every generated contract. So the same package works whichever year a player
+  starts in. Use this for a package meant to be played in any era.
+- Give **one or the other**. Writing both is an error, because they say the same thing two ways.
+- **`contractStart` alone** is half an interval. The engine rolls a length as it always has and
+  counts it from your start, so you get a whole contract and the start is yours.
+- **Leave all three out** and the engine rolls a contract exactly as it did before these fields
+  existed, so every older package generates the same players.
+
+**When the start is not written.** It is given when a career opens, from the club's own season
+rather than a fixed date, because a club's season does not begin on the same day everywhere: a
+Brazilian club's opens in December of the year before. It is never later than the day the career
+begins, and it is left unknown rather than invented if it would not come before the end. A start
+you *do* write is kept exactly as you wrote it, even one after the career begins, for a deal that
+has not started yet.
+
+`wage` is **weekly**, matching how the game stores and pays it. `value` and `wage` are whole numbers
+and may be `0`; a `0` is used as written and is not treated as "omitted".
+
+### Identity fields
+
+`weakFoot` and `alternatePositions` are only kept for a player with a **specific** `position`.
+`Goalkeeper`, `Defender`, `Midfielder` and `Forward` are general groups, and the game re-works a
+general-group player's weak foot and alternate positions from their attributes when a career opens
+(and for a goalkeeper, who has no more specific form, on every load), which would overwrite what you
+wrote. Package validation reports this rather than letting the values be silently discarded; choose
+a specific position such as `CentralMidfielder` or `Striker`. `alternatePositions` must also be specific, must not repeat the player's own position,
+and must not list a position twice.
+
+### Career history
+
+`careerHistory` records the clubs a player has already played for. Each entry is:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `season` | integer (1–9999) | The calendar year the season began in. |
+| `teamName` | string | The club's name as the profile should read. **Required**, free text. |
+| `teamId` | string or null | A team defined in this package, if the club is one. Omit it for a club the package does not define. |
+| `appearances`, `goals`, `assists` | integer | Counts for that spell. Default `0`. |
+
+A club does not have to be in your package: give its `teamName` and leave `teamId` out. A package
+that contains only Real Madrid can still record Zidane's years at Juventus. If you do give a
+`teamId`, it must match a team in the package, and validation says so if it does not. Two entries may
+share a season, for a player who moved clubs mid-year.
 
 ### `potential` — the career ceiling
 
@@ -267,6 +338,7 @@ Defines a non-playing staff member (manager assistant, coach, scout, or physio).
 | `specialization` | string or null | no | `null` | Coaching focus (coaches only): `"Fitness"`, `"Technique"`, `"Tactics"`, `"Defending"`, `"Attacking"`, `"GoalKeeping"`, `"Youth"`. |
 | `dateOfBirth` | string or null | no | `null` | ISO 8601 date: `"YYYY-MM-DD"`. |
 | `age` | integer or null | no | `null` | Age at world generation start. Used if `dateOfBirth` is absent. |
+| `knownAs` | string or null | no | `null` | What they are called when it differs from their name, for example `"Cafu"` for Marcos Evangelista. `firstName` and `lastName` stay the real name; the game shows `knownAs` wherever a staff name is drawn. |
 | `attributes` | object or null | no | `null` | Explicit attribute overrides: `coaching`, `judgingAbility`, `judgingPotential`, `physiotherapy` (each 1–99). |
 
 **Example:**
@@ -395,11 +467,17 @@ Competitions are the most complex entity. A competition defines a league, cup, o
 | `countryId` | string or null | `null` | Country this competition belongs to (required for `Domestic` scope). |
 | `regionId` | string or null | `null` | Region this competition belongs to (required for `Regional`/`Continental` scope). |
 | `requiredRegionIds` | array of strings | `[]` | Region ids that must be active for this competition to appear. |
-| `priority` | integer | `0` | Scheduling priority. Higher-priority competitions are scheduled first. |
+| `priority` | integer | `0` | Tier rank within a country: **lower is the higher division**. Domestic `League` competitions in `LeagueTable` format that share a `countryId` form a promotion/relegation pyramid ordered by it, so a first division is `0` and a second `1`. Gaps are fine — tiers are chained in rank order, not by consecutive numbers — but two tiers of one pyramid must not share a value. A tier that is the target of a `positionRange` berth, or one of several feeders into the same target, is filled through those berths instead and leaves the linear ladder, so it is exempt. Also ranks continental cups by prestige, lowest first. |
 | `berths` | array | `[]` | Qualification spots this competition awards to other competitions. See [Berths](#berths). |
 | `seasonStartMonth` | integer (1–12) | `8` | Month the season begins. |
 | `seasonStartDay` | integer (1–31) | `1` | Day of the month the season begins. |
+| `calendar` | object or null | `null` in scaffolds | Optional retained season specification; does not yet change scheduling or rollover. Scaffolds leave grouping undeclared so format, scope and country can be changed in the Package Editor, which has no calendar control. Use the annotated `ofm-cli schema competition` shape to opt in. |
+| `calendar.division.familyId` | string | absent | Non-blank stable family shared by related tiers/phases. A division declaration requires a domestic league-table format and `countryId`. |
+| `calendar.division.tier` | positive integer | absent | Explicit tier within that family. Names and participant overlap never supply this identity. |
+| `calendar.division.phase` | enum | `"annual"` | `"annual"`, `"opening"` or `"closing"`. Opening/closing declarations require `windowEnd`. |
+| `calendar.windowEnd` | object | absent | Optional valid `{ "month": 6, "day": 30 }` end date. An end before the opener belongs to the following year. |
 | `nameKey` | string or null | `null` | i18n key for a translated competition name. |
+| `logo` | string or null | `null` | Relative path to the competition's badge image inside the package. |
 
 ### Competition Types
 
@@ -434,7 +512,7 @@ Competitions are the most complex entity. A competition defines a league, cup, o
 |-------|------|---------|-------------|
 | `kind` | string | — | `"LeagueTable"`, `"Knockout"`, or `"GroupAndKnockout"` |
 | `legs` | integer | `2` | _(LeagueTable / groups phase only)_ Number of legs per round-robin cycle. `1` = one-leg, `2` = home and away. |
-| `groupSize` | integer | `4` | _(GroupAndKnockout only)_ Clubs per group. |
+| `groupSize` | integer | `4` | _(GroupAndKnockout only)_ Maximum clubs per group. Uneven fields are balanced across groups. |
 | `qualifiersPerGroup` | integer | `2` | _(GroupAndKnockout only)_ Clubs advancing from each group. |
 | `bestThirdQualifiers` | integer | `0` | _(GroupAndKnockout only)_ Best third-placed teams that also advance (like the 2026 World Cup format). |
 
@@ -528,7 +606,7 @@ A domestic league using `topByReputation` selector:
   "type": "League",
   "scope": "Domestic",
   "countryId": "ENG",
-  "priority": 100,
+  "priority": 0,
   "format": {
     "kind": "LeagueTable",
     "legs": 2
@@ -558,7 +636,7 @@ A group + knockout continental tournament:
   "type": "ContinentalClub",
   "scope": "Continental",
   "regionId": "europe",
-  "priority": 50,
+  "priority": 100,
   "format": {
     "kind": "GroupAndKnockout",
     "legs": 1,

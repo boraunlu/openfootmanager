@@ -1,7 +1,7 @@
 use crate::event::{EventType, MatchEvent};
-use crate::types::{Position, Side, Zone};
+use crate::types::{PlayerData, Position, Side, Zone};
 
-use super::{LiveMatchState, SubstitutionRecord};
+use super::{LiveMatchState, MatchPhase, SubstitutionRecord};
 
 // ---------------------------------------------------------------------------
 // Substitution mechanics
@@ -21,6 +21,15 @@ impl LiveMatchState {
 
         if *subs_made >= self.max_subs {
             return Err("be.error.liveMatch.maxSubstitutionsReached".into());
+        }
+
+        // A shootout is taken by the players on the pitch at the final whistle of extra time,
+        // and its kicking order is fixed from them, so nobody comes on or off after it.
+        if matches!(
+            self.phase,
+            MatchPhase::ExtraTimeEnd | MatchPhase::PenaltyShootout
+        ) {
+            return Err("be.error.liveMatch.noSubstitutionsForShootout".into());
         }
 
         // Cannot substitute a player who has been sent off
@@ -45,6 +54,10 @@ impl LiveMatchState {
             return Err("be.error.liveMatch.playerAlreadySubstitutedOff".into());
         }
 
+        // Asked before either list is disturbed, and before the bench is
+        // borrowed to take the incoming player off it.
+        let nobody_in_goal = self.keeper_on_the_pitch(side).is_none();
+
         let bench = match side {
             Side::Home => &mut self.home_bench,
             Side::Away => &mut self.away_bench,
@@ -54,6 +67,8 @@ impl LiveMatchState {
             .position(|p| p.id == player_on_id)
             .ok_or("be.error.liveMatch.playerNotOnBench")?;
 
+        let goes_in_goal = nobody_in_goal && bench[on_idx].position == Position::Goalkeeper;
+
         let mut player_on = bench.remove(on_idx);
         let player_off = self.team_mut(side).players.remove(off_idx);
 
@@ -61,7 +76,17 @@ impl LiveMatchState {
         // takes over the vacated slot: same index, and the slot's position —
         // players are simulated where they actually play, not where they'd
         // naturally play.
-        player_on.position = player_off.position;
+        //
+        // Except in goal. A side whose keeper has been sent off makes an
+        // outfield player way for a substitute keeper, and inheriting that
+        // player's slot would make him a defender: `pick_goalkeeper` looks for
+        // `Position::Goalkeeper` and would never find him, so the change would
+        // cost a substitution and put nobody in goal. This is the same code
+        // path the player's own substitutions take, so it fixes the same
+        // change made by hand from the touchline.
+        if !goes_in_goal {
+            player_on.position = player_off.position;
+        }
 
         // Initialize condition for incoming player
         self.player_conditions
@@ -89,6 +114,7 @@ impl LiveMatchState {
         )
         .with_player(player_on_id)
         .with_secondary(player_off_id);
+        self.unreported_events.push(evt.clone());
         self.events.push(evt);
 
         self.substitutions.push(SubstitutionRecord {
@@ -99,6 +125,33 @@ impl LiveMatchState {
         });
 
         Ok(())
+    }
+
+    /// Give `player_id`, in `side`'s eleven or on its bench, `line_familiarity`. For a caller that
+    /// knows where a player now plays better than the engine can: the engine knows his line, not
+    /// his slot within it (`PlayerData::line_familiarity`). Whether he was found.
+    pub fn set_line_familiarity(
+        &mut self,
+        side: Side,
+        player_id: &str,
+        line_familiarity: [f64; 4],
+    ) -> bool {
+        let (team, bench) = match side {
+            Side::Home => (&mut self.home, &mut self.home_bench),
+            Side::Away => (&mut self.away, &mut self.away_bench),
+        };
+        match team
+            .players
+            .iter_mut()
+            .chain(bench.iter_mut())
+            .find(|player| player.id == player_id)
+        {
+            Some(player) => {
+                player.line_familiarity = line_familiarity;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Pre-match swap: exchange a starting player with a bench player without
@@ -167,48 +220,205 @@ impl LiveMatchState {
         }
     }
 
-    /// Apply a formation change: update the formation string and redistribute
-    /// outfield player positions to match the new shape.
+    /// Apply a formation change with as few players moving as possible.
+    ///
+    /// A player stays in his line while the new shape has room for him. A line with too many
+    /// passes its best-suited player one line toward the line that is short, so a back five takes
+    /// its extra defender from midfield, never from the strikers, and a change to the same shape
+    /// moves nobody. The eleven is then regrouped back to front, so player i keeps playing slot i
+    /// of the new formation, which is how the pitch is drawn.
     pub(super) fn apply_formation(&mut self, side: Side, formation: &str) {
         let (num_def, num_mid, num_fwd) = Self::parse_formation(formation);
-        let team = self.team_mut(side);
-        team.formation = formation.to_string();
-
-        // Collect outfield players (skip GK) sorted by defensive-ness
-        // (defenders first, then midfielders, then forwards) using a simple
-        // heuristic: defending+tackling vs shooting+dribbling
-        let mut outfield_indices: Vec<usize> = team
+        let on_the_pitch: Vec<bool> = self
+            .team_ref(side)
             .players
             .iter()
-            .enumerate()
-            .filter(|(_, p)| p.position != Position::Goalkeeper)
-            .map(|(i, _)| i)
+            .map(|player| self.is_on_the_pitch(side, &player.id))
             .collect();
+        let team = self.team_mut(side);
+        team.formation = formation.to_string();
+        rebalance_lines(
+            &mut team.players,
+            &on_the_pitch,
+            [num_def, num_mid, num_fwd],
+        );
+        team.players
+            .sort_by_key(|player| line_rank(player.position));
+    }
+}
 
-        // Sort by defensive score descending (most defensive first)
-        outfield_indices.sort_by(|&a, &b| {
-            let pa = &team.players[a];
-            let pb = &team.players[b];
-            let def_a = (pa.defending as u16 + pa.tackling as u16 + pa.strength as u16) as f64;
-            let def_b = (pb.defending as u16 + pb.tackling as u16 + pb.strength as u16) as f64;
-            def_b
-                .partial_cmp(&def_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
+const OUTFIELD_LINES: [Position; 3] = [Position::Defender, Position::Midfielder, Position::Forward];
+
+fn line_rank(position: Position) -> usize {
+    match position {
+        Position::Goalkeeper => 0,
+        Position::Defender => 1,
+        Position::Midfielder => 2,
+        Position::Forward => 3,
+    }
+}
+
+/// How well a player would fill a line, from the attributes that line asks most of.
+fn suitability(player: &PlayerData, line: Position) -> u16 {
+    let sum = |values: [u8; 3]| values.iter().map(|&value| u16::from(value)).sum();
+    match line {
+        Position::Defender => sum([player.defending, player.tackling, player.strength]),
+        Position::Midfielder => sum([player.passing, player.vision, player.decisions]),
+        Position::Forward => sum([player.shooting, player.dribbling, player.pace]),
+        Position::Goalkeeper => 0,
+    }
+}
+
+/// Move outfielders between lines until each holds `wanted` players or no line has one to
+/// spare. Every move is one line, toward the nearest line that is short; a gap two lines away
+/// is filled through the middle, and a player who has already moved once is the last choice to
+/// move again, so the defender who steps into midfield is not then pushed up front.
+///
+/// Only players `on_the_pitch` (indexed as `players`) count or move: a player sent off leaves
+/// his line one short, and stays where he was.
+fn rebalance_lines(players: &mut [PlayerData], on_the_pitch: &[bool], wanted: [usize; 3]) {
+    let mut moved: Vec<usize> = Vec::new();
+    // Each move closes one place of the gap between two lines, so ten outfielders need at most
+    // twenty; the bound only guards against a shape this loop cannot reach.
+    for _ in 0..20 {
+        let counts = OUTFIELD_LINES.map(|line| {
+            players
+                .iter()
+                .zip(on_the_pitch)
+                .filter(|&(player, &playing)| playing && player.position == line)
+                .count()
         });
+        let Some(short) = (0..3).find(|&line| counts[line] < wanted[line]) else {
+            return;
+        };
+        let Some(spare) = (0..3)
+            .filter(|&line| counts[line] > wanted[line])
+            .min_by_key(|&line| line.abs_diff(short))
+        else {
+            return;
+        };
+        let destination = if spare < short { spare + 1 } else { spare - 1 };
+        let from = OUTFIELD_LINES[spare];
+        let to = OUTFIELD_LINES[destination];
+        let Some(mover) = players
+            .iter()
+            .enumerate()
+            .filter(|&(index, player)| {
+                on_the_pitch.get(index) == Some(&true) && player.position == from
+            })
+            .rev()
+            .max_by_key(|(index, player)| (!moved.contains(index), suitability(player, to)))
+            .map(|(index, _)| index)
+        else {
+            return;
+        };
+        players[mover].position = to;
+        moved.push(mover);
+    }
+}
 
-        // Assign positions: first num_def → Defender, next num_mid → Midfielder, rest → Forward
-        for (slot, &idx) in outfield_indices.iter().enumerate() {
-            let new_pos = if slot < num_def {
-                Position::Defender
-            } else if slot < num_def + num_mid {
-                Position::Midfielder
-            } else if slot < num_def + num_mid + num_fwd {
-                Position::Forward
-            } else {
-                // Extra players (e.g. if team has <11 due to red cards) keep current
-                continue;
-            };
-            team.players[idx].position = new_pos;
+#[cfg(test)]
+mod line_familiarity_tests {
+    use crate::live_match::LiveMatchState;
+    use crate::types::{
+        MatchConfig, PlayStyle, PlayerData, PlayerRole, Position, Side, TacticsConfig, TeamData,
+    };
+
+    fn player(id: &str, position: Position) -> PlayerData {
+        PlayerData {
+            id: id.to_string(),
+            name: id.to_string(),
+            position,
+            ovr: 70,
+            condition: 100,
+            fitness: 100,
+            injury_risk: 1.0,
+            line_familiarity: [1.0; 4],
+            pace: 70,
+            stamina: 70,
+            strength: 70,
+            agility: 70,
+            passing: 70,
+            shooting: 70,
+            tackling: 70,
+            dribbling: 70,
+            defending: 70,
+            positioning: 70,
+            vision: 70,
+            decisions: 70,
+            composure: 70,
+            aggression: 70,
+            teamwork: 70,
+            leadership: 70,
+            handling: 70,
+            reflexes: 70,
+            aerial: 70,
+            traits: vec![],
+            role: PlayerRole::Standard,
         }
+    }
+
+    fn side(prefix: &str) -> TeamData {
+        TeamData {
+            id: prefix.to_string(),
+            name: prefix.to_string(),
+            formation: "4-4-2".to_string(),
+            play_style: PlayStyle::Balanced,
+            tactics: TacticsConfig::default(),
+            players: vec![
+                player(&format!("{prefix}_gk"), Position::Goalkeeper),
+                player(&format!("{prefix}_d"), Position::Defender),
+            ],
+        }
+    }
+
+    fn state() -> LiveMatchState {
+        LiveMatchState::new(
+            side("h"),
+            side("a"),
+            MatchConfig::default(),
+            vec![player("h_sub", Position::Defender)],
+            vec![player("a_sub", Position::Defender)],
+            false,
+        )
+    }
+
+    const REFIT: [f64; 4] = [0.9, 0.95, 1.0, 0.9];
+
+    /// Given a home defender in the eleven,
+    /// When his familiarity is set,
+    /// Then he carries it, and the away side's players do not.
+    #[test]
+    fn a_player_in_the_eleven_takes_the_familiarity_he_is_given() {
+        let mut state = state();
+
+        assert!(state.set_line_familiarity(Side::Home, "h_d", REFIT));
+
+        assert_eq!(state.team(Side::Home).players[1].line_familiarity, REFIT);
+        assert_eq!(state.team(Side::Away).players[1].line_familiarity, [1.0; 4]);
+    }
+
+    /// Given a home substitute on the bench,
+    /// When his familiarity is set,
+    /// Then he carries it.
+    #[test]
+    fn a_player_on_the_bench_takes_the_familiarity_he_is_given() {
+        let mut state = state();
+
+        assert!(state.set_line_familiarity(Side::Home, "h_sub", REFIT));
+
+        assert_eq!(state.bench(Side::Home)[0].line_familiarity, REFIT);
+    }
+
+    /// Given the away side's substitute,
+    /// When the home side's familiarity is set for him,
+    /// Then nobody is found and nothing changes.
+    #[test]
+    fn a_player_not_on_that_side_is_not_found() {
+        let mut state = state();
+
+        assert!(!state.set_line_familiarity(Side::Home, "a_sub", REFIT));
+
+        assert_eq!(state.bench(Side::Away)[0].line_familiarity, [1.0; 4]);
     }
 }

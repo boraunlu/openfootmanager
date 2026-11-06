@@ -1,10 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import type {
-  PlayerData,
-  ScoutingAssignment,
-  StaffData,
-} from "../../store/gameStore";
+import type { PlayerData, ScoutingAssignment, StaffData } from "../../store/gameStore";
 import { countryName } from "../../lib/countries";
 import { Badge, Card, CardBody, CardHeader, CountryFlag, ProgressBar } from "../ui";
 import { Eye } from "lucide-react";
@@ -51,7 +47,7 @@ export default function ScoutingScoutDetailsCard({
                   </div>
                   <div className="flex-1">
                     <p className="font-heading font-bold text-sm text-gray-800 dark:text-gray-100">
-                      {scout.first_name} {scout.last_name}
+                      {scout.display_name}
                     </p>
                     <div className="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5 flex items-center gap-1">
                       <CountryFlag
@@ -71,11 +67,7 @@ export default function ScoutingScoutDetailsCard({
                     <p className="text-[10px] text-gray-400 dark:text-gray-500 font-heading uppercase">
                       {t("scouting.judgingAbility")}
                     </p>
-                    <ProgressBar
-                      value={scout.attributes.judgingAbility}
-                      variant="auto"
-                      size="sm"
-                    />
+                    <ProgressBar value={scout.attributes.judgingAbility} variant="auto" size="sm" />
                   </div>
                   <div>
                     <p className="text-[10px] text-gray-400 dark:text-gray-500 font-heading uppercase">
@@ -96,10 +88,7 @@ export default function ScoutingScoutDetailsCard({
                       );
 
                       return player ? (
-                        <p
-                          key={assignment.id}
-                          className="text-xs text-gray-500 dark:text-gray-400"
-                        >
+                        <p key={assignment.id} className="text-xs text-gray-500 dark:text-gray-400">
                           {t("scouting.scoutLabel", { name: "" })}
                           <span className="font-heading font-bold text-gray-700 dark:text-gray-300">
                             {player.full_name}

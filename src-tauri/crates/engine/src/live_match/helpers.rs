@@ -1,11 +1,14 @@
-use rand::{Rng, RngExt};
+use rand::Rng;
 
 use crate::event::{DangerBand, FoulSeverity, GoalContext, SaveQuality};
 use crate::shared::{
-    PlayStylePhase, PlayerSnap, home_mod, play_style_modifier, tactics_pressing_fatigue,
-    tactics_pressing_press,
+    PlayStylePhase, PlayerSnap, condition_factor, home_mod, play_style_modifier,
+    tactics_pressing_fatigue, tactics_pressing_press,
 };
 use crate::types::{PlayerData, Position, Side, TeamData};
+
+/// The ground each missing player adds to what the rest of a side must cover when it defends.
+const SHORT_HANDED_COST: f64 = 0.7;
 
 use super::{LiveMatchState, SetPieceTakers};
 
@@ -43,15 +46,14 @@ impl LiveMatchState {
     }
 
     /// Adjust a skill value based on the player's current in-match condition.
-    pub(super) fn condition_adjusted_skill(&self, player_id: &str, base_skill: f64) -> f64 {
+    pub(super) fn condition_adjusted_skill(&self, player: &PlayerSnap, base_skill: f64) -> f64 {
         let condition = self
             .player_conditions
-            .get(player_id)
+            .get(&player.id)
             .copied()
             .unwrap_or(50.0);
-        // At 100% condition: full skill. At 50%: ~80% skill. At 0%: ~60% skill.
-        let factor = 0.6 + 0.4 * (condition / 100.0);
-        base_skill * factor
+        // Out of position, he plays like a weaker player (`PlayerData::line_familiarity`).
+        base_skill * condition_factor(condition) * player.familiarity
     }
 
     // -----------------------------------------------------------------------
@@ -65,79 +67,40 @@ impl LiveMatchState {
         rng: &mut R,
     ) -> PlayerSnap {
         let team = self.team_ref(side);
-        let available: Vec<&PlayerData> = team
-            .players
-            .iter()
-            .filter(|p| !self.sent_off.contains(&p.id))
-            .collect();
-
-        let candidates: Vec<&PlayerData> = available
-            .iter()
-            .filter(|p| p.position == preferred)
-            .copied()
-            .collect();
-
-        let pool = if candidates.is_empty() {
-            &available
-        } else {
-            &candidates
-        };
-        if pool.is_empty() {
-            return PlayerSnap::from(&team.players[0]);
-        }
-        PlayerSnap::from(pool[rng.random_range(0..pool.len())])
+        crate::shared::snap_from_squad(&team.players, &self.sent_off, preferred, rng)
+            .unwrap_or_else(PlayerSnap::nobody)
     }
 
     pub(super) fn snap_player_by_id(&self, player_id: &str, side: Side) -> PlayerSnap {
         let team = self.team_ref(side);
-        if let Some(p) = team.players.iter().find(|p| p.id == player_id) {
-            PlayerSnap::from(p)
-        } else {
-            PlayerSnap::from(&team.players[0])
-        }
-    }
-
-    pub(super) fn pick_penalty_taker<R: Rng>(&self, side: Side, rng: &mut R) -> PlayerSnap {
-        // Use designated taker if set
-        if let Some(ref id) = self.set_pieces_ref(side).penalty_taker {
-            let team = self.team_ref(side);
-            if let Some(p) = team
-                .players
-                .iter()
-                .find(|p| p.id == *id && !self.sent_off.contains(&p.id))
-            {
-                return PlayerSnap::from(p);
-            }
-        }
-        // Fallback: pick the forward with highest shooting
-        let team = self.team_ref(side);
-        let mut candidates: Vec<&PlayerData> = team
-            .players
+        team.players
             .iter()
-            .filter(|p| !self.sent_off.contains(&p.id))
-            .collect();
-        candidates.sort_by_key(|p| std::cmp::Reverse(p.shooting));
-        if let Some(p) = candidates.first() {
-            PlayerSnap::from(p)
-        } else {
-            self.snap_player(side, Position::Forward, rng)
-        }
+            .find(|player| player.id == player_id)
+            .or_else(|| team.players.first())
+            .map(PlayerSnap::from)
+            .unwrap_or_else(PlayerSnap::nobody)
     }
 
     pub(super) fn pick_goalkeeper(&self, side: Side) -> PlayerSnap {
-        let team = self.team_ref(side);
-        for p in &team.players {
-            if p.position == Position::Goalkeeper && !self.sent_off.contains(&p.id) {
-                return PlayerSnap::from(p);
-            }
+        if let Some(keeper) = self.keeper_on_the_pitch(side) {
+            return PlayerSnap::from(keeper);
         }
-        // No goalkeeper available — pick first available
+        let team = self.team_ref(side);
+        // No goalkeeper available: the first player still on the pitch goes in, keeping his own
+        // attributes but out of position, at his goalkeeping factor.
         for p in &team.players {
             if !self.sent_off.contains(&p.id) {
-                return PlayerSnap::from(p);
+                return PlayerSnap::playing_in(p, Position::Goalkeeper);
             }
         }
-        PlayerSnap::from(&team.players[0])
+        // Everyone is sent off, or there is nobody at all. `create_live_match`
+        // refuses a side with no players, so the latter should not reach here —
+        // but a blank name in an event is a bug worth reporting, and indexing
+        // an empty squad is a window that stops responding.
+        team.players
+            .first()
+            .map(|p| PlayerSnap::playing_in(p, Position::Goalkeeper))
+            .unwrap_or_else(PlayerSnap::nobody)
     }
 
     // -----------------------------------------------------------------------
@@ -145,7 +108,10 @@ impl LiveMatchState {
     // -----------------------------------------------------------------------
 
     pub(super) fn effective_midfield(&self, side: Side) -> f64 {
-        let base = self.team_ref(side).midfield_rating();
+        let base = self.team_ref(side).midfield_rating_on_the_pitch(
+            &|id| !self.is_on_the_pitch(side, id),
+            self.midfield_slots(side),
+        );
         let modifier = play_style_modifier(
             self.team_ref(side).play_style,
             PlayStylePhase::Midfield,
@@ -156,13 +122,37 @@ impl LiveMatchState {
 
     pub(super) fn effective_press(&self, pressing_side: Side) -> f64 {
         let team = self.team_ref(pressing_side);
-        let base = team.position_attr_avg(Position::Midfielder, |p| {
-            ((p.stamina as u16 + p.tackling as u16 + p.pace as u16) / 3) as u8
-        });
+        let base = team.line_strength(
+            Position::Midfielder,
+            |p| ((p.stamina as u16 + p.tackling as u16 + p.pace as u16) / 3) as u8,
+            &|id| !self.is_on_the_pitch(pressing_side, id),
+            self.midfield_slots(pressing_side),
+        );
         let modifier = play_style_modifier(team.play_style, PlayStylePhase::Press, true);
         base * modifier
+            * self.short_handed_cover(pressing_side)
             * tactics_pressing_press(&team.tactics)
             * home_mod(pressing_side, &self.config)
+    }
+
+    /// The midfield slots in `side`'s current shape.
+    fn midfield_slots(&self, side: Side) -> usize {
+        Self::parse_formation(&self.team_ref(side).formation).1
+    }
+
+    /// How well a side short of players still covers the ground when it defends: each player it
+    /// is missing adds `SHORT_HANDED_COST` to the ground the rest must cover. It weakens the
+    /// side's press and tackles and leaves the chances against it cleaner; its attacking is left
+    /// alone, as the literature finds a side down to ten concedes far more but scores about as
+    /// often (`tests/short_handed_tests.rs`).
+    pub(super) fn short_handed_cover(&self, side: Side) -> f64 {
+        let missing = self
+            .team_ref(side)
+            .players
+            .iter()
+            .filter(|p| !self.is_on_the_pitch(side, &p.id))
+            .count();
+        1.0 / (1.0 + SHORT_HANDED_COST * missing as f64)
     }
 
     // -----------------------------------------------------------------------
@@ -198,11 +188,39 @@ impl LiveMatchState {
     }
 
     /// Classify a goal about to be scored by `side`, using the CURRENT (pre-increment) score.
-    pub(super) fn goal_context(&self, side: Side) -> GoalContext {
-        let (own, opp) = match side {
+    /// This side's goals, then the opponent's.
+    pub(crate) fn score_for(&self, side: Side) -> (u8, u8) {
+        match side {
             Side::Home => (self.home_score, self.away_score),
             Side::Away => (self.away_score, self.home_score),
-        };
+        }
+    }
+
+    /// Whether `player_id` is on `side`'s pitch: in the side's players and not sent off. A
+    /// substituted-off player is no longer in the side's players. The one test for being on the
+    /// pitch: a player who has left it leaves an empty slot in their line and their side
+    /// short-handed, so any other way of leaving it belongs here.
+    pub(super) fn is_on_the_pitch(&self, side: Side, player_id: &str) -> bool {
+        !self.sent_off.contains(player_id)
+            && self
+                .team_ref(side)
+                .players
+                .iter()
+                .any(|player| player.id == player_id)
+    }
+
+    /// The goalkeeper this side still has on the pitch: one who has not been
+    /// sent off. The one answer to "is anybody in goal", for choosing who
+    /// faces a shot, for putting a keeper on, and for the AI deciding it must.
+    pub(crate) fn keeper_on_the_pitch(&self, side: Side) -> Option<&PlayerData> {
+        self.team_ref(side)
+            .players
+            .iter()
+            .find(|p| p.position == Position::Goalkeeper && !self.sent_off.contains(&p.id))
+    }
+
+    pub(super) fn goal_context(&self, side: Side) -> GoalContext {
+        let (own, opp) = self.score_for(side);
         let own_new = own + 1;
         if own == 0 && opp == 0 {
             GoalContext::Opener
@@ -302,6 +320,8 @@ mod commentary_detail_tests {
             ovr: 70,
             condition: 90,
             fitness: 75,
+            injury_risk: 1.0,
+            line_familiarity: [1.0; 4],
             pace: 70,
             stamina: 70,
             strength: 70,
@@ -402,5 +422,264 @@ mod commentary_detail_tests {
         // Specifically: home extends the lead, away equalises.
         assert_eq!(state.goal_context(Side::Home), GoalContext::Extends);
         assert_eq!(state.goal_context(Side::Away), GoalContext::Equaliser);
+    }
+}
+
+#[cfg(test)]
+mod empty_squad_tests {
+    use crate::live_match::LiveMatchState;
+    use crate::types::{MatchConfig, PlayStyle, Side, TacticsConfig, TeamData};
+
+    fn empty_team(id: &str) -> TeamData {
+        TeamData {
+            id: id.to_string(),
+            name: id.to_string(),
+            formation: "4-4-2".to_string(),
+            play_style: PlayStyle::Balanced,
+            tactics: TacticsConfig::default(),
+            players: vec![],
+        }
+    }
+
+    /// The batch engine refuses a match with an empty side, but the live,
+    /// spectator and delegated paths build `LiveMatchState` directly and never
+    /// reach that guard. Goalkeeper selection ended by indexing `players[0]`,
+    /// so a shootout with an empty XI panicked out of the Tauri command and
+    /// left the window with no response.
+    #[test]
+    fn picking_a_goalkeeper_from_nobody_does_not_panic() {
+        let state = LiveMatchState::new(
+            empty_team("home"),
+            empty_team("away"),
+            MatchConfig::default(),
+            vec![],
+            vec![],
+            true,
+        );
+
+        let keeper = state.pick_goalkeeper(Side::Home);
+
+        assert!(keeper.id.is_empty(), "nobody is available to keep goal");
+    }
+}
+
+#[cfg(test)]
+mod emergency_keeper_tests {
+    use crate::live_match::LiveMatchState;
+    use crate::types::{
+        MatchConfig, PlayStyle, PlayerData, PlayerRole, Position, Side, TacticsConfig, TeamData,
+    };
+
+    fn player(id: &str, position: Position) -> PlayerData {
+        PlayerData {
+            id: id.to_string(),
+            name: id.to_string(),
+            position,
+            ovr: 70,
+            condition: 100,
+            fitness: 100,
+            injury_risk: 1.0,
+            // Natural in his own line; in goal, half the player he is (a factor no real cost
+            // reaches, so only the goalkeeping entry can produce it).
+            line_familiarity: [0.5, 1.0, 1.0, 1.0],
+            pace: 70,
+            stamina: 70,
+            strength: 70,
+            agility: 70,
+            passing: 70,
+            shooting: 70,
+            tackling: 70,
+            dribbling: 70,
+            defending: 70,
+            positioning: 70,
+            vision: 70,
+            decisions: 70,
+            composure: 70,
+            aggression: 70,
+            teamwork: 70,
+            leadership: 70,
+            handling: 70,
+            reflexes: 70,
+            aerial: 70,
+            traits: vec![],
+            role: PlayerRole::Standard,
+        }
+    }
+
+    fn side(prefix: &str) -> TeamData {
+        let mut players = vec![player(&format!("{prefix}_gk"), Position::Goalkeeper)];
+        players[0].line_familiarity = [1.0; 4];
+        players.push(player(&format!("{prefix}_d1"), Position::Defender));
+        players.push(player(&format!("{prefix}_d2"), Position::Defender));
+        TeamData {
+            id: prefix.to_string(),
+            name: prefix.to_string(),
+            formation: "4-4-2".to_string(),
+            play_style: PlayStyle::Balanced,
+            tactics: TacticsConfig::default(),
+            players,
+        }
+    }
+
+    /// Given a live match whose home goalkeeper has been sent off, the rest of the side
+    /// defenders who are half the player in goal,
+    /// When a shot or a penalty asks for the home goalkeeper,
+    /// Then the defender who goes in plays at his goalkeeping factor.
+    #[test]
+    fn a_keeper_from_the_outfield_plays_at_his_goalkeeping_factor_in_a_live_match() {
+        let mut state = LiveMatchState::new(
+            side("h"),
+            side("a"),
+            MatchConfig::default(),
+            vec![],
+            vec![],
+            false,
+        );
+        state.test_send_off("h_gk");
+
+        let keeper = state.pick_goalkeeper(Side::Home);
+
+        assert_eq!(keeper.id, "h_d1");
+        assert_eq!(keeper.familiarity, 0.5);
+    }
+}
+
+#[cfg(test)]
+mod short_handed_line_tests {
+    use crate::live_match::LiveMatchState;
+    use crate::shared::{PlayStylePhase, home_mod, play_style_modifier, tactics_pressing_press};
+    use crate::types::{
+        MatchConfig, PlayStyle, PlayerData, PlayerRole, Position, Side, TacticsConfig, TeamData,
+    };
+
+    fn player(id: &str, position: Position) -> PlayerData {
+        PlayerData {
+            id: id.to_string(),
+            name: id.to_string(),
+            position,
+            ovr: 70,
+            condition: 100,
+            fitness: 100,
+            injury_risk: 1.0,
+            line_familiarity: [1.0; 4],
+            pace: 70,
+            stamina: 70,
+            strength: 70,
+            agility: 70,
+            passing: 70,
+            shooting: 70,
+            tackling: 70,
+            dribbling: 70,
+            defending: 70,
+            positioning: 70,
+            vision: 70,
+            decisions: 70,
+            composure: 70,
+            aggression: 70,
+            teamwork: 70,
+            leadership: 70,
+            handling: 70,
+            reflexes: 70,
+            aerial: 70,
+            traits: vec![],
+            role: PlayerRole::Standard,
+        }
+    }
+
+    /// A 4-4-2 whose midfielders, `{prefix}_m1` .. `{prefix}_m4`, have stamina 60, tackling 70
+    /// and pace 80, so a press that read the wrong mix of them would not come to 70.
+    fn side(prefix: &str) -> TeamData {
+        let mut players = vec![player(&format!("{prefix}_gk"), Position::Goalkeeper)];
+        players.extend((1..=4).map(|n| player(&format!("{prefix}_d{n}"), Position::Defender)));
+        players.extend((1..=4).map(|n| {
+            let mut midfielder = player(&format!("{prefix}_m{n}"), Position::Midfielder);
+            midfielder.stamina = 60;
+            midfielder.pace = 80;
+            midfielder
+        }));
+        players.extend((1..=2).map(|n| player(&format!("{prefix}_f{n}"), Position::Forward)));
+        TeamData {
+            id: prefix.to_string(),
+            name: prefix.to_string(),
+            formation: "4-4-2".to_string(),
+            play_style: PlayStyle::Balanced,
+            tactics: TacticsConfig::default(),
+            players,
+        }
+    }
+
+    fn kick_off() -> LiveMatchState {
+        LiveMatchState::new(
+            side("h"),
+            side("a"),
+            MatchConfig::default(),
+            vec![],
+            vec![],
+            false,
+        )
+    }
+
+    /// Given a home defender at condition 50 who carries 0.9 in defence,
+    /// When his skill of 70 is read for a duel,
+    /// Then it is 70 x 0.8 (half fit: 0.6 + 0.4 x 0.5) x 0.9 (his familiarity with his line).
+    #[test]
+    fn a_duel_reads_a_players_condition_and_his_familiarity_with_his_line() {
+        let mut home = side("h");
+        home.players[1].condition = 50;
+        home.players[1].line_familiarity[1] = 0.9;
+        let defender = crate::shared::PlayerSnap::from(&home.players[1]);
+        let state = LiveMatchState::new(
+            home,
+            side("a"),
+            MatchConfig::default(),
+            vec![],
+            vec![],
+            false,
+        );
+        let skill = state.condition_adjusted_skill(&defender, 70.0);
+        assert!((skill - 70.0 * 0.8 * 0.9).abs() < 1e-9, "{skill}");
+    }
+
+    /// Given a full side whose midfielders have stamina 60, tackling 70 and pace 80,
+    /// When its press is read,
+    /// Then it is the midfield's average of the three, 70, times the side's press modifiers.
+    #[test]
+    fn the_press_reads_its_midfielders_stamina_tackling_and_pace() {
+        let state = kick_off();
+        let modifiers = play_style_modifier(PlayStyle::Balanced, PlayStylePhase::Press, true)
+            * tactics_pressing_press(&TacticsConfig::default())
+            * home_mod(Side::Home, &MatchConfig::default());
+        assert!((state.effective_press(Side::Home) - 70.0 * modifiers).abs() < 1e-9);
+    }
+
+    /// Given a full four-man midfield,
+    /// When one midfielder is sent off,
+    /// Then the side's midfield is three quarters of what it was: his slot is empty.
+    #[test]
+    fn a_midfielder_sent_off_leaves_the_midfield_three_quarters_strong() {
+        let mut state = kick_off();
+        let full = state.effective_midfield(Side::Home);
+        state.test_send_off("h_m1");
+        let ratio = state.effective_midfield(Side::Home) / full;
+        assert!(
+            (ratio - 0.75).abs() < 1e-12,
+            "the midfield kept {ratio} of its strength"
+        );
+    }
+
+    /// Given a full four-man midfield,
+    /// When one midfielder is sent off,
+    /// Then the side's press keeps three quarters for his empty slot, and of that the cover a
+    /// side one short keeps, 1 / (1 + 0.7).
+    #[test]
+    fn a_midfielder_sent_off_costs_the_press_his_slot_and_the_sides_cover() {
+        let mut state = kick_off();
+        let full = state.effective_press(Side::Home);
+        state.test_send_off("h_m1");
+        let ratio = state.effective_press(Side::Home) / full;
+        assert!(
+            (ratio - 0.75 / 1.7).abs() < 1e-12,
+            "the press kept {ratio} of its strength"
+        );
     }
 }

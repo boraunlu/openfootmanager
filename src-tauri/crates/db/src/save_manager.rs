@@ -11,7 +11,8 @@ use ofm_core::game::Game;
 use ofm_core::generator;
 use ofm_core::player_identity;
 use ofm_core::player_rating::{
-    effective_rating_for_assignment, formation_slots, refresh_player_derived,
+    effective_rating_for_assignment, formation_row_lengths, formation_slots,
+    reconcile_wonderkid_trait, refresh_player_derived,
 };
 
 use crate::game_database::GameDatabase;
@@ -21,13 +22,265 @@ use crate::save_index::{SaveEntry, compute_checksum, save_entry_metadata_from_ga
 use crate::save_index_manager::SaveIndexManager;
 use crate::save_load_error::SaveLoadError;
 
+/// Read and upgrade game data using the same version gates and ordered repairs as the desktop.
+/// Hosts must persist the returned game when `needs_resave` is true, inside their own transaction.
+pub fn read_game_with_migrations(db: &GameDatabase, save_id: &str) -> Result<(Game, bool), String> {
+    read_game_with_policy(db, save_id, true)
+}
+/// AFM owns its fixed roster and calendar. Apply the same format gates, seed,
+/// contract, sent-ledger and money upgrades without desktop roster/calendar repairs.
+pub fn read_game_for_host(db: &GameDatabase, save_id: &str) -> Result<(Game, bool), String> {
+    read_game_with_policy(db, save_id, false)
+}
+fn read_game_with_policy(
+    db: &GameDatabase,
+    save_id: &str,
+    repair_world: bool,
+) -> Result<(Game, bool), String> {
+    let mut game = GamePersistenceReader::read_game(db)
+        .map_err(|_| crate::save_load_error::SaveLoadError::MissingData.i18n_key())?;
+    let mut needs_resave =
+        crate::repositories::competition_repo::needs_calendar_backfill(db.conn())?;
+
+    // Save-format gate: reject saves from a newer build whose format this
+    // build can't understand, and flag older saves so the migrations below
+    // are restamped at the current format on resave.
+    let meta = meta_repo::load_meta(db.conn())?;
+    let save_format_version = meta
+        .as_ref()
+        .map(|meta| meta.save_format_version)
+        .unwrap_or(meta_repo::CURRENT_SAVE_FORMAT_VERSION);
+    if save_format_version > meta_repo::CURRENT_SAVE_FORMAT_VERSION {
+        return Err(SaveLoadError::IncompatibleVersion {
+            save_version: save_format_version as i64,
+            supported: meta_repo::CURRENT_SAVE_FORMAT_VERSION as i64,
+        }
+        .i18n_key());
+    }
+    if save_format_version < meta_repo::CURRENT_SAVE_FORMAT_VERSION {
+        info!(
+            "[save_manager] upgrading save {} from format {} to {}",
+            save_id,
+            save_format_version,
+            meta_repo::CURRENT_SAVE_FORMAT_VERSION
+        );
+        if save_format_version < 4 {
+            let seeded = ofm_core::transfers::seed_opening_ai_loan_market(&mut game);
+            info!(
+                "[save_manager] seeded {} opening AI loan listings for save {}",
+                seeded, save_id
+            );
+        }
+        if save_format_version < 5 {
+            // Adopt the inbox of a save written before the sent-ledger, or
+            // the first advance re-announces everything still in it. Gated on
+            // the format version rather than on the ledger being empty: a
+            // career started from an existing save legitimately has an empty
+            // ledger and a populated `world_history`, and seeding that would
+            // suppress every World Cup the *previous* career had seen.
+            ofm_core::inbox::seed_ledger_from_save(&mut game);
+        }
+        if save_format_version < 7 {
+            // A save from before games had a seed. Derived from the save's own
+            // id rather than drawn, so the same old save is the same game
+            // every time it is opened; the resave below keeps it from then on.
+            game.seed = ofm_core::seed::seed_for_unseeded_save(save_id);
+        }
+        if save_format_version < 8 {
+            // A career already in progress keeps the World Cup draws it was promised; only
+            // a new game is drawn from its seed.
+            game.legacy_world_cup_draw = true;
+        }
+        needs_resave = true;
+    }
+    // A save that had a sent-ledger and lost it (its cell did not read: `read_game` loaded it
+    // empty and kept the cell). Left empty, the next advance would announce again everything it
+    // held, so it is rebuilt from the inbox, and saved now so later loads read the rebuilt one.
+    // A pre-v5 save was seeded above. Before the repairs below, which may send messages and
+    // are deduped by this ledger.
+    let ledger_lost = save_format_version >= 5
+        && meta.as_ref().is_some_and(|meta| {
+            crate::json_column::try_read::<std::collections::BTreeSet<String>>(
+                db.conn(),
+                crate::json_column::Cell::new("game_meta", "singleton", "emitted_events_json"),
+                &meta.emitted_events_json,
+            )
+            .is_none()
+        });
+    if ledger_lost {
+        log::warn!(
+            "[save_manager] the sent-ledger of save {save_id} did not read; rebuilt from its mail"
+        );
+        ofm_core::inbox::rebuild_lost_ledger(&mut game);
+        needs_resave = true;
+    }
+    // Retirees used to stay on the roster flagged retired (saves below format 9). Whatever the
+    // version, one found there is archived, so the roster only ever holds people who play;
+    // the resave deletes the old active rows.
+    if ofm_core::retirees::archive_legacy_retirees(&mut game) > 0 {
+        needs_resave = true;
+    }
+    let manager_count_before = game.managers.len();
+    let assigned_manager_count_before = game
+        .teams
+        .iter()
+        .filter(|team| team.manager_id.is_some())
+        .count();
+
+    ofm_core::ai_hiring::seed_ai_managers(&mut game);
+    if game.managers.len() != manager_count_before
+        || game
+            .teams
+            .iter()
+            .filter(|team| team.manager_id.is_some())
+            .count()
+            != assigned_manager_count_before
+    {
+        needs_resave = true;
+    }
+
+    if repair_world && canonicalize_game_starting_xi_ids(&mut game) {
+        needs_resave = true;
+    }
+
+    if repair_world && player_identity::upgrade_game_player_identities(&mut game) {
+        needs_resave = true;
+    }
+
+    if repair_world && ofm_core::football_identity::upgrade_game_football_identities(&mut game) {
+        needs_resave = true;
+    }
+
+    if ofm_core::finances::backfill_opening_balances(&mut game) {
+        needs_resave = true;
+    }
+
+    if save_format_version < 6 && ofm_core::finances::apply_weekly_unit_runway_floor(&mut game) {
+        needs_resave = true;
+    }
+
+    if !repair_world {
+        return Ok((game, needs_resave));
+    }
+
+    // Backfill OVR/potential for players from older saves that don't have them yet.
+    // Ages are reckoned on the game clock's date.
+    let today = game.clock.current_date.date_naive();
+    let backfill_count = game.players.iter().filter(|p| p.ovr == 0).count();
+    if backfill_count > 0 {
+        for player in game.players.iter_mut() {
+            if player.ovr == 0 {
+                refresh_player_derived(player, today);
+            }
+        }
+        info!(
+            "[save_manager] backfilled OVR/potential for {} players in save {}",
+            backfill_count, save_id
+        );
+        needs_resave = true;
+    }
+
+    // The wonderkid tag is a rule, not a stored fact: apply the current rule to every player,
+    // so a save written under an older one is judged by this one.
+    let retagged = game
+        .players
+        .iter_mut()
+        .map(|player| reconcile_wonderkid_trait(player, today))
+        .filter(|changed| *changed)
+        .count();
+    if retagged > 0 {
+        info!(
+            "[save_manager] re-judged the wonderkid tag for {} players in save {}",
+            retagged, save_id
+        );
+        needs_resave = true;
+    }
+
+    if generator::repair_opening_youth_academies(&mut game) {
+        info!(
+            "[save_manager] backfilled opening youth academy players for save {}",
+            save_id
+        );
+        needs_resave = true;
+    }
+
+    // A save from before the rollover day was kept would call every scout report current until
+    // its next season end; the day comes from its last league season instead. Once: the day is
+    // then saved.
+    if ofm_core::end_of_season::backfill_last_season_rollover(&mut game) {
+        info!("[save_manager] backfilled the last season rollover day for save {save_id}");
+        needs_resave = true;
+    }
+
+    // A save written before the squad floor was enforced can open with
+    // clubs already short of it. Before the stranded-fixture repair below:
+    // that one scores fixtures from the squads, so it reads them repaired.
+    if ofm_core::squad_floor::repair_squads_on_load(&mut game) {
+        info!("[save_manager] brought short squads up to the floor in save {save_id}");
+        needs_resave = true;
+    }
+
+    // LAST of the data backfills, and that ordering is load-bearing. The repair resolves a
+    // stranded fixture from club strength, which is the average stored `ovr` of the best XI — so
+    // running it before the OVR backfill above scores a pre-OVR save's clubs at zero, and the
+    // resave makes those results permanent. Every rating the scoreline reads must already be
+    // there, the youth academies included.
+    //
+    // Unconditional, not gated on the save format: "no fixture stays Scheduled in the past" is
+    // an invariant, not a one-time migration, so this also heals a future regression of the
+    // class #608 was. Idempotent, so a load that finds nothing does not resave.
+    let repaired_fixtures = ofm_core::catchup::repair_stranded_fixtures(&mut game);
+    if repaired_fixtures > 0 {
+        info!(
+            "[save_manager] repaired {} fixture(s) left scheduled in the past for save {}",
+            repaired_fixtures, save_id
+        );
+        needs_resave = true;
+    }
+
+    // After the stranded fixtures are resolved, so that what remains unplayed is the calendar
+    // from here on. Matches inside the rest window, or on an international window, move to the
+    // earliest legal day; each is recorded as postponed and the user is told once. Idempotent.
+    let repaired_calendar = ofm_core::calendar_repair::repair_loaded_calendar(&mut game);
+    if repaired_calendar > 0 {
+        info!(
+            "[save_manager] moved {} clashing fixture(s) for save {}",
+            repaired_calendar, save_id
+        );
+        needs_resave = true;
+    }
+
+    // After the rebuild of a lost sent-ledger above, the version seeding and every repair, so
+    // the notice is judged against the finished ledger. (Sent before the rebuild, it would be
+    // deduped the same way, since the rebuild adopts the inbox the notice is in; after is
+    // simply the order that needs no such argument.) Not a reason to resave: the next save
+    // keeps the notice, and a load that is never saved tells the player again, since they
+    // never kept it.
+    let kept_cells = crate::json_column::unreadable_cells(db.conn()).unwrap_or_else(|error| {
+        log::warn!("[save_manager] could not count the save's set-aside cells: {error}");
+        Vec::new()
+    });
+    ofm_core::save_notice::announce_set_aside_data(&mut game, kept_cells.len());
+
+    if league_repo::needs_cleanup(
+        db.conn(),
+        game.league.as_ref().map(|league| league.id.as_str()),
+    )? {
+        needs_resave = true;
+    }
+
+    Ok((game, needs_resave))
+}
+
 /// Manages save sessions: creating, loading, saving, deleting, and listing.
 pub struct SaveManager {
     saves_dir: PathBuf,
     save_index: SaveIndexManager,
 }
 
-const SAVE_MANAGER_UNAVAILABLE_ERROR: &str = "be.error.saveManagerUnavailable";
+/// The key the UI shows when the save-manager mutex is poisoned, or the saves
+/// directory cannot be created. One definition: the app crate re-exports it.
+pub const SAVE_MANAGER_UNAVAILABLE_ERROR: &str = "be.error.saveManagerUnavailable";
 const SAVE_DELETE_ERROR: &str = "be.error.saveDeleteFailed";
 
 fn backend_error_with_param(key: &str, param_name: &str, param_value: &str) -> String {
@@ -137,6 +390,19 @@ impl SaveManager {
     /// List all save entries.
     pub fn list_saves(&self) -> &[SaveEntry] {
         self.save_index.list_saves()
+    }
+
+    /// Where a save's database file lives, or `None` if no such save is indexed.
+    ///
+    /// Exists so the bug-report bundler can attach the active save without rebuilding
+    /// `saves_dir.join(entry.db_filename)` for itself. That join appears eight times in this file
+    /// and nowhere outside it, which is the property worth keeping.
+    pub fn save_db_path(&self, save_id: &str) -> Option<PathBuf> {
+        self.save_index
+            .list_saves()
+            .iter()
+            .find(|entry| entry.id == save_id)
+            .map(|entry| self.saves_dir.join(&entry.db_filename))
     }
 
     pub fn load_saves(&mut self) -> Result<Vec<SaveEntry>, String> {
@@ -460,123 +726,14 @@ impl SaveManager {
         // Classify load failures (corrupted vs incompatible version) so the UI
         // can explain why, rather than showing a single generic error.
         let db = GameDatabase::open_save(&db_path).map_err(|error| error.i18n_key())?;
-        let mut game = GamePersistenceReader::read_game(&db)
-            .map_err(|_| crate::save_load_error::SaveLoadError::MissingData.i18n_key())?;
-        let mut needs_resave = false;
-
-        // Save-format gate: reject saves from a newer build whose format this
-        // build can't understand, and flag older saves so the migrations below
-        // are restamped at the current format on resave.
-        let save_format_version = meta_repo::load_meta(db.conn())?
-            .map(|meta| meta.save_format_version)
-            .unwrap_or(meta_repo::CURRENT_SAVE_FORMAT_VERSION);
-        if save_format_version > meta_repo::CURRENT_SAVE_FORMAT_VERSION {
-            return Err(SaveLoadError::IncompatibleVersion {
-                save_version: save_format_version as i64,
-                supported: meta_repo::CURRENT_SAVE_FORMAT_VERSION as i64,
-            }
-            .i18n_key());
-        }
-        if save_format_version < meta_repo::CURRENT_SAVE_FORMAT_VERSION {
-            info!(
-                "[save_manager] upgrading save {} from format {} to {}",
-                save_id,
-                save_format_version,
-                meta_repo::CURRENT_SAVE_FORMAT_VERSION
-            );
-            if save_format_version < 4 {
-                let seeded = ofm_core::transfers::seed_opening_ai_loan_market(&mut game);
-                info!(
-                    "[save_manager] seeded {} opening AI loan listings for save {}",
-                    seeded, save_id
-                );
-            }
-            if save_format_version < 5 {
-                // Adopt the inbox of a save written before the sent-ledger, or
-                // the first advance re-announces everything still in it. Gated on
-                // the format version rather than on the ledger being empty: a
-                // career started from an existing save legitimately has an empty
-                // ledger and a populated `world_history`, and seeding that would
-                // suppress every World Cup the *previous* career had seen.
-                ofm_core::inbox::seed_ledger_from_save(&mut game);
-            }
-            needs_resave = true;
-        }
-        let manager_count_before = game.managers.len();
-        let assigned_manager_count_before = game
-            .teams
-            .iter()
-            .filter(|team| team.manager_id.is_some())
-            .count();
-
-        ofm_core::ai_hiring::seed_ai_managers(&mut game);
-        if game.managers.len() != manager_count_before
-            || game
-                .teams
-                .iter()
-                .filter(|team| team.manager_id.is_some())
-                .count()
-                != assigned_manager_count_before
-        {
-            needs_resave = true;
-        }
-
-        if canonicalize_game_starting_xi_ids(&mut game) {
-            needs_resave = true;
-        }
-
-        if player_identity::upgrade_game_player_identities(&mut game) {
-            needs_resave = true;
-        }
-
-        if ofm_core::football_identity::upgrade_game_football_identities(&mut game) {
-            needs_resave = true;
-        }
-
-        // Backfill OVR/potential for players from older saves that don't have them yet.
-        // We use the game clock year so age is accurate.
-        let current_year = game
-            .clock
-            .current_date
-            .format("%Y")
-            .to_string()
-            .parse::<u32>()
-            .unwrap_or(2026);
-        let backfill_count = game.players.iter().filter(|p| p.ovr == 0).count();
-        if backfill_count > 0 {
-            for player in game.players.iter_mut() {
-                if player.ovr == 0 {
-                    refresh_player_derived(player, current_year);
-                }
-            }
-            info!(
-                "[save_manager] backfilled OVR/potential for {} players in save {}",
-                backfill_count, save_id
-            );
-            needs_resave = true;
-        }
-
-        if generator::repair_opening_youth_academies(&mut game) {
-            info!(
-                "[save_manager] backfilled opening youth academy players for save {}",
-                save_id
-            );
-            needs_resave = true;
-        }
-
-        if league_repo::needs_cleanup(
-            db.conn(),
-            game.league.as_ref().map(|league| league.id.as_str()),
-        )? {
-            needs_resave = true;
-        }
-
+        let (mut game, needs_resave) = read_game_with_migrations(&db, save_id)?;
         drop(db);
 
         if needs_resave {
             snapshot_db_before_write(&db_path)?;
             let db = GameDatabase::open(&db_path)?;
             GamePersistenceWriter::write_game(&db, &game, save_id, &save_name)?;
+            game.cash_journal_dirty_ids.clear();
             drop(db);
 
             let checksum = compute_checksum(&db_path)?;
@@ -619,11 +776,16 @@ impl SaveManager {
     /// Create a new game by loading an existing save, stripping session data,
     /// and resetting the clock. Returns the loaded Game with clean session state.
     /// This does NOT create a new save — the caller should use `create_save` afterwards.
+    ///
+    /// The custom tactics library is kept (maintainer ruling on #883): it is the manager's own
+    /// toolkit, not something the old career was told.
     pub fn new_game_from_save(&mut self, source_save_id: &str) -> Result<Game, String> {
         let mut game = self.load_game(source_save_id)?;
 
         // Strip session-specific data
         game.messages.clear();
+        // The archive is inbox history too: a new career must not show the old career's mail.
+        game.archived_messages.clear();
         // The sent-ledger records what *this career* has been told, so it is
         // session state like the inbox it guards. Carried over, the new career
         // would silently never receive anything the old one already saw — its
@@ -633,7 +795,15 @@ impl SaveManager {
         game.news.clear();
         game.scouting_assignments.clear();
         game.youth_scouting_assignments.clear();
+        game.scouted_players.clear();
         game.board_objectives.clear();
+
+        // A new career is a new game: its World Cups are drawn from its own seed, whatever the
+        // save it began from did.
+        game.legacy_world_cup_draw = false;
+        // It keeps the save's tactics library and owns no browser one, so the old browser library
+        // is never copied into it.
+        game.legacy_tactics_imported = true;
 
         // Reset clock to start date
         game.clock.current_date = game.clock.start_date;
@@ -747,27 +917,6 @@ fn canonicalize_team_starting_xi_ids(
     changed
 }
 
-fn formation_row_lengths(formation: &str) -> Vec<usize> {
-    let parts: Vec<usize> = formation
-        .split('-')
-        .filter_map(|part| part.parse::<usize>().ok())
-        .collect();
-
-    match parts.as_slice() {
-        [defenders, midfielders, forwards] => vec![1, *defenders, *midfielders, *forwards],
-        [defenders, deep_midfielders, attacking_midfielders, forwards] => {
-            vec![
-                1,
-                *defenders,
-                *deep_midfielders,
-                *attacking_midfielders,
-                *forwards,
-            ]
-        }
-        _ => formation_row_lengths("4-4-2"),
-    }
-}
-
 fn is_mirrored_side_pair(left_position: &Position, right_position: &Position) -> bool {
     matches!(
         (left_position, right_position),
@@ -781,6 +930,7 @@ fn is_mirrored_side_pair(left_position: &Position, right_position: &Position) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repositories::competition_repo;
     use chrono::TimeZone;
     use domain::league::{Fixture, FixtureCompetition, FixtureStatus, League, StandingEntry};
     use domain::player::{Footedness, Player, PlayerAttributes, Position, SquadRole};
@@ -799,6 +949,44 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("db"))
             .count()
+    }
+
+    #[test]
+    fn save_db_path_points_at_the_file_for_that_save() {
+        // The bug-report bundler attaches whatever this returns, so resolving to the wrong save
+        // would attach a career the player did not choose.
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SaveManager::init(dir.path()).unwrap();
+        let save_id = sm.create_save(&sample_game(), "Career").unwrap();
+
+        let path = sm.save_db_path(&save_id).expect("a path for a known save");
+
+        assert_eq!(path.parent(), Some(dir.path()));
+        assert!(path.exists(), "{path:?}");
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("db"));
+    }
+
+    #[test]
+    fn save_db_path_is_none_for_an_id_that_is_not_indexed() {
+        // A stale id must resolve to nothing rather than to some other save's file.
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SaveManager::init(dir.path()).unwrap();
+        sm.create_save(&sample_game(), "Career").unwrap();
+
+        assert!(sm.save_db_path("not-a-real-save-id").is_none());
+    }
+
+    #[test]
+    fn save_db_path_distinguishes_two_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SaveManager::init(dir.path()).unwrap();
+        let first = sm.create_save(&sample_game(), "First").unwrap();
+        let second = sm.create_save(&sample_game(), "Second").unwrap();
+
+        assert_ne!(
+            sm.save_db_path(&first).unwrap(),
+            sm.save_db_path(&second).unwrap()
+        );
     }
 
     fn sample_game() -> Game {
@@ -949,7 +1137,7 @@ mod tests {
     fn sample_game_with_ai_loan_candidates() -> Game {
         let mut game = sample_game();
         game.players[0].team_id = Some("team-001".to_string());
-        game.players[0].contract_end = Some("2028-06-30".to_string());
+        game.players[0].stage_contract_end(Some("2028-06-30".to_string()));
         game.teams.push(Team::new(
             "team-002".to_string(),
             "Rivals FC".to_string(),
@@ -967,7 +1155,7 @@ mod tests {
         ] {
             let mut player = make_opening_repair_player(id, Position::Midfielder, date_of_birth);
             player.team_id = Some("team-002".to_string());
-            player.contract_end = Some("2028-06-30".to_string());
+            player.stage_contract_end(Some("2028-06-30".to_string()));
             game.players.push(player);
         }
 
@@ -1186,6 +1374,223 @@ mod tests {
         Game::new(clock, manager, vec![team], players, vec![], vec![])
     }
 
+    /// Given a second-season career saved before the rollover day was kept, whose league season
+    ///      finished on 22 May 2026
+    /// When the save is loaded
+    /// Then the day is taken from that season and written back to the file (read with plain SQL,
+    ///      not by loading again), so it is backfilled once, not on every load.
+    ///
+    /// A freshly created save trips other backfills that resave anyway, so the save is settled by
+    /// one load first and the day cleared behind `load_game`'s back: on the second load the
+    /// backfill's own resave flag is the only thing that can write it, which is what this pins.
+    #[test]
+    fn loading_an_old_career_backfills_its_rollover_day_and_persists_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game();
+        let clubs = ["team-001".to_string(), "team-002".to_string()];
+        game.competitions.push(domain::league::League::new(
+            "division-one".to_string(),
+            "Division One".to_string(),
+            2026,
+            &clubs,
+        ));
+        game.edition_archive
+            .push(domain::edition_archive::CompletedEdition {
+                competition_id: "division-one".to_string(),
+                season: 2025,
+                completed_on: "2026-05-22".to_string(),
+                champion_id: "team-002".to_string(),
+                participant_ids: clubs.to_vec(),
+                standings: vec![],
+                groups: vec![],
+                knockout_rounds: vec![],
+                fixtures: vec![],
+            });
+        game.last_season_rollover_on = None;
+        let save_id = sm.create_save(&game, "Career").unwrap();
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+        sm.load_game(&save_id).unwrap();
+        GameDatabase::open_save(&db_path)
+            .unwrap()
+            .conn()
+            .execute("UPDATE game_meta SET last_season_rollover_on = NULL", [])
+            .unwrap();
+
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(
+            loaded.last_season_rollover_on.as_deref(),
+            Some("2026-05-22")
+        );
+        let db = GameDatabase::open_save(&db_path).unwrap();
+        let stored: Option<String> = db
+            .conn()
+            .query_row("SELECT last_season_rollover_on FROM game_meta", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("2026-05-22"));
+    }
+
+    /// Given a saved career whose young prospect has an S-tier ceiling but no wonderkid tag, and
+    /// whose other young player carries the tag with a ceiling below the S tier,
+    /// When the save is loaded,
+    /// Then the rule is applied on load: the first gets the tag and the second loses it.
+    #[test]
+    fn loading_a_save_applies_the_wonderkid_rule() {
+        use chrono::Datelike;
+        use domain::player::PlayerTrait;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        let mut second = game.players[0].clone();
+        second.id = "p-002".to_string();
+        game.players.push(second);
+        let today = game.clock.current_date.date_naive();
+        let born = format!("{}-01-01", today.year() - 19);
+        let ids: Vec<String> = game.players.iter().take(2).map(|p| p.id.clone()).collect();
+        for (n, player) in game.players.iter_mut().take(2).enumerate() {
+            // Their identity is already upgraded, so loading leaves the ratings below as set.
+            ofm_core::player_identity::upgrade_player_identity(player, None);
+            player.date_of_birth = born.clone();
+            player.traits.retain(|t| *t != PlayerTrait::Wonderkid);
+            if n == 0 {
+                player.ovr = 65;
+                player.potential = 85;
+            } else {
+                player.ovr = 60;
+                player.potential = 75;
+                player.traits.push(PlayerTrait::Wonderkid);
+            }
+        }
+        let save_id = sm.create_save(&game, "Career").unwrap();
+
+        let loaded = SaveManager::init(&dir.path().join("saves"))
+            .unwrap()
+            .load_game(&save_id)
+            .unwrap();
+
+        let has_tag = |id: &str| {
+            loaded
+                .players
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .traits
+                .contains(&PlayerTrait::Wonderkid)
+        };
+        assert!(
+            has_tag(&ids[0]),
+            "the S-tier prospect was not tagged on load"
+        );
+        assert!(!has_tag(&ids[1]), "the stale tag was kept on load");
+    }
+
+    /// Given a career saved after each of three days, each day adding a match and an article
+    /// (and reading the previous one)
+    /// When a second manager, with no memory of those saves, loads the file
+    /// Then it holds exactly the matches and articles in memory, none twice and none missing.
+    #[test]
+    fn stats_and_news_saved_day_by_day_reload_exactly_as_they_were() {
+        use domain::news::{NewsArticle, NewsCategory};
+
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+
+        let mut game = sample_game();
+        let mut stats = StatsState::default();
+        let save_id = sm.create_save_with_stats(&game, &stats, "Career").unwrap();
+
+        let day_one = sample_stats_state();
+        for day in 0..3 {
+            let mut player = day_one.player_matches[0].clone();
+            player.fixture_id = format!("fix-{day}");
+            let mut team = day_one.team_matches[0].clone();
+            team.fixture_id = format!("fix-{day}");
+            stats.player_matches.push(player);
+            stats.team_matches.push(team);
+
+            if let Some(previous) = game.news.last_mut() {
+                previous.read = true;
+            }
+            game.news.push(NewsArticle::new(
+                format!("news-{day}"),
+                format!("Headline {day}"),
+                String::new(),
+                String::new(),
+                "2027-08-15".to_string(),
+                NewsCategory::MatchReport,
+            ));
+            sm.save_game_with_stats(&game, &stats, &save_id).unwrap();
+        }
+
+        let mut fresh = SaveManager::init(&saves_dir).unwrap();
+        let loaded_stats = fresh.load_stats_state(&save_id).unwrap();
+        let loaded = fresh.load_game(&save_id).unwrap();
+
+        let mut fixtures: Vec<_> = loaded_stats
+            .player_matches
+            .iter()
+            .map(|r| r.fixture_id.clone())
+            .collect();
+        fixtures.sort();
+        assert_eq!(fixtures, ["fix-0", "fix-1", "fix-2"]);
+        assert_eq!(loaded_stats.team_matches.len(), 3);
+
+        let mut articles: Vec<_> = loaded.news.iter().map(|a| (a.id.clone(), a.read)).collect();
+        articles.sort();
+        assert_eq!(
+            articles,
+            [
+                ("news-0".to_string(), true),
+                ("news-1".to_string(), true),
+                ("news-2".to_string(), false),
+            ]
+        );
+    }
+
+    /// Given a career whose stats alone are saved after each of two matches (the live-match path),
+    /// When a second manager, with no memory of those saves, loads the stats,
+    /// Then both matches are there, once each.
+    #[test]
+    fn stats_saved_on_their_own_reload_exactly_as_they_were() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let save_id = sm
+            .create_save_with_stats(&sample_game(), &StatsState::default(), "Career")
+            .unwrap();
+
+        let mut stats = StatsState::default();
+        for fixture in ["fix-0", "fix-1"] {
+            let mut player = sample_stats_state().player_matches[0].clone();
+            player.fixture_id = fixture.to_string();
+            let mut team = sample_stats_state().team_matches[0].clone();
+            team.fixture_id = fixture.to_string();
+            stats.player_matches.push(player);
+            stats.team_matches.push(team);
+            sm.save_stats_state(&stats, &save_id).unwrap();
+        }
+
+        let loaded = SaveManager::init(&saves_dir)
+            .unwrap()
+            .load_stats_state(&save_id)
+            .unwrap();
+
+        let mut fixtures: Vec<_> = loaded
+            .player_matches
+            .iter()
+            .map(|r| r.fixture_id.clone())
+            .collect();
+        fixtures.sort();
+        assert_eq!(fixtures, ["fix-0", "fix-1"]);
+        assert_eq!(loaded.team_matches.len(), 2);
+    }
+
     /// Removing someone from `game.staff` has to survive the save.
     ///
     /// Staff were written with `INSERT OR REPLACE` and read back whole, with no
@@ -1322,6 +1727,474 @@ mod tests {
         assert_eq!(saves.len(), 1);
         assert_eq!(saves[0].manager_name, "Jane Doe");
         assert_eq!(saves[0].team_name, "");
+    }
+
+    #[test]
+    fn loading_a_save_repairs_fixtures_stranded_in_the_past_and_persists_them() {
+        // The aftermath of #608: on any day the player watched their own match, every other
+        // competition's fixtures due that day were skipped. Nothing picks them up again, because
+        // every "due today" check matches on `date == today`. Existing saves therefore carry
+        // fixtures that can never be played, so the repair runs on load.
+        //
+        // Asserted at the persistence boundary and then re-read from the file, because a repair
+        // that fixes the in-memory `Game` and never reaches the database would pass a test that
+        // only inspects what `load_game` returned, and would re-run on every load for ever.
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+
+        let mut game = sample_game_with_league();
+        let stranded_date = {
+            let day_before = game.clock.current_date - chrono::Duration::days(7);
+            day_before.format("%Y-%m-%d").to_string()
+        };
+        // `sample_game_with_league` builds the legacy shape (mirror only), so promote it to the
+        // modern one first — this test is about a save written *after* competitions existed.
+        if game.competitions.is_empty() {
+            game.competitions = game.league.clone().into_iter().collect();
+        }
+        let competition = game
+            .competitions
+            .first_mut()
+            .expect("the league is now a competition");
+        competition.fixtures.push(Fixture {
+            postponement: None,
+            id: "stranded-1".to_string(),
+            competition_id: competition.id.clone(),
+            matchday: 1,
+            date: stranded_date,
+            home_team_id: "team-001".to_string(),
+            away_team_id: "team-002".to_string(),
+            competition: FixtureCompetition::League,
+            status: FixtureStatus::Scheduled,
+            result: None,
+        });
+        let save_id = sm.create_save(&game, "Stranded Career").unwrap();
+
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        let fixture = loaded
+            .competitions
+            .iter()
+            .flat_map(|competition| competition.fixtures.iter())
+            .find(|fixture| fixture.id == "stranded-1")
+            .expect("the stranded fixture survives the load");
+        assert_eq!(
+            fixture.status,
+            FixtureStatus::Completed,
+            "a fixture whose date has passed cannot become due again, so the load resolves it"
+        );
+        assert!(fixture.result.is_some(), "and it gets a scoreline");
+
+        // Read the database directly rather than calling `load_game` again. A second load would
+        // run the repair a second time and report the same answer whether or not the first one was
+        // ever written back — proving idempotence, not persistence.
+        //
+        // This test does not pin `needs_resave` on its own — other backfills in `load_game` set the
+        // flag for a freshly created save, so the resave happens with or without the repair's
+        // branch. That is isolated in
+        // `only_the_repairs_own_resave_flag_writes_a_late_stranded_fixture_back` below.
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+        let db = GameDatabase::open_save(&db_path).unwrap();
+        let from_disk = GamePersistenceReader::read_game(&db).unwrap();
+        let persisted = from_disk
+            .competitions
+            .iter()
+            .flat_map(|competition| competition.fixtures.iter())
+            .find(|fixture| fixture.id == "stranded-1")
+            .expect("the fixture is in the saved file");
+        assert_eq!(
+            persisted.status,
+            FixtureStatus::Completed,
+            "the repair was written back to the save, not recomputed on every load"
+        );
+        assert!(
+            persisted.result.is_some(),
+            "and the scoreline it chose is the one on disk"
+        );
+    }
+
+    /// Given a save whose unplayed matches clash (one club, two matches on consecutive days),
+    /// When it is loaded, Then the clash is repaired, the move is recorded as a postponement, and
+    /// the repair is on disk: it is not recomputed, or lost, on the next load.
+    #[test]
+    fn loading_a_save_repairs_clashing_matches_and_persists_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game_with_league();
+        if game.competitions.is_empty() {
+            game.competitions = game.league.clone().into_iter().collect();
+        }
+        let day = |offset: i64| {
+            (game.clock.current_date + chrono::Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        let (first_day, second_day) = (day(30), day(31));
+        let competition = game.competitions.first_mut().expect("a league");
+        for (id, date) in [("clash-1", first_day), ("clash-2", second_day)] {
+            competition.fixtures.push(Fixture {
+                postponement: None,
+                id: id.to_string(),
+                competition_id: competition.id.clone(),
+                matchday: 99,
+                date,
+                home_team_id: "team-001".to_string(),
+                away_team_id: "team-002".to_string(),
+                competition: FixtureCompetition::League,
+                status: FixtureStatus::Scheduled,
+                result: None,
+            });
+        }
+        let save_id = sm.create_save(&game, "Clashing Career").unwrap();
+
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        let dates = |game: &Game| -> Vec<(String, String, bool)> {
+            game.competitions
+                .iter()
+                .flat_map(|competition| competition.fixtures.iter())
+                .filter(|fixture| fixture.id.starts_with("clash-"))
+                .map(|fixture| {
+                    (
+                        fixture.id.clone(),
+                        fixture.date.clone(),
+                        fixture.postponement.is_some(),
+                    )
+                })
+                .collect()
+        };
+        let in_memory = dates(&loaded);
+        let gap = |rows: &[(String, String, bool)]| {
+            let parse = |date: &str| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
+            (parse(&rows[1].1) - parse(&rows[0].1)).num_days().abs()
+        };
+        assert!(gap(&in_memory) >= 3, "{in_memory:?}");
+        assert_eq!(
+            in_memory.iter().filter(|row| row.2).count(),
+            1,
+            "exactly one of the two moved, and is marked: {in_memory:?}"
+        );
+
+        // From the file itself, not a second load (which would repair again and prove nothing).
+        let db = GameDatabase::open_save(&saves_dir.join(format!("{save_id}.db"))).unwrap();
+        let from_disk = GamePersistenceReader::read_game(&db).unwrap();
+        assert_eq!(dates(&from_disk), in_memory);
+    }
+
+    /// Every attribute at `value`. `ofm_core` has the same helper for its own unit tests, but a
+    /// `#[cfg(test)]` module is not visible across a crate boundary, so it cannot be shared from
+    /// there. Reported under #589 with the thirteen in-crate copies (refactor slice 23.1); the fix
+    /// is a real constructor on `PlayerAttributes`, not a fourteenth private copy.
+    fn uniform_player_attributes(value: u8) -> PlayerAttributes {
+        PlayerAttributes {
+            pace: value,
+            stamina: value,
+            strength: value,
+            agility: value,
+            passing: value,
+            shooting: value,
+            tackling: value,
+            dribbling: value,
+            defending: value,
+            positioning: value,
+            vision: value,
+            decisions: value,
+            composure: value,
+            aggression: value,
+            teamwork: value,
+            leadership: value,
+            handling: value,
+            reflexes: value,
+            aerial: value,
+        }
+    }
+
+    /// **Given** a save written before OVR was stored — every player's `ovr` is 0, and the two clubs
+    /// are far apart on attributes — with fixtures stranded in the past,
+    /// **when** the save is loaded,
+    /// **then** those fixtures are resolved from the *backfilled* ratings, so the strong club
+    /// outscores the weak one decisively.
+    ///
+    /// The repair scores a fixture from club strength, which is the average stored `ovr` of the best
+    /// XI. Run it before the OVR backfill and every club in such a save is worth 0.0, the results are
+    /// rolled from that, and the resave makes them permanent.
+    ///
+    /// Why the assertion is a goal ratio over many fixtures rather than one scoreline:
+    /// `simulate_scoreline` reads only the *difference* between the two strengths, so all-zero is
+    /// indistinguishable from all-equal — the bug is invisible unless the clubs are genuinely
+    /// mismatched. With the ratings in place the gap clamps the weak side's expected goals to the 0.2
+    /// floor against roughly 2.5 for the strong side; at zero ratings both sit near 1.3 and 1.1. Over
+    /// twenty fixtures those two worlds are dozens of goals apart, so a 3x ratio separates them by
+    /// far more than the sampling noise.
+    #[test]
+    fn stranded_fixtures_are_scored_from_backfilled_ratings_not_from_zero() {
+        const FIXTURES: usize = 20;
+
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+
+        let mut game = sample_game_with_league();
+        if game.competitions.is_empty() {
+            game.competitions = game.league.clone().into_iter().collect();
+        }
+
+        // Squads whose *attributes* differ sharply, with `ovr` left at 0 exactly as a pre-OVR save
+        // stored it. `Player::new` leaves it at 0, so this is the real shape, not an imitation.
+        game.players.clear();
+        for (team_id, prefix, attribute) in [("team-001", "str", 95u8), ("team-002", "wk", 25u8)] {
+            for index in 0..11 {
+                let position = if index == 0 {
+                    Position::Goalkeeper
+                } else if index < 5 {
+                    Position::Defender
+                } else if index < 9 {
+                    Position::Midfielder
+                } else {
+                    Position::Forward
+                };
+                let mut player = Player::new(
+                    format!("{prefix}-{index}"),
+                    format!("{prefix}{index}"),
+                    format!("Player {prefix}{index}"),
+                    "1998-01-01".to_string(),
+                    "GB".to_string(),
+                    position,
+                    uniform_player_attributes(attribute),
+                );
+                player.team_id = Some(team_id.to_string());
+                assert_eq!(
+                    player.ovr, 0,
+                    "the premise: a pre-OVR save stores no rating"
+                );
+                game.players.push(player);
+            }
+        }
+
+        let competition = game.competitions.first_mut().unwrap();
+        competition.participant_ids = vec!["team-001".to_string(), "team-002".to_string()];
+        competition.fixtures.clear();
+        competition.standings = vec![
+            StandingEntry::new("team-001".to_string()),
+            StandingEntry::new("team-002".to_string()),
+        ];
+        for index in 0..FIXTURES {
+            let date = game.clock.current_date - chrono::Duration::days(60 - index as i64);
+            competition.fixtures.push(Fixture {
+                postponement: None,
+                id: format!("stranded-{index}"),
+                competition_id: competition.id.clone(),
+                matchday: index as u32 + 1,
+                date: date.format("%Y-%m-%d").to_string(),
+                home_team_id: "team-001".to_string(),
+                away_team_id: "team-002".to_string(),
+                competition: FixtureCompetition::League,
+                status: FixtureStatus::Scheduled,
+                result: None,
+            });
+        }
+
+        let save_id = sm.create_save(&game, "Pre-OVR Career").unwrap();
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        // The premise as an assertion: the backfill really did open a gap between the two clubs. If
+        // it did not, the goal comparison below would prove nothing either way.
+        let rating_of = |team: &str| -> f64 {
+            let ratings: Vec<u32> = loaded
+                .players
+                .iter()
+                .filter(|player| player.team_id.as_deref() == Some(team))
+                .map(|player| u32::from(player.ovr))
+                .collect();
+            f64::from(ratings.iter().sum::<u32>()) / ratings.len() as f64
+        };
+        let strong = rating_of("team-001");
+        let weak = rating_of("team-002");
+        assert!(
+            strong > weak + 20.0,
+            "the backfill should leave the clubs far apart, else this test proves nothing: \
+             strong={strong}, weak={weak}"
+        );
+
+        let played: Vec<&Fixture> = loaded
+            .competitions
+            .iter()
+            .flat_map(|competition| competition.fixtures.iter())
+            .filter(|fixture| fixture.id.starts_with("stranded-"))
+            .collect();
+        assert_eq!(
+            played.len(),
+            FIXTURES,
+            "every stranded fixture is still there"
+        );
+        assert!(
+            played
+                .iter()
+                .all(|fixture| fixture.status == FixtureStatus::Completed),
+            "and every one was repaired"
+        );
+
+        let (home_goals, away_goals) = played.iter().fold((0u32, 0u32), |(home, away), fixture| {
+            let result = fixture
+                .result
+                .as_ref()
+                .expect("a repaired fixture has a result");
+            (
+                home + u32::from(result.home_goals),
+                away + u32::from(result.away_goals),
+            )
+        });
+        assert!(
+            home_goals >= 3 * away_goals,
+            "the strong club should dominate; level scoring means both were rated 0 when the \
+             repair ran, i.e. it ran before the OVR backfill. home={home_goals}, away={away_goals}"
+        );
+    }
+
+    #[test]
+    fn only_the_repairs_own_resave_flag_writes_a_late_stranded_fixture_back() {
+        // The test above proves the repair reaches disk, but not that the repair is what put it
+        // there: a freshly created save trips several other backfills, any one of which sets
+        // `needs_resave`, so the write happens regardless.
+        //
+        // So let the save settle first. One load runs every backfill and resaves; a second load has
+        // nothing left to do. Only *then* write a stranded fixture straight into the database,
+        // behind `load_game`'s back. Now the repair's own flag is the only thing that can persist
+        // it, which is what dropping that flag has to break.
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+
+        let mut game = sample_game_with_league();
+        if game.competitions.is_empty() {
+            game.competitions = game.league.clone().into_iter().collect();
+        }
+        let save_id = sm.create_save(&game, "Settled Career").unwrap();
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+
+        // Settle it: whatever the other backfills want to do, they do now.
+        sm.load_game(&save_id).unwrap();
+
+        // Injected after settling, so no other backfill has a reason to fire on the next load.
+        let stranded_date = (game.clock.current_date - chrono::Duration::days(7))
+            .format("%Y-%m-%d")
+            .to_string();
+        {
+            let db = GameDatabase::open_save(&db_path).unwrap();
+            let mut competitions = competition_repo::load_competitions(db.conn()).unwrap();
+            let competition = competitions
+                .first_mut()
+                .expect("the settled save has a competition");
+            competition.fixtures.push(Fixture {
+                postponement: None,
+                id: "late-stranded".to_string(),
+                competition_id: competition.id.clone(),
+                matchday: 2,
+                date: stranded_date,
+                home_team_id: "team-001".to_string(),
+                away_team_id: "team-002".to_string(),
+                competition: FixtureCompetition::League,
+                status: FixtureStatus::Scheduled,
+                result: None,
+            });
+            competition_repo::replace_competitions(db.conn(), &competitions).unwrap();
+        }
+
+        // Confirm the premise: the fixture really is stranded on disk before the load.
+        {
+            let db = GameDatabase::open_save(&db_path).unwrap();
+            let before = competition_repo::load_competitions(db.conn()).unwrap();
+            let injected = before
+                .iter()
+                .flat_map(|competition| competition.fixtures.iter())
+                .find(|fixture| fixture.id == "late-stranded")
+                .expect("the injected fixture is in the file");
+            assert_eq!(
+                injected.status,
+                FixtureStatus::Scheduled,
+                "the premise: nothing has played it yet"
+            );
+        }
+
+        sm.load_game(&save_id).unwrap();
+
+        let db = GameDatabase::open_save(&db_path).unwrap();
+        let from_disk = competition_repo::load_competitions(db.conn()).unwrap();
+        let persisted = from_disk
+            .iter()
+            .flat_map(|competition| competition.fixtures.iter())
+            .find(|fixture| fixture.id == "late-stranded")
+            .expect("the fixture is still in the saved file");
+        assert_eq!(
+            persisted.status,
+            FixtureStatus::Completed,
+            "the repair's own resave flag is what writes it back — nothing else had a reason to"
+        );
+        assert!(
+            persisted.result.is_some(),
+            "and the scoreline reached the file with it"
+        );
+    }
+
+    #[test]
+    fn only_the_calendar_repairs_own_resave_flag_writes_a_late_clash_back() {
+        // As above, for the calendar: let the save settle, inject a clash straight into the
+        // database, and let the repair's own flag be the only thing that can persist the move.
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game_with_league();
+        if game.competitions.is_empty() {
+            game.competitions = game.league.clone().into_iter().collect();
+        }
+        let save_id = sm.create_save(&game, "Settled Clash Career").unwrap();
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+        sm.load_game(&save_id).unwrap();
+
+        let day = |offset: i64| {
+            (game.clock.current_date + chrono::Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        {
+            let db = GameDatabase::open_save(&db_path).unwrap();
+            let mut competitions = competition_repo::load_competitions(db.conn()).unwrap();
+            let competition = competitions.first_mut().expect("a settled competition");
+            for (id, date) in [("late-clash-1", day(40)), ("late-clash-2", day(41))] {
+                competition.fixtures.push(Fixture {
+                    postponement: None,
+                    id: id.to_string(),
+                    competition_id: competition.id.clone(),
+                    matchday: 98,
+                    date,
+                    home_team_id: "team-001".to_string(),
+                    away_team_id: "team-002".to_string(),
+                    competition: FixtureCompetition::League,
+                    status: FixtureStatus::Scheduled,
+                    result: None,
+                });
+            }
+            competition_repo::replace_competitions(db.conn(), &competitions).unwrap();
+        }
+
+        sm.load_game(&save_id).unwrap();
+
+        let db = GameDatabase::open_save(&db_path).unwrap();
+        let from_disk = competition_repo::load_competitions(db.conn()).unwrap();
+        let persisted: Vec<_> = from_disk
+            .iter()
+            .flat_map(|competition| competition.fixtures.iter())
+            .filter(|fixture| fixture.id.starts_with("late-clash-"))
+            .collect();
+        assert_eq!(persisted.len(), 2);
+        assert!(
+            persisted
+                .iter()
+                .any(|fixture| fixture.postponement.is_some()),
+            "the repair's own resave flag is what writes the move back"
+        );
     }
 
     #[test]
@@ -1520,7 +2393,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_and_load_game_preserves_retired_player_state() {
+    fn test_create_and_load_game_archives_a_retired_player() {
         let dir = tempfile::tempdir().unwrap();
         let saves_dir = dir.path().join("saves");
 
@@ -1532,8 +2405,11 @@ mod tests {
         let save_id = sm.create_save(&game, "Retired Career").unwrap();
         let loaded = sm.load_game(&save_id).unwrap();
 
-        assert!(loaded.players[0].retired);
-        assert_eq!(loaded.players[0].team_id, None);
+        assert!(loaded.players.is_empty(), "a retiree is not on the roster");
+        assert_eq!(loaded.retired_players.len(), 1);
+        let retired = loaded.retired_players[0].to_player();
+        assert!(retired.retired);
+        assert_eq!(retired.team_id, None);
     }
 
     #[test]
@@ -1555,7 +2431,9 @@ mod tests {
 
         assert_eq!(loaded.manager.nationality, "ENG");
         assert_eq!(loaded.manager.football_nation, "ENG");
-        assert_eq!(loaded.manager.birth_country, None);
+        // Derived from the nationality this load resolved, as the next load used to derive it:
+        // the settled value, reached in one load.
+        assert_eq!(loaded.manager.birth_country.as_deref(), Some("ENG"));
         assert_eq!(loaded.teams[0].football_nation, "ENG");
         assert_eq!(loaded.players[0].football_nation, "GB");
         assert_eq!(loaded.players[0].birth_country, None);
@@ -1635,6 +2513,680 @@ mod tests {
         assert!(loaded.emitted_events.contains("world_cup_champion_2030"));
     }
 
+    /// Given a save written before identities were upgraded: a "British" manager at a "GB" club,
+    ///       neither with a football nation or birth country yet
+    /// When it is loaded, and then loaded again
+    /// Then the first load resolves the manager to "ENG" through his club, birth country included,
+    ///      and the second writes nothing: one load settles it, not one load per field
+    #[test]
+    fn one_load_settles_a_legacy_gb_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game();
+        // `Game::new` upgrades identities itself, so the legacy fields are set back after it, as a
+        // save from before the upgrade holds them.
+        game.manager.nationality = "British".to_string();
+        game.manager.football_nation.clear();
+        game.manager.birth_country = None;
+        game.teams[0].football_nation.clear();
+        let save_id = sm.create_save(&game, "Legacy GB").unwrap();
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+
+        let first = sm.load_game(&save_id).unwrap();
+        let settled = compute_checksum(&db_path).unwrap();
+        sm.load_game(&save_id).unwrap();
+
+        assert_eq!(first.manager.nationality, "ENG");
+        assert_eq!(first.manager.birth_country.as_deref(), Some("ENG"));
+        assert_eq!(
+            compute_checksum(&db_path).unwrap(),
+            settled,
+            "the second load wrote the save again"
+        );
+    }
+
+    /// Given a current-format save whose inbox holds an announcement, and whose sent-ledger cell
+    ///       no longer parses
+    /// When it is loaded, and the day's generators send that announcement again
+    /// Then it is not sent twice: the ledger was rebuilt from the inbox, and its cell kept
+    #[test]
+    fn an_unreadable_ledger_is_rebuilt_so_nothing_is_announced_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game();
+        // A save that settles in one load, so the lost ledger can be the only reason the load
+        // under test writes: identities already in their current form (the sample's legacy "GB"
+        // takes several loads to settle), and the manager between jobs (the warning about the
+        // user's short club keeps its state in the ledger too).
+        game.manager.team_id = None;
+        for player in &mut game.players {
+            player.nationality = "ENG".to_string();
+            player.football_nation = "ENG".to_string();
+            player.birth_country = Some("ENG".to_string());
+        }
+        for team in &mut game.teams {
+            team.football_nation = "ENG".to_string();
+        }
+        let announcement = || {
+            domain::message::InboxMessage::new(
+                "promotion_2032".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                "2032-05-30".to_string(),
+            )
+        };
+        assert!(ofm_core::inbox::emit(&mut game, announcement()));
+        let save_id = sm.create_save(&game, "Lost Ledger").unwrap();
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+        // One load first, so the save's one-time repairs are done and saved; then the precondition:
+        // a plain reload writes nothing.
+        sm.load_game(&save_id).unwrap();
+        let settled = compute_checksum(&db_path).unwrap();
+        sm.load_game(&save_id).unwrap();
+        assert_eq!(
+            compute_checksum(&db_path).unwrap(),
+            settled,
+            "a plain reload of the settled save writes nothing"
+        );
+        {
+            let db = GameDatabase::open(&db_path).unwrap();
+            let meta = meta_repo::load_meta(db.conn()).unwrap().unwrap();
+            assert!(meta.save_format_version >= 5, "a save that has a ledger");
+            db.conn()
+                .execute("UPDATE game_meta SET emitted_events_json = '[\"promo'", [])
+                .unwrap();
+        }
+
+        let mut loaded = sm.load_game(&save_id).unwrap();
+        let sent_again = ofm_core::inbox::emit(&mut loaded, announcement());
+
+        assert!(!sent_again, "the announcement went out a second time");
+        let stored = meta_repo::load_meta(GameDatabase::open(&db_path).unwrap().conn())
+            .unwrap()
+            .unwrap()
+            .emitted_events_json;
+        let rebuilt: std::collections::BTreeSet<String> = serde_json::from_str(&stored)
+            .expect("the load saved the rebuilt ledger, so a fresh reader reads it");
+        assert!(rebuilt.contains("promotion_2032"), "{rebuilt:?}");
+        let copies = loaded
+            .messages
+            .iter()
+            .filter(|message| message.id == "promotion_2032")
+            .count();
+        assert_eq!(copies, 1);
+        let db = GameDatabase::open(&db_path).unwrap();
+        let kept = crate::json_column::unreadable_cells(db.conn()).unwrap();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].column, "emitted_events_json");
+    }
+
+    /// Given a current-format save whose sent-ledger reads, and whose inbox holds a message the
+    ///       ledger does not (not every message is sent through it)
+    /// When it is loaded
+    /// Then the ledger is left as stored: only a ledger that was lost is rebuilt
+    #[test]
+    fn a_ledger_that_reads_is_not_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game();
+        game.messages.push(domain::message::InboxMessage::new(
+            "unledgered_note".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "2032-05-30".to_string(),
+        ));
+        let save_id = sm.create_save(&game, "Ledger Reads").unwrap();
+
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        assert!(
+            !loaded.emitted_events.contains("unledgered_note"),
+            "{:?}",
+            loaded.emitted_events
+        );
+    }
+
+    /// The set-aside-data notices in a loaded game.
+    fn set_aside_notices(game: &Game) -> usize {
+        game.messages
+            .iter()
+            .filter(|message| {
+                message.subject_key.as_deref() == Some("be.msg.savedDataSetAside.subject")
+            })
+            .count()
+    }
+
+    /// A save on disk, its id and its file.
+    fn saved(game: &Game) -> (tempfile::TempDir, SaveManager, String, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let save_id = sm.create_save(game, "Damaged").unwrap();
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+        (dir, sm, save_id, db_path)
+    }
+
+    fn corrupt(db_path: &std::path::Path, sql: &str) {
+        GameDatabase::open(db_path)
+            .unwrap()
+            .conn()
+            .execute(sql, [])
+            .unwrap();
+    }
+
+    /// Given a save whose player career no longer parses
+    /// When it is loaded, saved, and loaded again
+    /// Then the first load tells the user once, and the second, of a save that kept the notice,
+    ///      does not
+    #[test]
+    fn a_load_that_sets_data_aside_tells_the_user_once() {
+        let (_dir, mut sm, save_id, db_path) = saved(&sample_game());
+        corrupt(&db_path, "UPDATE players SET career = '[oops'");
+
+        let first = sm.load_game(&save_id).unwrap();
+        assert_eq!(set_aside_notices(&first), 1);
+        sm.save_game(&first, &save_id).unwrap();
+        let second = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(
+            set_aside_notices(&second),
+            1,
+            "the same notice, not a new one"
+        );
+    }
+
+    /// Given a save with nothing unreadable
+    /// When it is loaded
+    /// Then no notice is sent
+    #[test]
+    fn a_clean_load_tells_the_user_nothing() {
+        let (_dir, mut sm, save_id, _db_path) = saved(&sample_game());
+
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(set_aside_notices(&loaded), 0);
+    }
+
+    /// Given a save that set a cell aside and kept the notice, and later a second cell that no
+    ///       longer parses
+    /// When it is loaded again
+    /// Then one more notice is sent: a new loss is told
+    #[test]
+    fn a_later_loss_is_told_again() {
+        let (_dir, mut sm, save_id, db_path) = saved(&sample_game());
+        corrupt(&db_path, "UPDATE players SET career = '[oops'");
+        let first = sm.load_game(&save_id).unwrap();
+        sm.save_game(&first, &save_id).unwrap();
+        corrupt(&db_path, "UPDATE teams SET form = '[oops'");
+
+        let second = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(set_aside_notices(&second), 2);
+    }
+
+    /// Given a save whose sent-ledger itself no longer parses
+    /// When it is loaded, saved, and loaded again
+    /// Then the first load tells the user once (after the ledger was rebuilt), and the next none
+    #[test]
+    fn a_lost_ledger_is_told_once_too() {
+        let (_dir, mut sm, save_id, db_path) = saved(&sample_game());
+        corrupt(
+            &db_path,
+            "UPDATE game_meta SET emitted_events_json = '[oops'",
+        );
+
+        let first = sm.load_game(&save_id).unwrap();
+        assert_eq!(set_aside_notices(&first), 1);
+        sm.save_game(&first, &save_id).unwrap();
+        let second = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(set_aside_notices(&second), 1);
+    }
+
+    /// Given a save that set a cell aside, loaded and then left without an explicit save
+    /// When it is loaded again
+    /// Then it shows one notice, never two: either the load's own repair resave kept the first,
+    ///      or it was never kept and is told again
+    #[test]
+    fn a_reload_without_saving_still_shows_one_notice() {
+        let (_dir, mut sm, save_id, db_path) = saved(&sample_game());
+        corrupt(&db_path, "UPDATE players SET career = '[oops'");
+        sm.load_game(&save_id).unwrap();
+
+        let again = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(set_aside_notices(&again), 1);
+    }
+
+    /// Given a save written before games had a seed,
+    /// When it is loaded, twice,
+    /// Then it has a seed — the same one both times, derived from the save, so
+    ///      an old career replays the same days however often it is opened.
+    #[test]
+    fn loading_a_pre_v7_save_gives_it_one_stable_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game();
+        game.seed = 0;
+        let save_id = sm.create_save(&game, "Pre Seed").unwrap();
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+
+        {
+            let db = GameDatabase::open(&db_path).unwrap();
+            let mut meta = meta_repo::load_meta(db.conn()).unwrap().unwrap();
+            meta.save_format_version = 6;
+            meta_repo::upsert_meta(db.conn(), &meta).unwrap();
+        }
+
+        let first = sm.load_game(&save_id).unwrap();
+        let second = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(first.seed, ofm_core::seed::seed_for_unseeded_save(&save_id));
+        assert_ne!(first.seed, 0);
+        assert_eq!(second.seed, first.seed);
+
+        // And it was written back: the derivation is deterministic, so the two loads
+        // above agree whether or not anything was stored. Only the file can say the
+        // seed is now a stored one rather than a recomputed one.
+        let db = GameDatabase::open(&db_path).unwrap();
+        let meta = meta_repo::load_meta(db.conn()).unwrap().unwrap();
+        assert_eq!(meta.seed as u64, first.seed);
+        assert_eq!(
+            meta.save_format_version,
+            meta_repo::CURRENT_SAVE_FORMAT_VERSION
+        );
+    }
+
+    /// Twelve national teams with a friendly each today, named so that the order a save reloads
+    /// them in (by name) is not the order they were made in.
+    fn game_with_a_window_today() -> Game {
+        let mut game = sample_game();
+        game.clock.current_date = Utc.with_ymd_and_hms(2026, 9, 9, 0, 0, 0).unwrap();
+        let today = "2026-09-09".to_string();
+        let names = [
+            "Zulu", "Alpha", "Yankee", "Bravo", "Xray", "Charlie", "Whiskey", "Delta", "Victor",
+            "Echo", "Uniform", "Foxtrot",
+        ];
+        let mut teams: Vec<domain::national_team::NationalTeam> = names
+            .iter()
+            .enumerate()
+            .map(|(n, name)| {
+                domain::national_team::NationalTeam::new(
+                    format!("nt-{n}"),
+                    (*name).to_string(),
+                    format!("C{n}"),
+                    None,
+                )
+            })
+            .collect();
+        for pair in 0..6 {
+            let (home, away) = (format!("nt-{}", pair * 2), format!("nt-{}", pair * 2 + 1));
+            teams[pair * 2].fixtures.push(domain::league::Fixture {
+                postponement: None,
+                id: format!("ntf-{pair}"),
+                competition_id: "international-friendlies".to_string(),
+                matchday: 1,
+                date: today.clone(),
+                home_team_id: home,
+                away_team_id: away,
+                competition: domain::league::FixtureCompetition::InternationalNation,
+                status: domain::league::FixtureStatus::Scheduled,
+                result: None,
+            });
+        }
+        game.national_teams = teams;
+        game
+    }
+
+    fn friendly_scores(game: &Game) -> std::collections::BTreeMap<String, (u8, u8)> {
+        game.national_teams
+            .iter()
+            .flat_map(|team| team.fixtures.iter())
+            .filter_map(|fixture| {
+                let result = fixture.result.as_ref()?;
+                Some((
+                    format!("{}-{}", fixture.home_team_id, fixture.away_team_id),
+                    (result.home_goals, result.away_goals),
+                ))
+            })
+            .collect()
+    }
+
+    /// Given national-team friendlies due today,
+    /// When the game is saved and reloaded before the day is played — the .db hands the national
+    ///      teams back in name order, not the order they were made in —
+    /// Then the day plays out as it would have without the reload: each fixture has a stream of
+    ///      its own, so no fixture depends on how many were played before it.
+    #[test]
+    fn a_reload_before_a_national_window_does_not_change_its_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = game_with_a_window_today();
+        game.seed = 11;
+        let save_id = sm.create_save(&game, "Window").unwrap();
+        let mut reloaded = sm.load_game(&save_id).unwrap();
+        assert_ne!(
+            game.national_teams
+                .iter()
+                .map(|t| t.id.clone())
+                .collect::<Vec<_>>(),
+            reloaded
+                .national_teams
+                .iter()
+                .map(|t| t.id.clone())
+                .collect::<Vec<_>>(),
+            "the fixture must reorder the teams or this proves nothing"
+        );
+
+        ofm_core::turn::process_day(&mut game);
+        ofm_core::turn::process_day(&mut reloaded);
+
+        let scores = friendly_scores(&game);
+        assert_eq!(scores.len(), 6, "the window was played");
+        assert!(
+            scores
+                .values()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1,
+            "the six fixtures were not all settled by one stream"
+        );
+        assert_eq!(scores, friendly_scores(&reloaded));
+    }
+
+    /// Given a save written before World Cups were drawn from the game's seed,
+    /// When it is loaded, twice,
+    /// Then it is marked to keep drawing them the old way, and the mark is in the file:
+    ///      the career in progress keeps the field and groups it was promised.
+    #[test]
+    fn loading_a_pre_v8_save_keeps_its_old_world_cup_draw() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let save_id = sm
+            .create_save(&sample_game(), "Pre World Cup Seed")
+            .unwrap();
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+        {
+            let db = GameDatabase::open(&db_path).unwrap();
+            let mut meta = meta_repo::load_meta(db.conn()).unwrap().unwrap();
+            meta.save_format_version = 7;
+            meta_repo::upsert_meta(db.conn(), &meta).unwrap();
+        }
+
+        let first = sm.load_game(&save_id).unwrap();
+        let second = sm.load_game(&save_id).unwrap();
+
+        assert!(first.legacy_world_cup_draw);
+        assert!(second.legacy_world_cup_draw);
+        let db = GameDatabase::open(&db_path).unwrap();
+        let meta = meta_repo::load_meta(db.conn()).unwrap().unwrap();
+        assert!(meta.legacy_world_cup_draw, "the mark was written back");
+        assert_eq!(
+            meta.save_format_version,
+            meta_repo::CURRENT_SAVE_FORMAT_VERSION
+        );
+    }
+
+    /// Twelve dormant leagues, each with one fixture today, held in an order that is not the
+    /// order the .db hands them back in (priority, season descending, then name).
+    fn game_with_dormant_leagues_today() -> Game {
+        let mut game = sample_game();
+        // Not an international-window date (9 September is one): a loaded save moves a match off
+        // a window, and this test is about the reload not changing what is played.
+        game.clock.current_date = Utc.with_ymd_and_hms(2026, 9, 16, 0, 0, 0).unwrap();
+        // No players: a free agent in the save would be signed by a short squad on load, and the
+        // reloaded game's clubs would no longer be the ones it is compared with.
+        game.players.clear();
+        let names = [
+            "Zulu", "Alpha", "Yankee", "Bravo", "Xray", "Charlie", "Whiskey", "Delta", "Victor",
+            "Echo", "Uniform", "Foxtrot",
+        ];
+        game.competitions.clear();
+        for (n, name) in names.iter().enumerate() {
+            let (home, away) = (format!("dh-{n}"), format!("da-{n}"));
+            for id in [&home, &away] {
+                game.teams.push(Team::new(
+                    id.clone(),
+                    format!("{id} FC"),
+                    id.to_uppercase(),
+                    "GB".to_string(),
+                    "Town".to_string(),
+                    "Ground".to_string(),
+                    20_000,
+                ));
+            }
+            let mut league = domain::league::League::new(
+                format!("dormant-{n}"),
+                (*name).to_string(),
+                2026,
+                &[home.clone(), away.clone()],
+            );
+            league.fixtures.push(domain::league::Fixture {
+                postponement: None,
+                id: format!("df-{n}"),
+                competition_id: format!("dormant-{n}"),
+                matchday: 1,
+                date: "2026-09-16".to_string(),
+                home_team_id: home,
+                away_team_id: away,
+                competition: domain::league::FixtureCompetition::League,
+                status: domain::league::FixtureStatus::Scheduled,
+                result: None,
+            });
+            game.competitions.push(league);
+        }
+        // With no scope set every competition is simulated in full. One active competition with
+        // nothing to play today puts the twelve above outside it, which is what makes them dormant.
+        game.competitions.insert(
+            0,
+            domain::league::League::new(
+                "the-active-one".to_string(),
+                "Mike".to_string(),
+                2026,
+                &["team-001".to_string()],
+            ),
+        );
+        game.active_competition_ids = vec!["the-active-one".to_string()];
+        // The legacy mirror a save keeps of the user's league: a reload rebuilds it from the
+        // competitions, so the game it is compared with must start with the same one.
+        game.sync_legacy_league();
+        game
+    }
+
+    fn dormant_scores(game: &Game) -> std::collections::BTreeMap<String, (u8, u8)> {
+        game.competitions
+            .iter()
+            .filter(|competition| competition.id.starts_with("dormant-"))
+            .flat_map(|competition| competition.fixtures.iter())
+            .filter_map(|fixture| {
+                let result = fixture.result.as_ref()?;
+                Some((
+                    format!("{}-{}", fixture.home_team_id, fixture.away_team_id),
+                    (result.home_goals, result.away_goals),
+                ))
+            })
+            .collect()
+    }
+
+    /// Given dormant leagues with a fixture each today,
+    /// When the game is saved and reloaded before the day is played — the .db hands competitions
+    ///      back ordered by priority, season and name, not as they were made —
+    /// Then the day plays out as it would have without the reload: each fixture has a stream of
+    ///      its own, so none depends on how many were settled before it.
+    #[test]
+    fn a_reload_before_a_dormant_matchday_does_not_change_its_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = game_with_dormant_leagues_today();
+        game.seed = 11;
+        let save_id = sm.create_save(&game, "Dormant").unwrap();
+        let mut reloaded = sm.load_game(&save_id).unwrap();
+        let order = |g: &Game| {
+            g.competitions
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(
+            order(&game),
+            order(&reloaded),
+            "the reload must reorder the competitions or this proves nothing"
+        );
+
+        game.league = None;
+        reloaded.league = None;
+        ofm_core::turn::process_day(&mut game);
+        ofm_core::turn::process_day(&mut reloaded);
+
+        let scores = dormant_scores(&game);
+        assert_eq!(scores.len(), 12, "every dormant fixture was settled");
+        // The positive control: the twelve fixtures were not all settled by one stream, so
+        // equal results after a reload mean something.
+        assert!(
+            scores
+                .values()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1,
+            "all twelve fixtures ended alike"
+        );
+        assert_eq!(scores, dormant_scores(&reloaded));
+    }
+
+    /// Given a career begun from an old save (a new game from a save),
+    /// When it is loaded for that purpose,
+    /// Then it is a new game, drawn from its own seed: the mark that keeps an old career's World
+    ///      Cup draws is not carried into the new one.
+    #[test]
+    fn a_new_game_from_an_old_save_is_not_marked_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let save_id = sm.create_save(&sample_game(), "Old").unwrap();
+        {
+            let db = GameDatabase::open(&saves_dir.join(format!("{save_id}.db"))).unwrap();
+            let mut meta = meta_repo::load_meta(db.conn()).unwrap().unwrap();
+            meta.save_format_version = 7;
+            meta_repo::upsert_meta(db.conn(), &meta).unwrap();
+        }
+
+        let fresh = sm.new_game_from_save(&save_id).unwrap();
+
+        assert!(!fresh.legacy_world_cup_draw);
+    }
+
+    /// Given an old career that never had its browser tactics copied in (its save is unmarked)
+    /// When a new game is begun from that save
+    /// Then the new career is marked as already imported: it keeps the save's own tactics library
+    ///      (#883) and must not pull in a browser library that belongs to some other career.
+    #[test]
+    fn a_new_game_from_a_save_never_imports_the_browser_tactics() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut old = sample_game();
+        old.legacy_tactics_imported = false;
+        let save_id = sm.create_save(&old, "Old").unwrap();
+
+        let fresh = sm.new_game_from_save(&save_id).unwrap();
+
+        assert!(fresh.legacy_tactics_imported);
+    }
+
+    /// Given a save written after World Cups were seeded from the game,
+    /// When it is loaded,
+    /// Then it is not marked: a new game re-rolls its World Cups from its own seed.
+    #[test]
+    fn loading_a_current_format_save_is_not_marked_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let save_id = sm.create_save(&sample_game(), "New").unwrap();
+
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        assert!(!loaded.legacy_world_cup_draw);
+    }
+
+    /// The fallback is for saves that have no seed, not a reseed: a current-format
+    /// save keeps the one it was given, or every load would change the game.
+    #[test]
+    fn loading_a_current_format_save_keeps_its_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game();
+        game.seed = 0xC0FF_EE00_1234_5678;
+        let save_id = sm.create_save(&game, "Seeded").unwrap();
+
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(loaded.seed, 0xC0FF_EE00_1234_5678);
+    }
+
+    #[test]
+    fn loading_a_pre_v6_save_floors_cash_to_sixteen_weeks_of_wages() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game();
+        game.players[0].team_id = Some("team-001".to_string());
+        game.players[0].stage_wage(5_000);
+        game.teams[0].finance = 1_000;
+        let save_id = sm.create_save(&game, "Pre Weekly Lock").unwrap();
+        let db_path = saves_dir.join(format!("{save_id}.db"));
+
+        {
+            let db = GameDatabase::open(&db_path).unwrap();
+            let mut meta = meta_repo::load_meta(db.conn()).unwrap().unwrap();
+            meta.save_format_version = 5;
+            meta_repo::upsert_meta(db.conn(), &meta).unwrap();
+        }
+
+        let loaded = sm.load_game(&save_id).unwrap();
+        assert_eq!(
+            loaded.teams[0].finance,
+            5_000 * ofm_core::finances::MIN_OPENING_RUNWAY_WEEKS
+        );
+
+        let db = GameDatabase::open(&db_path).unwrap();
+        let meta = meta_repo::load_meta(db.conn()).unwrap().unwrap();
+        assert_eq!(
+            meta.save_format_version,
+            meta_repo::CURRENT_SAVE_FORMAT_VERSION
+        );
+
+        let loaded_again = sm.load_game(&save_id).unwrap();
+        assert_eq!(
+            loaded_again.teams[0].finance,
+            5_000 * ofm_core::finances::MIN_OPENING_RUNWAY_WEEKS
+        );
+    }
+
+    #[test]
+    fn loading_a_current_format_save_does_not_apply_the_weekly_unit_runway_floor() {
+        // Guard only: develop never topped up, so this also passed there.
+        // Proof of the format-6 migration is the pre-v6 load tests above.
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+        let mut game = sample_game();
+        game.players[0].team_id = Some("team-001".to_string());
+        game.players[0].stage_wage(5_000);
+        game.teams[0].finance = 1_000;
+        let save_id = sm.create_save(&game, "Current Format").unwrap();
+
+        let loaded = sm.load_game(&save_id).unwrap();
+        assert_eq!(loaded.teams[0].finance, 1_000);
+    }
+
     #[test]
     fn test_load_game_does_not_seed_a_current_save_whose_ledger_is_merely_empty() {
         // A career started from an existing save has an empty ledger and inherits
@@ -1657,9 +3209,11 @@ mod tests {
 
         let loaded = sm.load_game(&save_id).unwrap();
 
+        // Only the seed is under test: the sample club is below the squad floor,
+        // so loading it rightly warns about that, and that warning is ledgered.
         assert!(
-            loaded.emitted_events.is_empty(),
-            "a current-format save must keep its empty ledger, got {:?}",
+            !loaded.emitted_events.contains("world_cup_champion_2030"),
+            "a current-format save must not be seeded from its world history, got {:?}",
             loaded.emitted_events
         );
     }
@@ -1961,6 +3515,31 @@ mod tests {
         );
     }
 
+    /// Given an old save's club whose formation does not parse ("5-3-3": eleven outfielders), so the
+    ///      game lays it out as 4-4-2, with its full-backs and wide midfielders on the wrong sides
+    /// When its starting XI is put back in order
+    /// Then both pairs are swapped back: the lines are read from the layout the slots come from
+    ///      (they were read from the formation text, so the line of four backs was taken as five and
+    ///      no pair was checked)
+    #[test]
+    fn an_unparseable_formation_is_put_in_order_by_the_lines_it_is_laid_out_in() {
+        let mut game = sample_game_with_side_specific_starting_xi(true);
+        game.teams[0].formation = "5-3-3".to_string();
+
+        let changed = canonicalize_game_starting_xi_ids(&mut game);
+
+        assert!(changed);
+        assert_eq!(
+            game.teams[0].starting_xi_ids,
+            vec![
+                "gk", "lb", "cb1", "cb2", "rb", "lm", "cm1", "cm2", "rm", "st1", "st2"
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn test_load_game_repairs_existing_mirrored_starting_xi_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -2014,6 +3593,88 @@ mod tests {
         let starting_xi_ids: Vec<String> = serde_json::from_str(&starting_xi_json).unwrap();
 
         assert_eq!(starting_xi_ids, team.starting_xi_ids);
+    }
+
+    /// Given a save whose every other repair has already been written back,
+    /// and an AI club that has since lost both its keepers to free agency,
+    /// when the save is loaded, then the club signs two keepers back and the
+    /// signings are in the `.db` — read from the file, because a reload would
+    /// simply repair the world again. The first load settles every other
+    /// load-time repair, so nothing but the squad floor can be what rewrote the
+    /// file the second time.
+    #[test]
+    fn test_load_game_brings_a_short_ai_club_up_to_the_squad_floor_and_saves_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+
+        let mut game = sample_opening_save_without_youth_academy();
+        game.teams.push(Team::new(
+            "team-002".to_string(),
+            "Keeperless Town".to_string(),
+            "KPT".to_string(),
+            "GB".to_string(),
+            "Leeds".to_string(),
+            "Town Ground".to_string(),
+            10_000,
+        ));
+        // Both clubs sound: 2/5/5/3, fifteen seniors.
+        for team_id in ["team-001", "team-002"] {
+            for ((group, _), count) in ofm_core::squad_floor::MIN_PLAYERS_PER_GROUP
+                .into_iter()
+                .zip([2, 5, 5, 3])
+            {
+                for index in 0..count {
+                    let mut player = make_opening_repair_player(
+                        &format!("{team_id}-{group:?}-{index}"),
+                        group.clone(),
+                        "1998-01-01",
+                    );
+                    player.team_id = Some(team_id.to_string());
+                    player.stage_contract_end(Some("2030-06-30".to_string()));
+                    game.players.push(player);
+                }
+            }
+        }
+        // Seeded and normalised up front: AI managers seeded during a load are
+        // re-normalised by the identity upgrade on every later load, which
+        // would rewrite the file for a reason of its own and hide whether the
+        // floor repair asked for the write.
+        ofm_core::ai_hiring::seed_ai_managers(&mut game);
+        ofm_core::football_identity::upgrade_game_football_identities(&mut game);
+        let save_id = sm.create_save(&game, "Floor Career").unwrap();
+        let mut settled = sm.load_game(&save_id).unwrap();
+
+        for player in settled.players.iter_mut() {
+            if player.id.starts_with("team-002-Goalkeeper") {
+                // Released: his contract ends, which is a movement, not an edit.
+                player
+                    .record_movement(domain::player::PlayerMovementEntry::new(
+                        "2026-07-01",
+                        domain::player::PlayerMovementKind::Released,
+                    ))
+                    .unwrap();
+                player.team_id = None;
+            }
+        }
+        sm.save_game(&settled, &save_id).unwrap();
+        let db_path = saves_dir.join(format!("{}.db", save_id));
+        let db = GameDatabase::open(&db_path).unwrap();
+        let before = GamePersistenceReader::read_game(&db).unwrap();
+        assert!(
+            !ofm_core::squad_floor::squad_shortfall(&before, "team-002").is_empty(),
+            "the fixture must reach the file short of keepers"
+        );
+        drop(db);
+
+        sm.load_game(&save_id).unwrap();
+
+        let db = GameDatabase::open(&db_path).unwrap();
+        let persisted = GamePersistenceReader::read_game(&db).unwrap();
+        assert!(
+            ofm_core::squad_floor::squad_shortfall(&persisted, "team-002").is_empty(),
+            "the repaired squad was not written back"
+        );
     }
 
     #[test]
@@ -2250,6 +3911,87 @@ mod tests {
         assert_eq!(loaded.youth_scouting_assignments[0].days_remaining, 5);
     }
 
+    /// Given a game with a scouted player, his scout Ann Scout's opinion of his potential 63-71
+    /// When it is saved and loaded from the .db
+    /// Then the date, the full attribute snapshot, the range and the scout's name come back
+    #[test]
+    fn scouted_players_survive_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        let mut attributes = game.players[0].attributes.clone();
+        attributes.pace = 91;
+        attributes.composure = 33;
+        game.scouted_players.push(ofm_core::game::ScoutedPlayer {
+            player_id: game.players[0].id.clone(),
+            scouted_on: "2026-08-10".to_string(),
+            attributes,
+            potential: Some(ofm_core::game::PotentialRange { low: 63, high: 71 }),
+            scout_name: Some("Ann Scout".to_string()),
+        });
+
+        let save_id = sm.create_save(&game, "Scouted").unwrap();
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(loaded.scouted_players.len(), 1);
+        assert_eq!(loaded.scouted_players[0].scouted_on, "2026-08-10");
+        assert_eq!(loaded.scouted_players[0].attributes.pace, 91);
+        assert_eq!(loaded.scouted_players[0].attributes.composure, 33);
+        assert_eq!(
+            loaded.scouted_players[0].potential,
+            Some(ofm_core::game::PotentialRange { low: 63, high: 71 })
+        );
+        assert_eq!(
+            loaded.scouted_players[0].scout_name.as_deref(),
+            Some("Ann Scout")
+        );
+    }
+
+    /// Given a game with a report written before reports carried an opinion of potential
+    /// When it is saved and loaded from the .db
+    /// Then it comes back with no opinion and no scout named, not an empty or zero range
+    #[test]
+    fn a_report_without_an_opinion_survives_save_and_load_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        game.scouted_players.push(ofm_core::game::ScoutedPlayer {
+            player_id: game.players[0].id.clone(),
+            scouted_on: "2026-08-10".to_string(),
+            attributes: game.players[0].attributes.clone(),
+            potential: None,
+            scout_name: None,
+        });
+
+        let save_id = sm.create_save(&game, "Scouted").unwrap();
+        let loaded = sm.load_game(&save_id).unwrap();
+
+        assert_eq!(loaded.scouted_players[0].potential, None);
+        assert_eq!(loaded.scouted_players[0].scout_name, None);
+    }
+
+    /// Given a save with scouted players
+    /// When a new career starts from it
+    /// Then the new career has scouted nobody
+    #[test]
+    fn a_new_career_from_a_save_starts_with_nobody_scouted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        game.scouted_players.push(ofm_core::game::ScoutedPlayer {
+            player_id: game.players[0].id.clone(),
+            scouted_on: "2026-08-10".to_string(),
+            attributes: game.players[0].attributes.clone(),
+            potential: Some(ofm_core::game::PotentialRange { low: 63, high: 71 }),
+            scout_name: Some("Ann Scout".to_string()),
+        });
+        let save_id = sm.create_save(&game, "Scouted").unwrap();
+
+        let fresh = sm.new_game_from_save(&save_id).unwrap();
+
+        assert!(fresh.scouted_players.is_empty());
+    }
+
     #[test]
     fn test_new_game_from_save_strips_session_data() {
         let dir = tempfile::tempdir().unwrap();
@@ -2410,5 +4152,903 @@ mod tests {
 
         assert_eq!(league_count, 1);
         assert_eq!(fixture_count, 1);
+    }
+
+    #[test]
+    fn load_game_backfills_opening_balances_from_the_legacy_ledger() {
+        use domain::finance::CashKind;
+        use domain::team::{FinancialTransaction, FinancialTransactionKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let saves_dir = dir.path().join("saves");
+        let mut sm = SaveManager::init(&saves_dir).unwrap();
+
+        let mut game = sample_game();
+        game.teams[0].finance = 1_000_000;
+        game.teams[0].financial_ledger.push(FinancialTransaction {
+            date: "2026-01-01".to_string(),
+            description: "prize".to_string(),
+            amount: 5_000_000,
+            kind: FinancialTransactionKind::PrizeMoney,
+        });
+        let save_id = sm.create_save(&game, "Opening Balance Career").unwrap();
+
+        let loaded = sm.load_game(&save_id).unwrap();
+        assert_eq!(loaded.cash_journal.cash_for(&loaded.teams[0].id), 1_000_000);
+        assert!(loaded.cash_journal_dirty_ids.is_empty());
+        let opening = loaded
+            .cash_journal
+            .iter()
+            .find(|post| post.kind == CashKind::OpeningBalance)
+            .expect("opening balance");
+        assert_eq!(opening.amount, -4_000_000);
+
+        let loaded_again = sm.load_game(&save_id).unwrap();
+        assert_eq!(loaded_again.cash_journal.len(), loaded.cash_journal.len());
+    }
+    /// Given a finished edition in a saved career, when saved again after its competition
+    /// restarts and reloaded, then the frozen record is still there, byte for byte.
+    #[test]
+    fn edition_archive_survives_save_load_and_competition_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game_with_league();
+        game.competitions = vec![game.league.clone().unwrap()];
+        let competition = &game.competitions[0];
+        game.edition_archive
+            .push(domain::edition_archive::CompletedEdition {
+                competition_id: competition.id.clone(),
+                season: competition.season,
+                completed_on: "2033-06-30".into(),
+                champion_id: "champion-club".into(),
+                participant_ids: competition.participant_ids.clone(),
+                standings: competition.sorted_standings(),
+                groups: Vec::new(),
+                knockout_rounds: Vec::new(),
+                fixtures: Vec::new(),
+            });
+        let id = manager.create_save(&game, "Archive").unwrap();
+
+        game.competitions[0].season += 1;
+        game.competitions[0].fixtures.clear();
+        manager.save_game(&game, &id).unwrap();
+        let loaded = manager.load_game(&id).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&loaded.edition_archive).unwrap(),
+            serde_json::to_value(&game.edition_archive).unwrap()
+        );
+        assert_eq!(loaded.edition_archive.len(), 1);
+    }
+
+    fn archived_veteran(id: &str, full_name: &str) -> domain::retired_player::RetiredPlayer {
+        let mut player = sample_game().players[0].clone();
+        player.id = id.to_string();
+        player.full_name = full_name.to_string();
+        player.retired = true;
+        player.team_id = None;
+        domain::retired_player::RetiredPlayer::from_player(&player, "2035-06-30", 2035)
+    }
+
+    fn rows(connection: &rusqlite::Connection, sql: &str, id: &str) -> i64 {
+        connection
+            .query_row(sql, [id], |row| row.get(0))
+            .expect("the query runs")
+    }
+
+    /// Given an archived retiree who is still a row in `players`, when the career is saved,
+    /// then a second connection finds one `retired_players` row and no active `players` row.
+    #[test]
+    fn saving_moves_an_archived_player_out_of_the_active_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        let mut retiree = game.players[0].clone();
+        retiree.id = "p-retired".into();
+        retiree.retired = true;
+        retiree.team_id = None;
+        game.retired_players
+            .push(domain::retired_player::RetiredPlayer::from_player(
+                &retiree,
+                "2035-06-30",
+                2035,
+            ));
+        game.players.push(retiree);
+        let id = manager.create_save(&game, "Archive").unwrap();
+
+        let reader = rusqlite::Connection::open(manager.save_db_path(&id).unwrap()).unwrap();
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM retired_players WHERE player_id = ?1",
+                "p-retired"
+            ),
+            1
+        );
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM players WHERE id = ?1",
+                "p-retired"
+            ),
+            0
+        );
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM players WHERE id = ?1",
+                &game.players[0].id
+            ),
+            1,
+            "an active player is not touched"
+        );
+    }
+
+    /// Given a saved archive, when the career is loaded, then every field of every record survives.
+    #[test]
+    fn the_retired_archive_survives_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        game.retired_players = vec![
+            archived_veteran("p-old-1", "Ada Old"),
+            archived_veteran("p-old-2", "Bo Older"),
+        ];
+        let id = manager.create_save(&game, "Archive").unwrap();
+
+        let loaded = manager.load_game(&id).unwrap();
+
+        assert_eq!(loaded.retired_players, game.retired_players);
+    }
+
+    /// Given an archived record, when a later save carries a different payload for the same id,
+    /// then the save succeeds and the first record stays (immutability is by id, not payload).
+    #[test]
+    fn an_archived_record_is_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        game.retired_players = vec![archived_veteran("p-old", "Ada Old")];
+        let id = manager.create_save(&game, "Archive").unwrap();
+
+        game.retired_players = vec![archived_veteran("p-old", "Ada Renamed")];
+        manager.save_game(&game, &id).unwrap();
+        let loaded = manager.load_game(&id).unwrap();
+
+        assert_eq!(loaded.retired_players.len(), 1);
+        assert_eq!(loaded.retired_players[0].full_name, "Ada Old");
+    }
+
+    fn retired_veteran_manager(id: &str, first_name: &str) -> domain::manager::Manager {
+        let mut manager = domain::manager::Manager::new(
+            id.to_string(),
+            first_name.to_string(),
+            "Veteran".to_string(),
+            "1950-01-01".to_string(),
+            "England".to_string(),
+        );
+        manager.reputation = 640;
+        manager.career_stats.trophies = 4;
+        manager
+            .career_history
+            .push(domain::manager::ManagerCareerEntry::open(
+                "club-1".to_string(),
+                "Club One".to_string(),
+                "2010-07-01".to_string(),
+            ));
+        manager
+    }
+
+    /// Opens the save's file through a connection of its own, as a later session would.
+    fn fresh_reader(manager: &SaveManager, id: &str) -> rusqlite::Connection {
+        rusqlite::Connection::open(manager.save_db_path(id).unwrap()).unwrap()
+    }
+
+    /// Given a club's stand-in, marked interim, and a permanent manager
+    /// When the career is saved to its file and loaded by a new save manager
+    /// Then the file holds the stand-in as interim and the other as not, and so does the load
+    #[test]
+    fn an_interim_manager_is_still_interim_after_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves = dir.path().join("saves");
+        let mut game = sample_game();
+        let mut stand_in = domain::manager::Manager::new(
+            "mgr-stand-in".to_string(),
+            "Stand".to_string(),
+            "In".to_string(),
+            "1975-01-01".to_string(),
+            "England".to_string(),
+        );
+        stand_in.interim = true;
+        let mut permanent = stand_in.clone();
+        permanent.id = "mgr-permanent".to_string();
+        permanent.interim = false;
+        game.managers.push(stand_in);
+        game.managers.push(permanent);
+        let id = SaveManager::init(&saves)
+            .unwrap()
+            .create_save(&game, "Interim")
+            .unwrap();
+
+        let mut later = SaveManager::init(&saves).unwrap();
+        let reader = fresh_reader(&later, &id);
+        let stored = |manager_id: &str| -> bool {
+            reader
+                .query_row(
+                    "SELECT interim FROM managers WHERE id = ?1",
+                    params![manager_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert!(stored("mgr-stand-in"));
+        assert!(!stored("mgr-permanent"));
+        let loaded = later.load_game(&id).unwrap();
+        let interim = |manager_id: &str| {
+            loaded
+                .managers
+                .iter()
+                .find(|manager| manager.id == manager_id)
+                .unwrap()
+                .interim
+        };
+        assert!(interim("mgr-stand-in"));
+        assert!(!interim("mgr-permanent"));
+    }
+
+    /// Given a staff member known by a short name
+    /// When the career is saved to its file and loaded by a new save manager
+    /// Then the file holds the short name, and the loaded staff member is displayed by it
+    #[test]
+    fn a_staff_members_short_name_survives_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves = dir.path().join("saves");
+        let mut game = sample_game();
+        let mut coach = domain::staff::Staff::new(
+            "staff-pep".to_string(),
+            "Josep".to_string(),
+            "Guardiola i Sala".to_string(),
+            "1971-01-18".to_string(),
+            StaffRole::Coach,
+            StaffAttributes {
+                coaching: 80,
+                judging_ability: 70,
+                judging_potential: 70,
+                physiotherapy: 20,
+            },
+        );
+        coach.set_known_as(Some("Pep Guardiola".to_string()));
+        game.staff.push(coach);
+        let id = SaveManager::init(&saves)
+            .unwrap()
+            .create_save(&game, "Known as")
+            .unwrap();
+
+        let mut later = SaveManager::init(&saves).unwrap();
+        let stored: Option<String> = fresh_reader(&later, &id)
+            .query_row(
+                "SELECT known_as FROM staff WHERE id = ?1",
+                params!["staff-pep"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("Pep Guardiola"));
+        let loaded = later.load_game(&id).unwrap();
+        let coach = loaded.staff.iter().find(|s| s.id == "staff-pep").unwrap();
+        assert_eq!(coach.display_name, "Pep Guardiola");
+    }
+
+    /// Given a player with 12 appearances of which 9 were rated
+    /// When the career is saved to its file and loaded by a new save manager
+    /// Then the file's stats hold 9 rated appearances, and so does the loaded player
+    #[test]
+    fn a_players_rated_appearances_survive_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves = dir.path().join("saves");
+        let mut game = sample_game();
+        let player = game.players.first_mut().expect("the sample has a player");
+        player.stats.appearances = 12;
+        player.stats.rated_appearances = 9;
+        let player_id = player.id.clone();
+        let id = SaveManager::init(&saves)
+            .unwrap()
+            .create_save(&game, "Rated")
+            .unwrap();
+
+        let mut later = SaveManager::init(&saves).unwrap();
+        let stats_json: String = fresh_reader(&later, &id)
+            .query_row(
+                "SELECT stats FROM players WHERE id = ?1",
+                params![player_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&stats_json).unwrap();
+        assert_eq!(stored["rated_appearances"], 9);
+        let loaded = later.load_game(&id).unwrap();
+        let player = loaded.players.iter().find(|p| p.id == player_id).unwrap();
+        assert_eq!(player.stats.rated_appearances, 9);
+        assert_eq!(player.stats.appearances, 12);
+    }
+
+    /// Given an archived manager who is still a row in `managers`, when the career is saved,
+    /// then a second connection finds one `retired_managers` row and no active `managers` row.
+    #[test]
+    fn saving_moves_an_archived_manager_out_of_the_active_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        let veteran = retired_veteran_manager("mgr-veteran", "Ada");
+        let id = manager.create_save(&game, "Archive").unwrap();
+        game.managers.push(veteran.clone());
+        manager.save_game(&game, &id).unwrap();
+        game.managers.retain(|m| m.id != veteran.id);
+        game.retired_managers.push(veteran);
+        manager.save_game(&game, &id).unwrap();
+
+        let reader = rusqlite::Connection::open(manager.save_db_path(&id).unwrap()).unwrap();
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM retired_managers WHERE manager_id = ?1",
+                "mgr-veteran"
+            ),
+            1
+        );
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM managers WHERE id = ?1",
+                "mgr-veteran"
+            ),
+            0
+        );
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM managers WHERE id = ?1",
+                &game.manager.id
+            ),
+            1,
+            "the user's manager is not touched"
+        );
+    }
+
+    /// Given an archive of managers, when the career is loaded, then every record survives whole
+    /// and none of them is back in the active pool.
+    #[test]
+    fn the_retired_manager_archive_survives_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        game.retired_managers = vec![
+            retired_veteran_manager("veteran-a", "Ada"),
+            retired_veteran_manager("veteran-b", "Bo"),
+        ];
+        let id = manager.create_save(&game, "Archive").unwrap();
+
+        let loaded = manager.load_game(&id).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&loaded.retired_managers).unwrap(),
+            serde_json::to_value(&game.retired_managers).unwrap()
+        );
+        assert!(
+            loaded
+                .managers
+                .iter()
+                .all(|m| !m.id.starts_with("veteran-"))
+        );
+    }
+
+    /// Given an archived manager, when a later save carries a different payload for the same id,
+    /// then the save succeeds and the first record stays.
+    #[test]
+    fn an_archived_manager_is_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        game.retired_managers = vec![retired_veteran_manager("mgr-old", "Ada")];
+        let id = manager.create_save(&game, "Archive").unwrap();
+
+        game.retired_managers = vec![retired_veteran_manager("mgr-old", "Renamed")];
+        manager.save_game(&game, &id).unwrap();
+        let loaded = manager.load_game(&id).unwrap();
+
+        assert_eq!(loaded.retired_managers.len(), 1);
+        assert_eq!(loaded.retired_managers[0].first_name, "Ada");
+    }
+
+    /// Given a career with saved tactics in a chosen order, one of them since deleted (#390)
+    /// When it is saved and loaded
+    /// Then the tactics come back in order, with the deleted one gone.
+    #[test]
+    fn custom_tactics_survive_save_and_load_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        let tactic = |id: &str, name: &str| domain::custom_tactic::CustomTactic {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: "d".to_string(),
+            formation: "4-4-2".to_string(),
+            play_style: "Counter".to_string(),
+            source_preset_name: Some("Counter".to_string()),
+        };
+        game.custom_tactics = vec![
+            tactic("a", "First"),
+            tactic("b", "Second"),
+            tactic("c", "Third"),
+        ];
+        let id = manager.create_save(&game, "Tactics").unwrap();
+
+        game.custom_tactics.remove(1);
+        manager.save_game(&game, &id).unwrap();
+        let loaded = manager.load_game(&id).unwrap();
+
+        assert_eq!(loaded.custom_tactics, game.custom_tactics);
+        let names: Vec<&str> = loaded
+            .custom_tactics
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, ["First", "Third"]);
+    }
+
+    /// Given a save whose career has saved tactics
+    /// When a new career is started from it
+    /// Then it has the same tactics library: the tactics are the manager's, not the session's.
+    #[test]
+    fn a_career_started_from_a_save_keeps_the_custom_tactics_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        game.custom_tactics = vec![domain::custom_tactic::CustomTactic {
+            id: "a".to_string(),
+            name: "Mine".to_string(),
+            description: String::new(),
+            formation: "3-5-2".to_string(),
+            play_style: "Counter".to_string(),
+            source_preset_name: None,
+        }];
+        let id = manager.create_save(&game, "Source").unwrap();
+
+        let fresh = manager.new_game_from_save(&id).unwrap();
+
+        assert_eq!(fresh.custom_tactics, game.custom_tactics);
+    }
+
+    /// Given a career with mail old enough to archive, read and unread
+    /// When it is archived, saved and loaded
+    /// Then the archive survives in its own table, nothing is left behind in `messages`, and the
+    ///      live inbox keeps what stayed.
+    #[test]
+    fn archived_mail_survives_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        let mail = |id: &str, date: &str, read: bool| {
+            let mut m = domain::message::InboxMessage::new(
+                id.to_string(),
+                "S".to_string(),
+                "B".to_string(),
+                "Board".to_string(),
+                date.to_string(),
+            );
+            m.read = read;
+            m
+        };
+        let today = game.clock.current_date.format("%Y-%m-%d").to_string();
+        game.messages = vec![
+            mail("old-read", "1990-01-01", true),
+            mail("old-unread", "1990-01-02", false),
+            mail("fresh", &today, true),
+        ];
+        ofm_core::inbox_archive::archive_old_mail(&mut game);
+        let id = manager.create_save(&game, "Archive").unwrap();
+
+        let loaded = manager.load_game(&id).unwrap();
+
+        let ids = |messages: &[domain::message::InboxMessage]| {
+            let mut ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids(&loaded.archived_messages), ["old-read"]);
+        // Loading may add its own mail (the squad-floor warnings), so look for ours by id.
+        let live = ids(&loaded.messages);
+        assert!(live.contains(&"fresh".to_string()) && live.contains(&"old-unread".to_string()));
+        assert!(!live.contains(&"old-read".to_string()));
+
+        let conn =
+            rusqlite::Connection::open(dir.path().join("saves").join(format!("{id}.db"))).unwrap();
+        let archived_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archived_messages", [], |r| r.get(0))
+            .unwrap();
+        let live_copy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE id = 'old-read'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((archived_rows, live_copy), (1, 0));
+    }
+
+    /// Given a save whose career has archived mail
+    /// When a new career is started from it, and saved
+    /// Then the new career has no archived mail, in memory and in its own database, and the source
+    ///      save still has its own.
+    #[test]
+    fn a_career_started_from_a_save_starts_with_an_empty_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        game.archived_messages
+            .push(domain::message::InboxMessage::new(
+                "old-1".to_string(),
+                "S".to_string(),
+                "B".to_string(),
+                "Board".to_string(),
+                "1990-01-01".to_string(),
+            ));
+        let source = manager.create_save(&game, "Source").unwrap();
+
+        let fresh = manager.new_game_from_save(&source).unwrap();
+        let new_save = manager.create_save(&fresh, "New").unwrap();
+
+        assert!(fresh.archived_messages.is_empty());
+        let archived_in = |id: &str| -> i64 {
+            rusqlite::Connection::open(dir.path().join("saves").join(format!("{id}.db")))
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM archived_messages", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(archived_in(&new_save), 0);
+        assert_eq!(archived_in(&source), 1);
+    }
+
+    /// Given a retiree archived in a transaction that is then abandoned, when the database is
+    /// read, then the person is still active and no archive row exists: neither half committed.
+    #[test]
+    fn an_archive_write_that_is_abandoned_commits_neither_half() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game();
+        let id = manager.create_save(&game, "Archive").unwrap();
+        let active_id = game.players[0].id.clone();
+        game.retired_players = vec![archived_veteran(&active_id, "Ada Old")];
+
+        let database =
+            crate::game_database::GameDatabase::open(&manager.save_db_path(&id).unwrap()).unwrap();
+        {
+            let transaction = database.conn().unchecked_transaction().unwrap();
+            crate::repositories::retired_player_repo::archive_retired_players(
+                &transaction,
+                &game.retired_players,
+            )
+            .unwrap();
+            // Dropped without commit: the transaction rolls back.
+        }
+
+        let reader = rusqlite::Connection::open(manager.save_db_path(&id).unwrap()).unwrap();
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM retired_players WHERE player_id = ?1",
+                &active_id
+            ),
+            0
+        );
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM players WHERE id = ?1",
+                &active_id
+            ),
+            1
+        );
+    }
+
+    fn game_with_a_retiree_on_the_roster() -> (Game, String) {
+        let mut game = sample_game();
+        let mut retiree = game.players[0].clone();
+        retiree.id = "p-legacy-retiree".into();
+        retiree.full_name = "Ada Old".into();
+        retiree.retired = true;
+        retiree.team_id = None;
+        let id = retiree.id.clone();
+        game.players.push(retiree);
+        (game, id)
+    }
+
+    fn stamp_format(manager: &SaveManager, save_id: &str, version: u32) {
+        let connection =
+            rusqlite::Connection::open(manager.save_db_path(save_id).unwrap()).unwrap();
+        connection
+            .execute("UPDATE game_meta SET save_format_version = ?1", [version])
+            .unwrap();
+    }
+
+    /// Given a save written before the archive (format 8) whose roster still holds a retiree,
+    /// when it is loaded, then he is in the archive and off the roster, once.
+    #[test]
+    fn a_save_from_before_the_archive_partitions_its_retirees_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let (game, retiree_id) = game_with_a_retiree_on_the_roster();
+        let id = manager.create_save(&game, "Old career").unwrap();
+        stamp_format(&manager, &id, 8);
+
+        let loaded = manager.load_game(&id).unwrap();
+
+        assert!(loaded.players.iter().all(|player| player.id != retiree_id));
+        assert_eq!(loaded.retired_players.len(), 1);
+        assert_eq!(loaded.retired_players[0].id, retiree_id);
+    }
+
+    /// Given a career that has been loaded once (so every other backfill has already been written
+    ///       back) and then saved with a retiree on its roster,
+    /// When it is only loaded again (nothing saves it afterwards),
+    /// Then a second connection already finds him archived and off the active roster: the archive
+    ///      move is what makes the load write itself back.
+    #[test]
+    fn loading_a_save_with_a_retiree_on_its_roster_writes_the_move_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let id = manager.create_save(&sample_game(), "Career").unwrap();
+        let mut settled = manager.load_game(&id).unwrap();
+        let mut retiree = settled.players[0].clone();
+        retiree.id = "p-late-retiree".into();
+        retiree.retired = true;
+        retiree.team_id = None;
+        settled.players.push(retiree);
+        manager.save_game(&settled, &id).unwrap();
+
+        manager.load_game(&id).unwrap();
+
+        let reader = rusqlite::Connection::open(manager.save_db_path(&id).unwrap()).unwrap();
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM retired_players WHERE player_id = ?1",
+                "p-late-retiree"
+            ),
+            1
+        );
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM players WHERE id = ?1",
+                "p-late-retiree"
+            ),
+            0
+        );
+    }
+
+    /// Given that old save loaded and saved again, when the `.db` is read through a second
+    /// connection, then the retiree has an archive row and no active row, and a further load
+    /// finds him in the archive once.
+    #[test]
+    fn the_next_save_moves_the_legacy_retiree_in_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let (game, retiree_id) = game_with_a_retiree_on_the_roster();
+        let id = manager.create_save(&game, "Old career").unwrap();
+        stamp_format(&manager, &id, 8);
+        let loaded = manager.load_game(&id).unwrap();
+
+        manager.save_game(&loaded, &id).unwrap();
+
+        let reader = rusqlite::Connection::open(manager.save_db_path(&id).unwrap()).unwrap();
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM retired_players WHERE player_id = ?1",
+                &retiree_id
+            ),
+            1
+        );
+        assert_eq!(
+            rows(
+                &reader,
+                "SELECT COUNT(*) FROM players WHERE id = ?1",
+                &retiree_id
+            ),
+            0
+        );
+        let reloaded = manager.load_game(&id).unwrap();
+        assert_eq!(reloaded.retired_players.len(), 1);
+    }
+
+    /// Given a save at the current format whose roster somehow still holds a retiree, when it is
+    /// loaded, then he is archived too: the roster never plays a retiree, whatever the version.
+    #[test]
+    fn a_retiree_on_the_roster_of_a_current_save_is_archived_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let (game, retiree_id) = game_with_a_retiree_on_the_roster();
+        let id = manager.create_save(&game, "New career").unwrap();
+
+        let loaded = manager.load_game(&id).unwrap();
+
+        assert!(loaded.players.iter().all(|player| player.id != retiree_id));
+        assert_eq!(loaded.retired_players.len(), 1);
+    }
+
+    fn world_cup_game() -> Game {
+        let mut game = sample_game_with_league();
+        let kickoff = Utc.with_ymd_and_hms(2030, 6, 10, 0, 0, 0).unwrap();
+        ofm_core::world_cup::schedule_world_cup(
+            &mut game,
+            kickoff,
+            &ofm_core::world_cup::FORMAT_48,
+        );
+        game
+    }
+
+    fn world_cup_calendars(game: &Game) -> Vec<(String, serde_json::Value)> {
+        let mut calendars: Vec<_> = game
+            .competitions
+            .iter()
+            .filter(|c| ofm_core::world_cup::is_world_cup_competition(c))
+            .map(|c| (c.id.clone(), serde_json::to_value(&c.calendar).unwrap()))
+            .collect();
+        calendars.sort_by(|a, b| a.0.cmp(&b.0));
+        calendars
+    }
+
+    /// Given a career with a freshly created World Cup, when it is saved and loaded, then
+    /// each World Cup competition's calendar after the load equals its calendar before the save.
+    #[test]
+    fn live_and_reloaded_world_cup_calendars_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let game = world_cup_game();
+        let before = world_cup_calendars(&game);
+        assert!(!before.is_empty() && before.iter().all(|(_, calendar)| !calendar.is_null()));
+        let id = manager.create_save(&game, "World Cup").unwrap();
+        assert_eq!(
+            world_cup_calendars(&manager.load_game(&id).unwrap()),
+            before
+        );
+    }
+
+    /// Given a save written before World Cup calendars were set live, when it is loaded,
+    /// then the backfill gives its World Cup competitions the calendar a new one gets.
+    #[test]
+    fn older_world_cup_save_is_backfilled_to_the_live_calendar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let game = world_cup_game();
+        let live = world_cup_calendars(&game);
+        let mut older = game.clone();
+        older
+            .competitions
+            .iter_mut()
+            .filter(|c| ofm_core::world_cup::is_world_cup_competition(c))
+            .for_each(|c| c.calendar = None);
+        let id = manager.create_save(&older, "Older").unwrap();
+        assert_eq!(world_cup_calendars(&manager.load_game(&id).unwrap()), live);
+    }
+
+    /// Given a saved career whose stored fixtures were corrupted on disk, when it is loaded, then the
+    /// load is refused and the career never comes back with an empty fixture list.
+    #[test]
+    fn a_save_with_corrupt_fixtures_refuses_to_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game_with_league();
+        game.competitions = vec![game.league.clone().unwrap()];
+        let id = manager.create_save(&game, "Corrupt").unwrap();
+        assert!(
+            !manager.load_game(&id).unwrap().competitions[0]
+                .fixtures
+                .is_empty()
+        );
+
+        let db =
+            GameDatabase::open_save(&dir.path().join("saves").join(format!("{id}.db"))).unwrap();
+        db.conn()
+            .execute("UPDATE competitions SET fixtures_json = '[{\"postponement\":{\"reason\":\"CupTie\"}}]'", [])
+            .unwrap();
+        drop(db);
+        assert!(manager.load_game(&id).is_err());
+    }
+
+    /// Given a postponed fixture with non-default fields, when the career is saved and loaded, then
+    /// the original date and reason come back on the path the UI reads (the legacy mirror), on the
+    /// competitions, and in the `.db`'s stored fixtures.
+    #[test]
+    fn a_rescheduled_fixture_survives_save_and_load_on_every_path() {
+        use domain::league::{Postponement, RescheduleReason};
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SaveManager::init(&dir.path().join("saves")).unwrap();
+        let mut game = sample_game_with_league();
+        game.competitions = vec![game.league.clone().unwrap()];
+        let moved = Postponement {
+            original_date: "2026-08-01".into(),
+            reason: RescheduleReason::CupTie,
+        };
+        game.competitions[0].fixtures[0].postponement = Some(moved.clone());
+        let fixture_id = game.competitions[0].fixtures[0].id.clone();
+        let id = manager.create_save(&game, "Postponed").unwrap();
+
+        let loaded = manager.load_game(&id).unwrap();
+        let find = |fixtures: &[domain::league::Fixture]| {
+            fixtures
+                .iter()
+                .find(|f| f.id == fixture_id)
+                .and_then(|f| f.postponement.clone())
+        };
+        assert_eq!(
+            find(&loaded.league.as_ref().unwrap().fixtures),
+            Some(moved.clone())
+        );
+        assert_eq!(find(&loaded.competitions[0].fixtures), Some(moved.clone()));
+
+        let db =
+            GameDatabase::open_save(&dir.path().join("saves").join(format!("{id}.db"))).unwrap();
+        let stored: String = db
+            .conn()
+            .query_row(
+                "SELECT fixtures_json FROM competitions LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored.contains("\"original_date\":\"2026-08-01\"") && stored.contains("CupTie"),
+            "{stored}"
+        );
+    }
+
+    #[test]
+    fn migrated_calendar_is_resaved_by_its_own_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let saves = dir.path().join("saves");
+        let mut manager = SaveManager::init(&saves).unwrap();
+        let game = sample_game_with_league();
+        let id = manager.create_save(&game, "Calendar").unwrap();
+        manager.load_game(&id).unwrap();
+        let path = saves.join(format!("{id}.db"));
+        {
+            let db = GameDatabase::open_save(&path).unwrap();
+            db.conn()
+                .execute("UPDATE competitions SET calendar_json = NULL", [])
+                .unwrap();
+        }
+        let loaded = manager.load_game(&id).unwrap();
+        assert!(!loaded.competitions.is_empty());
+        let db = GameDatabase::open_save(&path).unwrap();
+        let stored: String = db
+            .conn()
+            .query_row("SELECT calendar_json FROM competitions LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(!stored.is_empty());
+        // Observe real writes: comparing identical JSON would miss an unnecessary resave.
+        db.conn().execute_batch("CREATE TABLE calendar_write_probe (writes INTEGER NOT NULL); INSERT INTO calendar_write_probe VALUES (0); CREATE TRIGGER calendar_insert_probe AFTER INSERT ON competitions BEGIN UPDATE calendar_write_probe SET writes = writes + 1; END;").unwrap();
+        drop(db);
+        manager.load_game(&id).unwrap();
+        let db = GameDatabase::open_save(&path).unwrap();
+        let writes: i64 = db
+            .conn()
+            .query_row("SELECT writes FROM calendar_write_probe", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            writes, 0,
+            "settled second load must not resave calendar metadata"
+        );
+        let next: String = db
+            .conn()
+            .query_row("SELECT calendar_json FROM competitions LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, next);
     }
 }

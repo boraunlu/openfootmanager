@@ -1,4 +1,4 @@
-import type { StaffData } from "../../../store/types";
+import type { CompetitionCalendarData, StaffData } from "../../../store/types";
 
 export interface TeamColorsDef {
   primary: string;
@@ -116,6 +116,21 @@ export interface PlayerAttributesDef {
 
 export type Footedness = "Left" | "Right" | "Both";
 
+/** One spell in a player's authored career history. */
+export interface PlayerCareerEntryDef {
+  /** The calendar year the season began in. */
+  season: number;
+  /**
+   * A team defined in this package. Absent for a club the package does not define:
+   * `teamName` is what the profile shows either way.
+   */
+  teamId?: string | null;
+  teamName: string;
+  appearances: number;
+  goals: number;
+  assists: number;
+}
+
 export interface PlayerDef {
   id: string;
   name: string;
@@ -144,6 +159,23 @@ export interface PlayerDef {
   photo?: string | null;
   footedness?: Footedness | null;
   youth?: boolean;
+  /**
+   * Contract, wage and status. Every one is optional and absent means the engine
+   * generates it as it always did, so a package written before these fields
+   * existed is unchanged. The limits and the either-or between `contractEnd` and
+   * `contractLength` live in the backend validator, not here.
+   */
+  contractStart?: string | null;
+  contractEnd?: string | null;
+  contractLength?: number | null;
+  /** Weekly. */
+  wage?: number | null;
+  value?: number | null;
+  weakFoot?: number | null;
+  alternatePositions?: Position[];
+  condition?: number | null;
+  morale?: number | null;
+  careerHistory?: PlayerCareerEntryDef[];
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +202,8 @@ export interface StaffDef {
   specialization?: string | null;
   dateOfBirth?: string | null;
   age?: number | null;
+  /** What they are called when it differs from their name; first/last stay the real name. */
+  knownAs?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +271,7 @@ export interface CompetitionDef {
   format: FormatDef;
   participants: ParticipantSpec;
   berths?: unknown[];
+  calendar?: CompetitionCalendarData | null;
   seasonStartMonth?: number;
   seasonStartDay?: number;
   nameKey?: string;
@@ -257,18 +292,8 @@ export interface PackageProjectData {
   names: NamesDefinition | null;
   competitions: CompetitionDef[];
   issues: PackageIssue[];
+  warnings: PackageIssue[];
 }
-
-export type EditorView =
-  | "home"
-  | "edit"
-  | "team"
-  | "confederation"
-  | "country"
-  | "player"
-  | "names-pool"
-  | "competition"
-  | "staff";
 
 export type EditTab =
   | "metadata"

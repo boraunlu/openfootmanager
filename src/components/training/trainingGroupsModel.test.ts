@@ -7,6 +7,7 @@ import {
   reassignPlayerTrainingGroup,
   sortTrainingRoster,
 } from "./trainingGroupsModel";
+import { cannedPositionTable } from "../../test-utils/positionTable";
 
 function createPlayer(overrides: Partial<PlayerData> = {}): PlayerData {
   return {
@@ -67,9 +68,7 @@ function createPlayer(overrides: Partial<PlayerData> = {}): PlayerData {
   };
 }
 
-function createGroup(
-  overrides: Partial<TrainingGroupData> = {},
-): TrainingGroupData {
+function createGroup(overrides: Partial<TrainingGroupData> = {}): TrainingGroupData {
   return {
     id: "group-1",
     name: "Group 1",
@@ -104,17 +103,70 @@ describe("trainingGroupsModel", () => {
 
   it("sorts the roster by position order and then by name", () => {
     const roster = [
-      createPlayer({ id: "fwd", match_name: "Zane", position: "Forward", natural_position: "Forward" }),
-      createPlayer({ id: "def", match_name: "Adam", position: "Defender", natural_position: "Defender" }),
-      createPlayer({ id: "mid", match_name: "Ben", position: "Midfielder", natural_position: "Midfielder" }),
-      createPlayer({ id: "gk", match_name: "Chris", position: "Goalkeeper", natural_position: "Goalkeeper" }),
+      createPlayer({
+        id: "fwd",
+        match_name: "Zane",
+        position: "Forward",
+        natural_position: "Forward",
+      }),
+      createPlayer({
+        id: "def",
+        match_name: "Adam",
+        position: "Defender",
+        natural_position: "Defender",
+      }),
+      createPlayer({
+        id: "mid",
+        match_name: "Ben",
+        position: "Midfielder",
+        natural_position: "Midfielder",
+      }),
+      createPlayer({
+        id: "gk",
+        match_name: "Chris",
+        position: "Goalkeeper",
+        natural_position: "Goalkeeper",
+      }),
     ];
 
-    expect(sortTrainingRoster(roster).map((player) => player.id)).toEqual([
+    expect(sortTrainingRoster(roster, cannedPositionTable()).map((player) => player.id)).toEqual([
       "gk",
       "def",
       "mid",
       "fwd",
+    ]);
+  });
+
+  it("sorts a roster whose positions are granular, not legacy buckets", () => {
+    // The sort above passes only because its fixture uses the four legacy
+    // bucket names. A generated squad is granular, and a table keyed on the
+    // buckets ranks every granular player the same — leaving the name as the
+    // only order. These names are picked so that a name-only sort is wrong.
+    const roster = [
+      createPlayer({
+        id: "striker",
+        match_name: "Adams",
+        position: "Striker",
+        natural_position: "Striker",
+      }),
+      createPlayer({
+        id: "keeper",
+        match_name: "Zola",
+        position: "Goalkeeper",
+        natural_position: "Goalkeeper",
+      }),
+      createPlayer({
+        id: "centre-back",
+        match_name: "Moore",
+        position: "CenterBack",
+        natural_position: "CenterBack",
+      }),
+    ];
+
+    expect(sortTrainingRoster(roster, cannedPositionTable()).map((player) => player.id)).toEqual([
+      "keeper",
+      "centre-back",
+      "striker",
     ]);
   });
 });

@@ -21,9 +21,7 @@ const roster = [
 describe("FinancesPayrollTable", () => {
   it("selects a player when a row is clicked", () => {
     const onSelectPlayer = vi.fn();
-    render(
-      <FinancesPayrollTable roster={roster} onSelectPlayer={onSelectPlayer} />,
-    );
+    render(<FinancesPayrollTable roster={roster} onSelectPlayer={onSelectPlayer} />);
 
     fireEvent.click(screen.getByRole("button", { name: /John Smith/ }));
 
@@ -32,9 +30,7 @@ describe("FinancesPayrollTable", () => {
 
   it("selects a player from the keyboard with Enter and Space", () => {
     const onSelectPlayer = vi.fn();
-    render(
-      <FinancesPayrollTable roster={roster} onSelectPlayer={onSelectPlayer} />,
-    );
+    render(<FinancesPayrollTable roster={roster} onSelectPlayer={onSelectPlayer} />);
 
     const row = screen.getByRole("button", { name: /Ana Ruiz/ });
     expect(row).toHaveAttribute("tabindex", "0");
@@ -51,5 +47,24 @@ describe("FinancesPayrollTable", () => {
     render(<FinancesPayrollTable roster={roster} />);
 
     expect(screen.queryByRole("button", { name: /John Smith/ })).toBeNull();
+  });
+
+  /**
+   * Given a player whose `position` is the legacy bucket and whose natural position is granular
+   * When the payroll table renders the row
+   * Then the badge reads the granular position.
+   */
+  it("badges a player by their granular natural position", () => {
+    const granular = createPlayer({
+      id: "player-3",
+      full_name: "Left Back",
+      position: "Defender",
+      natural_position: "LeftBack",
+    });
+
+    render(<FinancesPayrollTable roster={[granular]} onSelectPlayer={vi.fn()} />);
+
+    expect(screen.getByText("common.posAbbr.LeftBack")).toBeInTheDocument();
+    expect(screen.queryByText("common.posAbbr.Defender")).not.toBeInTheDocument();
   });
 });

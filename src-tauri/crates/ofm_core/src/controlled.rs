@@ -23,6 +23,12 @@ pub struct ManagerState {
     pub emitted: BTreeSet<String>,
     #[serde(default)]
     pub days_since_job_offer: Option<u32>,
+    #[serde(default)]
+    pub scouted_players: Vec<crate::game::ScoutedPlayer>,
+    #[serde(default)]
+    pub archived_messages: Vec<InboxMessage>,
+    #[serde(default)]
+    pub custom_tactics: Vec<domain::custom_tactic::CustomTactic>,
 }
 impl Game {
     pub fn is_controlled(&self, club: &str) -> bool {
@@ -51,6 +57,9 @@ impl Game {
             &mut self.days_since_last_job_offer,
             &mut state.days_since_job_offer,
         );
+        std::mem::swap(&mut self.scouted_players, &mut state.scouted_players);
+        std::mem::swap(&mut self.archived_messages, &mut state.archived_messages);
+        std::mem::swap(&mut self.custom_tactics, &mut state.custom_tactics);
         self.manager_id = self.manager.id.clone();
         self.controlled.inactive.insert(previous, state);
     }

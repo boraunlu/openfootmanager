@@ -1,24 +1,20 @@
 import { getPlayerOvr } from "../../lib/helpers";
-import { isSeniorSquadPlayer } from "../../lib/playerSquad";
+import { isFirstTeamSquadPlayer } from "../../lib/playerSquad";
+import { naturalPositionOf } from "../../lib/positions";
+import type { PositionTable } from "../../lib/positionTable";
 import type { PlayerData } from "../../store/gameStore";
 import {
   buildPitchRows,
   buildStartingXIIds,
   type PitchSlotRow,
-  canonicalPosition,
   comparePlayersForSlot,
   getPreferredPositions,
   isPlayerOutOfPosition,
-  normalisePosition,
   positionCode,
-  translatePositionAbbreviation,
-  translatePositionLabel,
   type SquadSection,
 } from "../squad/SquadTab.helpers";
 export { FORMATIONS } from "../match/types";
 
-export type TacticsLayoutMode = "balanced" | "pitch" | "analysis";
-export type TacticsTableMode = "lineup" | "roles";
 export type SortDirection = "asc" | "desc";
 export type SortKey = "pos" | "name" | "condition" | "morale" | "ovr";
 
@@ -36,13 +32,6 @@ export interface TacticsPitchSlot {
   rowLabel: string;
   x: number;
   y: number;
-}
-
-export interface TacticsFormationSlotOption {
-  index: number;
-  label: string;
-  position: string;
-  shortLabel: string;
 }
 
 export const TACTICS_PRESETS: TacticsPresetDefinition[] = [
@@ -78,14 +67,8 @@ export const TACTICS_PRESETS: TacticsPresetDefinition[] = [
   },
 ];
 
-const POSITION_ORDER: Record<string, number> = {
-  Goalkeeper: 1,
-  Defender: 2,
-  Midfielder: 3,
-  Forward: 4,
-};
-
 interface TacticsPlayerSortContext {
+  positionTable: PositionTable;
   section: SquadSection;
   sortDir: SortDirection;
   sortKey: SortKey;
@@ -94,6 +77,7 @@ interface TacticsPlayerSortContext {
 
 interface TacticsPlayerFilterContext {
   playerSearch: string;
+  positionTable: PositionTable;
   positionFilter: string;
   section: SquadSection;
   xiActivePosition: Map<string, string>;
@@ -101,25 +85,24 @@ interface TacticsPlayerFilterContext {
 
 interface ResolveStartingXiIdsOptions {
   availablePlayers: PlayerData[];
+  positionTable: PositionTable;
   formation: string;
   pendingStartingXiIds: string[] | null;
   playersById: Map<string, PlayerData>;
   savedStartingXiIds: string[];
 }
 
-
 export function buildTacticsRoster(
   players: PlayerData[],
   teamId: string,
+  positionTable: PositionTable,
 ): PlayerData[] {
   return players
-    .filter(
-      (player) => player.team_id === teamId && isSeniorSquadPlayer(player),
-    )
+    .filter((player) => player.team_id === teamId && isFirstTeamSquadPlayer(player))
     .sort((leftPlayer, rightPlayer) => {
       return (
-        (POSITION_ORDER[normalisePosition(leftPlayer.position)] ?? 99) -
-        (POSITION_ORDER[normalisePosition(rightPlayer.position)] ?? 99) ||
+        positionTable.lineRankOf(leftPlayer.position) -
+          positionTable.lineRankOf(rightPlayer.position) ||
         getPlayerOvr(rightPlayer) - getPlayerOvr(leftPlayer)
       );
     });
@@ -127,6 +110,7 @@ export function buildTacticsRoster(
 
 export function resolveStartingXiIds({
   availablePlayers,
+  positionTable,
   formation,
   pendingStartingXiIds,
   playersById,
@@ -136,6 +120,7 @@ export function resolveStartingXiIds({
     availablePlayers,
     savedStartingXiIds,
     formation,
+    positionTable,
   );
   const slotPositions = buildPitchRows(formation).flatMap((row) => row.positions);
 
@@ -151,7 +136,9 @@ export function resolveStartingXiIds({
     const slotPosition = slotPositions[validPendingIds.length + fillPlayerIds.length];
     const bestPlayer = availablePlayers
       .filter((player) => !usedPlayerIds.has(player.id))
-      .sort((leftPlayer, rightPlayer) => comparePlayersForSlot(leftPlayer, rightPlayer, slotPosition))[0];
+      .sort((leftPlayer, rightPlayer) =>
+        comparePlayersForSlot(leftPlayer, rightPlayer, slotPosition, positionTable),
+      )[0];
 
     if (!bestPlayer) break;
     fillPlayerIds.push(bestPlayer.id);
@@ -170,14 +157,14 @@ export function getSectionPlayerPosition(
     return xiActivePosition.get(player.id) ?? player.position;
   }
 
-  return player.natural_position || player.position;
+  return naturalPositionOf(player);
 }
 
 export function sortTacticsPlayers(
   players: PlayerData[],
   context: TacticsPlayerSortContext,
 ): PlayerData[] {
-  const { section, sortDir, sortKey, xiActivePosition } = context;
+  const { positionTable, section, sortDir, sortKey, xiActivePosition } = context;
   const sortedPlayers = [...players].sort((leftPlayer, rightPlayer) => {
     const leftPosition = getSectionPlayerPosition(leftPlayer, section, xiActivePosition);
     const rightPosition = getSectionPlayerPosition(rightPlayer, section, xiActivePosition);
@@ -185,8 +172,7 @@ export function sortTacticsPlayers(
     switch (sortKey) {
       case "pos":
         return (
-          (POSITION_ORDER[normalisePosition(leftPosition)] ?? 99) -
-          (POSITION_ORDER[normalisePosition(rightPosition)] ?? 99) ||
+          positionTable.lineRankOf(leftPosition) - positionTable.lineRankOf(rightPosition) ||
           getPlayerOvr(rightPlayer) - getPlayerOvr(leftPlayer)
         );
       case "name":
@@ -213,8 +199,8 @@ export function matchesTacticsPlayerFilters(
   player: PlayerData,
   context: TacticsPlayerFilterContext,
 ): boolean {
-  const { playerSearch, positionFilter, section, xiActivePosition } = context;
-  const currentPosition = normalisePosition(
+  const { playerSearch, positionFilter, positionTable, section, xiActivePosition } = context;
+  const currentPosition = positionTable.groupOf(
     getSectionPlayerPosition(player, section, xiActivePosition),
   );
   const preferredPositions = getPreferredPositions(player);
@@ -261,11 +247,12 @@ export function filterAndSortTacticsPlayers(
 export function countOutOfPositionPlayers(
   startingPlayers: PlayerData[],
   xiActivePosition: Map<string, string>,
+  positionTable: PositionTable,
 ): number {
   return startingPlayers.filter((player) => {
     const currentPosition = xiActivePosition.get(player.id) ?? player.position;
 
-    return isPlayerOutOfPosition(player, currentPosition);
+    return isPlayerOutOfPosition(player, currentPosition, positionTable);
   }).length;
 }
 
@@ -277,13 +264,11 @@ export function getSelectedAndComparePlayers(
   comparePlayer: PlayerData | null;
   selectedPlayer: PlayerData | null;
 } {
-  const selectedPlayer = selectedPlayerId
-    ? playersById.get(selectedPlayerId) ?? null
-    : null;
+  const selectedPlayer = selectedPlayerId ? (playersById.get(selectedPlayerId) ?? null) : null;
 
   const comparePlayer =
     selectedPlayerId && comparePlayerId && selectedPlayerId !== comparePlayerId
-      ? playersById.get(comparePlayerId) ?? null
+      ? (playersById.get(comparePlayerId) ?? null)
       : null;
 
   return {
@@ -302,13 +287,15 @@ function getSlotXCoordinates(slotCount: number): number[] {
   // the touchlines so neighbouring markers don't overlap; smaller rows keep
   // the centered even spread.
   if (slotCount >= 5) {
-    return Array.from({ length: slotCount }, (_, index) =>
-      Math.round((10 + (index * 80) / (slotCount - 1)) * 10) / 10,
+    return Array.from(
+      { length: slotCount },
+      (_, index) => Math.round((10 + (index * 80) / (slotCount - 1)) * 10) / 10,
     );
   }
 
-  return Array.from({ length: slotCount }, (_, index) =>
-    Math.round((((index + 1) / (slotCount + 1)) * 100) * 10) / 10,
+  return Array.from(
+    { length: slotCount },
+    (_, index) => Math.round(((index + 1) / (slotCount + 1)) * 100 * 10) / 10,
   );
 }
 
@@ -328,128 +315,13 @@ export function buildTacticsPitchSlots(rows: PitchSlotRow[]): TacticsPitchSlot[]
   });
 }
 
-function getDuplicatedSlotShortLabel(
-  position: string,
-  duplicateIndex: number,
-  duplicateCount: number,
-): string {
-  const canonical = canonicalPosition(position);
-
-  if (canonical === "CenterBack") {
-    if (duplicateCount === 2) return duplicateIndex === 0 ? "LCB" : "RCB";
-    if (duplicateCount === 3) {
-      return ["LCB", "CB", "RCB"][duplicateIndex] ?? "CB";
-    }
-  }
-
-  if (canonical === "CentralMidfielder") {
-    if (duplicateCount === 2) return duplicateIndex === 0 ? "LCM" : "RCM";
-    if (duplicateCount === 3) {
-      return ["LCM", "CM", "RCM"][duplicateIndex] ?? "CM";
-    }
-  }
-
-  if (canonical === "Striker") {
-    if (duplicateCount === 2) return duplicateIndex === 0 ? "LS" : "RS";
-    if (duplicateCount === 3) {
-      return ["LF", "ST", "RF"][duplicateIndex] ?? "ST";
-    }
-  }
-
-  return `${positionCode(position)} ${duplicateIndex + 1}`;
-}
-
-function getDuplicatedSlotLabel(
-  translate: (key: string) => string,
-  position: string,
-  duplicateIndex: number,
-  duplicateCount: number,
-): string {
-  const positionLabel = translatePositionLabel(translate, position);
-
-  if (duplicateCount === 2) {
-    return duplicateIndex === 0
-      ? `${translate("common.left")} ${positionLabel}`
-      : `${translate("common.right")} ${positionLabel}`;
-  }
-
-  if (duplicateCount === 3) {
-    const descriptors = [
-      translate("common.left"),
-      translate("common.center"),
-      translate("common.right"),
-    ];
-
-    return `${descriptors[duplicateIndex] ?? duplicateIndex + 1} ${positionLabel}`;
-  }
-
-  return `${positionLabel} ${duplicateIndex + 1}`;
-}
-
-export function buildFormationSlotOptions(
-  formation: string,
-  translate: (key: string) => string,
-): TacticsFormationSlotOption[] {
-  const positions = buildPitchRows(formation).flatMap((row) => row.positions);
-  const duplicateCounts = new Map<string, number>();
-  const duplicateIndexes = new Map<string, number>();
-
-  positions.forEach((position) => {
-    duplicateCounts.set(position, (duplicateCounts.get(position) ?? 0) + 1);
-  });
-
-  return positions.map((position, index) => {
-    const duplicateIndex = duplicateIndexes.get(position) ?? 0;
-    const duplicateCount = duplicateCounts.get(position) ?? 1;
-    duplicateIndexes.set(position, duplicateIndex + 1);
-
-    if (duplicateCount === 1) {
-      return {
-        index,
-        label: translatePositionLabel(translate, position),
-        position,
-        shortLabel: translatePositionAbbreviation(translate, position),
-      };
-    }
-
-    return {
-      index,
-      label: getDuplicatedSlotLabel(
-        translate,
-        position,
-        duplicateIndex,
-        duplicateCount,
-      ),
-      position,
-      shortLabel: getDuplicatedSlotShortLabel(
-        position,
-        duplicateIndex,
-        duplicateCount,
-      ),
-    };
-  });
-}
-
 export function findTacticsPresetBySetup(
   formation: string,
   playStyle: string,
 ): TacticsPresetDefinition | null {
   return (
     TACTICS_PRESETS.find(
-      (preset) =>
-        preset.formation === formation && preset.playStyle === playStyle,
+      (preset) => preset.formation === formation && preset.playStyle === playStyle,
     ) ?? null
   );
-}
-
-export function getOverallRatingClassName(overallRating: number): string {
-  if (overallRating >= 75) {
-    return "text-success-500 dark:text-success-400";
-  }
-
-  if (overallRating >= 55) {
-    return "text-accent-600 dark:text-accent-400";
-  }
-
-  return "text-gray-500 dark:text-gray-400";
 }

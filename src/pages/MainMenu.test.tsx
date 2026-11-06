@@ -1,17 +1,19 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 
 import { countryName } from "../lib/countries";
 import { resetCountryResourcesCache } from "../components/menu/CreateManagerNationalityField";
 import type { ManagerProfile } from "../components/menu/types";
+import { resolveBackendError } from "../utils/backendI18n";
 import MainMenu from "./MainMenu";
 
 const navigateMock = vi.fn();
 const setGameActiveMock = vi.fn();
 const setGameStateMock = vi.fn();
-const alertMock = vi.fn();
+const showErrorMock = vi.fn();
 let latestDatePickerOnChange: ((date: string) => void) | null = null;
 const translationState = {
   language: "en",
@@ -19,6 +21,10 @@ const translationState = {
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
+}));
+
+vi.mock("../lib/errorDialog", () => ({
+  showError: (title: string, detail: string) => showErrorMock(title, detail),
 }));
 
 const openUrlMock = vi.fn();
@@ -43,7 +49,7 @@ vi.mock("react-router-dom", () => ({
 vi.mock("react-i18next", () => ({
   initReactI18next: {
     type: "3rdParty",
-    init: () => { },
+    init: () => {},
   },
   useTranslation: () => ({
     t: (key: string, fallback?: string | Record<string, unknown>) =>
@@ -65,7 +71,11 @@ vi.mock("../store/gameStore", () => ({
     }),
 }));
 
-vi.mock("../components/ui", () => ({
+vi.mock("../components/ui", async () => ({
+  // The real shell: the profile confirmation is a dialog, and its focus and Escape are under test.
+  Dialog: (
+    await vi.importActual<typeof import("../components/ui/Dialog")>("../components/ui/Dialog")
+  ).Dialog,
   Button: ({
     children,
     iconRight: _iconRight,
@@ -122,6 +132,10 @@ vi.mock("../components/ui/ThemeToggle", () => ({
   ThemeToggle: () => <div data-testid="theme-toggle" />,
 }));
 
+// Tested on its own; here it would only add a backend call these tests do not expect.
+vi.mock("../components/diagnostics/CrashReportPrompt", () => ({
+  CrashReportPrompt: () => null,
+}));
 vi.mock("../components/menu/SavesList", () => ({
   default: ({
     saves,
@@ -154,11 +168,7 @@ vi.mock("../components/menu/PackageBuildStep", () => ({
   }) => (
     <div data-testid="package-build-step">
       {installedPackages.map((pkg) => (
-        <button
-          key={pkg.id}
-          type="button"
-          onClick={() => onTogglePackage(pkg.id)}
-        >
+        <button key={pkg.id} type="button" onClick={() => onTogglePackage(pkg.id)}>
           {`toggle-${pkg.id}`}
         </button>
       ))}
@@ -195,6 +205,11 @@ vi.mock("../components/menu/WorldSelect", () => ({
 
 const mockedInvoke = vi.mocked(invoke);
 
+/** What the mocked backend says about a manager's date of birth; a test sets it, as Rust would decide. */
+let dobVerdict: (args: { dob: string; startYear: number; startPhase: string }) => string | null =
+  () => null;
+const MIN_AGE_KEY = "be.error.createManager.minAge";
+
 // The packages step sits between the create form and the generation/world-select
 // step. Its internals (installed-package list, stack validation) are covered by
 // their own tests; here we shim it to a simple "advance" control so the manager-
@@ -209,27 +224,18 @@ async function openCreateManagerForm(): Promise<void> {
 }
 
 function fillManagerDetails(): void {
-  fireEvent.change(
-    screen.getByPlaceholderText("createManager.placeholderFirst"),
-    {
-      target: { value: "Ada" },
-    },
-  );
-  fireEvent.change(
-    screen.getByPlaceholderText("createManager.placeholderLast"),
-    {
-      target: { value: "Lovelace" },
-    },
-  );
+  fireEvent.change(screen.getByPlaceholderText("createManager.placeholderFirst"), {
+    target: { value: "Ada" },
+  });
+  fireEvent.change(screen.getByPlaceholderText("createManager.placeholderLast"), {
+    target: { value: "Lovelace" },
+  });
   fireEvent.change(screen.getByLabelText("manager-date-of-birth"), {
     target: { value: "1980-01-01" },
   });
 }
 
-function fillCareerStartDetails(
-  startYear = "2026",
-  startPhase = "seasonStart",
-): void {
+function fillCareerStartDetails(startYear = "2026", startPhase = "seasonStart"): void {
   fireEvent.change(screen.getByLabelText("createManager.startYear"), {
     target: { value: startYear },
   });
@@ -242,12 +248,8 @@ async function getNationalityTrigger(): Promise<HTMLButtonElement> {
   let trigger: HTMLButtonElement | null = null;
 
   await waitFor(() => {
-    const fieldContainer = document.getElementById(
-      "create-manager-field-nationality",
-    );
-    const candidate = fieldContainer?.querySelector(
-      "div.relative > button:not([disabled])",
-    );
+    const fieldContainer = document.getElementById("create-manager-field-nationality");
+    const candidate = fieldContainer?.querySelector("div.relative > button:not([disabled])");
 
     trigger = candidate instanceof HTMLButtonElement ? candidate : null;
 
@@ -261,10 +263,7 @@ async function getNationalityTrigger(): Promise<HTMLButtonElement> {
   return trigger;
 }
 
-async function selectNationality(
-  language: string,
-  nationalityCode: string,
-): Promise<void> {
+async function selectNationality(language: string, nationalityCode: string): Promise<void> {
   const countryLabel = countryName(nationalityCode, language);
 
   fireEvent.mouseDown(await getNationalityTrigger());
@@ -279,15 +278,10 @@ async function searchAndSelectNationality(
   const countryLabel = countryName(nationalityCode, language);
 
   fireEvent.mouseDown(await getNationalityTrigger());
-  const searchInput = await screen.findByPlaceholderText(
-    "createManager.searchNationalities",
-  );
-  fireEvent.change(
-    searchInput,
-    {
-      target: { value: searchText },
-    },
-  );
+  const searchInput = await screen.findByPlaceholderText("createManager.searchNationalities");
+  fireEvent.change(searchInput, {
+    target: { value: searchText },
+  });
   fireEvent.mouseDown(await screen.findByText(countryLabel));
 }
 
@@ -296,16 +290,21 @@ describe("MainMenu", () => {
     navigateMock.mockReset();
     setGameActiveMock.mockReset();
     setGameStateMock.mockReset();
-    alertMock.mockReset();
+    showErrorMock.mockReset();
     openUrlMock.mockReset();
     dialogOpenResult = null;
     localStorage.clear();
     latestDatePickerOnChange = null;
     translationState.language = "en";
     mockedInvoke.mockReset();
-    mockedInvoke.mockImplementation(async (command: string) => {
+    dobVerdict = () => null;
+    mockedInvoke.mockImplementation(async (command: string, args?: unknown) => {
       if (command === "list_installed_packages") {
         return [];
+      }
+
+      if (command === "validate_manager_dob") {
+        return dobVerdict(args as { dob: string; startYear: number; startPhase: string });
       }
 
       if (command === "start_new_game") {
@@ -317,7 +316,15 @@ describe("MainMenu", () => {
       }
 
       if (command === "save_manager_profile") {
-        return { id: "profile-1", first_name: "Test", last_name: "Manager", date_of_birth: "1980-01-01", nationality: "GB", created_at: new Date().toISOString(), last_used_at: null };
+        return {
+          id: "profile-1",
+          first_name: "Test",
+          last_name: "Manager",
+          date_of_birth: "1980-01-01",
+          nationality: "GB",
+          created_at: new Date().toISOString(),
+          last_used_at: null,
+        };
       }
 
       if (command === "touch_manager_profile") {
@@ -332,7 +339,6 @@ describe("MainMenu", () => {
       queueMicrotask(() => cb(0));
       return 0;
     });
-    vi.stubGlobal("alert", alertMock);
   });
 
   afterEach(() => {
@@ -495,9 +501,7 @@ describe("MainMenu", () => {
     fireEvent.click(screen.getByText("createManager.chooseWorld"));
 
     await waitFor(() => {
-      expect(
-        screen.getByPlaceholderText("createManager.placeholderFirst"),
-      ).toHaveFocus();
+      expect(screen.getByPlaceholderText("createManager.placeholderFirst")).toHaveFocus();
     });
     expect(screen.queryByTestId("package-build-step")).not.toBeInTheDocument();
   });
@@ -506,16 +510,13 @@ describe("MainMenu", () => {
     render(<MainMenu />);
 
     await openCreateManagerForm();
-    fireEvent.change(
-      screen.getByPlaceholderText("createManager.placeholderFirst"),
-      { target: { value: "Ada" } },
-    );
+    fireEvent.change(screen.getByPlaceholderText("createManager.placeholderFirst"), {
+      target: { value: "Ada" },
+    });
     fireEvent.click(screen.getByText("createManager.chooseWorld"));
 
     await waitFor(() => {
-      expect(
-        screen.getByPlaceholderText("createManager.placeholderLast"),
-      ).toHaveFocus();
+      expect(screen.getByPlaceholderText("createManager.placeholderLast")).toHaveFocus();
     });
   });
 
@@ -523,19 +524,24 @@ describe("MainMenu", () => {
     render(<MainMenu />);
 
     await openCreateManagerForm();
-    fireEvent.change(
-      screen.getByPlaceholderText("createManager.placeholderFirst"),
-      { target: { value: "Ada" } },
-    );
-    fireEvent.change(
-      screen.getByPlaceholderText("createManager.placeholderLast"),
-      { target: { value: "Lovelace" } },
-    );
+    fireEvent.change(screen.getByPlaceholderText("createManager.placeholderFirst"), {
+      target: { value: "Ada" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("createManager.placeholderLast"), {
+      target: { value: "Lovelace" },
+    });
+    fillCareerStartDetails("2026", "seasonStart");
+    dobVerdict = () => MIN_AGE_KEY;
     fireEvent.change(screen.getByLabelText("manager-date-of-birth"), {
       target: { value: "2010-06-15" },
     });
 
-    expect(screen.getByText("validation.minAge")).toBeInTheDocument();
+    expect(await screen.findByText(resolveBackendError(MIN_AGE_KEY))).toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledWith("validate_manager_dob", {
+      dob: "2010-06-15",
+      startYear: 2026,
+      startPhase: "seasonStart",
+    });
 
     await selectNationality("en", "ES");
     fireEvent.click(screen.getByText("createManager.chooseWorld"));
@@ -551,21 +557,19 @@ describe("MainMenu", () => {
     render(<MainMenu />);
 
     await openCreateManagerForm();
-    fireEvent.change(
-      screen.getByPlaceholderText("createManager.placeholderFirst"),
-      { target: { value: "Ada" } },
-    );
-    fireEvent.change(
-      screen.getByPlaceholderText("createManager.placeholderLast"),
-      { target: { value: "Lovelace" } },
-    );
+    fireEvent.change(screen.getByPlaceholderText("createManager.placeholderFirst"), {
+      target: { value: "Ada" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("createManager.placeholderLast"), {
+      target: { value: "Lovelace" },
+    });
     fireEvent.change(screen.getByLabelText("manager-date-of-birth"), {
       target: { value: "2008-01-01" },
     });
     fillCareerStartDetails("2038", "seasonStart");
     await selectNationality("en", "ES");
 
-    expect(screen.queryByText("validation.minAge")).not.toBeInTheDocument();
+    expect(screen.queryByText(resolveBackendError(MIN_AGE_KEY))).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText("createManager.chooseWorld"));
 
@@ -577,27 +581,32 @@ describe("MainMenu", () => {
     render(<MainMenu />);
 
     await openCreateManagerForm();
-    fireEvent.change(
-      screen.getByPlaceholderText("createManager.placeholderFirst"),
-      { target: { value: "Ada" } },
-    );
-    fireEvent.change(
-      screen.getByPlaceholderText("createManager.placeholderLast"),
-      { target: { value: "Lovelace" } },
-    );
+    fireEvent.change(screen.getByPlaceholderText("createManager.placeholderFirst"), {
+      target: { value: "Ada" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("createManager.placeholderLast"), {
+      target: { value: "Lovelace" },
+    });
+    // Rust decides: this manager turns 30 between the start of the season and mid-season.
+    dobVerdict = ({ startPhase }) => (startPhase === "seasonStart" ? MIN_AGE_KEY : null);
     fireEvent.change(screen.getByLabelText("manager-date-of-birth"), {
       target: { value: "2008-08-01" },
     });
     fillCareerStartDetails("2038", "seasonStart");
 
-    expect(screen.getByText("validation.minAge")).toBeInTheDocument();
+    expect(await screen.findByText(resolveBackendError(MIN_AGE_KEY))).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("createManager.startPhase"), {
       target: { value: "midSeason" },
     });
 
     await waitFor(() => {
-      expect(screen.queryByText("validation.minAge")).not.toBeInTheDocument();
+      expect(screen.queryByText(resolveBackendError(MIN_AGE_KEY))).not.toBeInTheDocument();
+    });
+    expect(mockedInvoke).toHaveBeenCalledWith("validate_manager_dob", {
+      dob: "2008-08-01",
+      startYear: 2038,
+      startPhase: "midSeason",
     });
   });
 
@@ -764,7 +773,7 @@ describe("MainMenu", () => {
   });
 
   it("surfaces a message when a save fails to load", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => { });
+    vi.spyOn(console, "error").mockImplementation(() => {});
 
     mockedInvoke.mockImplementation(async (command: string) => {
       if (command === "list_installed_packages") {
@@ -797,7 +806,9 @@ describe("MainMenu", () => {
     fireEvent.click(saveButton);
 
     await waitFor(() => {
-      expect(alertMock).toHaveBeenCalledWith("menu.loadGameFailed");
+      // Title and detail are separate arguments now; the fake `t` returns the key it is
+      // given, so these are the two keys the page passes.
+      expect(showErrorMock).toHaveBeenCalledWith("errors.title", "menu.loadGameFailed");
     });
     expect(navigateMock).not.toHaveBeenCalledWith("/dashboard");
   });
@@ -1017,5 +1028,163 @@ describe("MainMenu", () => {
       });
       expect(screen.queryByText("managerProfiles.saveConfirm.title")).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("MainMenu routing of an active career", () => {
+  const activeGame = (teamId: string | null) => ({
+    manager: { first_name: "Ada", last_name: "Lovelace", team_id: teamId },
+    extra_translations: {},
+    teams: [],
+    players: [],
+  });
+
+  function backendReports(stage: string | null, teamId: string | null) {
+    mockedInvoke.mockReset();
+    mockedInvoke.mockImplementation(async (command: string) => {
+      if (command === "get_active_game") return activeGame(teamId);
+      if (command === "get_career_stage") {
+        if (stage === null) throw "be.error.noActiveGameSession";
+        return stage;
+      }
+      if (command === "get_manager_profiles" || command === "list_installed_packages") return [];
+      return null;
+    });
+  }
+
+  beforeEach(() => {
+    navigateMock.mockReset();
+  });
+
+  /**
+   * Given an active game whose manager has no club yet
+   * When the app opens
+   * Then team selection is shown, not a dashboard with nothing to manage
+   */
+  it("a_clubless_manager_lands_on_team_selection", async () => {
+    backendReports("awaitingClub", null);
+
+    render(<MainMenu />);
+
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/select-team"));
+    expect(navigateMock).not.toHaveBeenCalledWith("/dashboard");
+  });
+
+  /**
+   * Given an active game with a club
+   * When the app opens
+   * Then the dashboard route is unchanged
+   */
+  it("a_manager_with_a_club_lands_where_they_did", async () => {
+    backendReports("employed", "team-1");
+
+    render(<MainMenu />);
+
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/dashboard"));
+    expect(navigateMock).not.toHaveBeenCalledWith("/select-team");
+  });
+
+  /**
+   * Given a manager who was sacked mid-career (no club, but not a new career)
+   * When the app opens
+   * Then the dashboard is shown, where the job offers are
+   */
+  it("an_unemployed_manager_lands_on_the_dashboard", async () => {
+    backendReports("unemployed", null);
+
+    render(<MainMenu />);
+
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/dashboard"));
+    expect(navigateMock).not.toHaveBeenCalledWith("/select-team");
+  });
+
+  /**
+   * Given the backend cannot say which stage the career is in
+   * When the app opens
+   * Then the player still reaches the dashboard rather than a dead end
+   */
+  it("falls_back_to_the_dashboard_when_the_stage_is_unknown", async () => {
+    backendReports(null, "team-1");
+
+    render(<MainMenu />);
+
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/dashboard"));
+  });
+
+  /**
+   * Given a career abandoned at team selection and saved
+   * When it is loaded from the menu
+   * Then team selection is shown again, not a broken dashboard
+   */
+  it("leaving_at_team_selection_resumes_there", async () => {
+    let loaded = false;
+    mockedInvoke.mockReset();
+    mockedInvoke.mockImplementation(async (command: string) => {
+      if (command === "get_active_game") {
+        if (!loaded) throw "be.error.noActiveGameSession";
+        return activeGame(null);
+      }
+      if (command === "get_saves") {
+        return [
+          {
+            id: "save-1",
+            name: "Abandoned",
+            manager_name: "Ada Lovelace",
+            db_filename: "save-1.db",
+            checksum: "abc",
+            created_at: "2026-01-01T00:00:00Z",
+            last_played_at: "2026-02-01T00:00:00Z",
+          },
+        ];
+      }
+      if (command === "load_game") {
+        loaded = true;
+        return "Ada Lovelace";
+      }
+      if (command === "get_career_stage") return "awaitingClub";
+      if (command === "get_manager_profiles" || command === "list_installed_packages") return [];
+      return null;
+    });
+
+    render(<MainMenu />);
+    fireEvent.click(screen.getByText("menu.loadGame"));
+    fireEvent.click(await screen.findByText("Abandoned"));
+
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/select-team"));
+  });
+
+  /**
+   * Given the menu is open with no active game, and an MCP client then creates a clubless career
+   * When the backend announces `game-state-changed`
+   * Then team selection is shown, from the same stage rule as on load.
+   */
+  it("an_mcp_created_clubless_career_routes_to_team_selection", async () => {
+    let careerCreated = false;
+    mockedInvoke.mockReset();
+    mockedInvoke.mockImplementation(async (command: string) => {
+      if (command === "get_active_game") {
+        if (!careerCreated) throw "be.error.noActiveGameSession";
+        return activeGame(null);
+      }
+      if (command === "get_career_stage") return "awaitingClub";
+      if (command === "get_manager_profiles" || command === "list_installed_packages") return [];
+      return null;
+    });
+    render(<MainMenu />);
+    await waitFor(() =>
+      expect(listen).toHaveBeenCalledWith("game-state-changed", expect.any(Function)),
+    );
+    const onGameStateChanged = vi
+      .mocked(listen)
+      .mock.calls.find(([eventName]) => eventName === "game-state-changed")?.[1];
+    expect(navigateMock).not.toHaveBeenCalled();
+
+    careerCreated = true;
+    await act(async () => {
+      await onGameStateChanged?.({ event: "game-state-changed", id: 1, payload: null });
+    });
+
+    expect(navigateMock).toHaveBeenCalledWith("/select-team");
+    expect(navigateMock).not.toHaveBeenCalledWith("/dashboard");
   });
 });

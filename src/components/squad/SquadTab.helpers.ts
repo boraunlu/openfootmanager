@@ -1,5 +1,10 @@
+import { canonicalPosition, naturalPositionOf } from "../../lib/positions";
+import type { FamiliarityTable } from "../../hooks/useFamiliarity";
+import type { PositionTable } from "../../lib/positionTable";
+
 import type { PlayerData } from "../../store/gameStore";
 import { getPlayerOvr } from "../../lib/helpers";
+import { isMatchDayEligible } from "../../lib/playerSquad";
 
 export type SquadSection = "xi" | "bench";
 export type DragState = {
@@ -16,7 +21,6 @@ export type PitchSlot = {
 };
 export type PitchSlotRow = PitchRow & { slots: PitchSlot[] };
 export type SquadTacticalFit = "natural" | "adapted" | "out";
-export type SquadStyleFit = "strong" | "good" | "risky";
 export type SquadRoleCoverageStatus = "covered" | "thin" | "uncovered";
 export type SquadRoleCoverage = {
   role: string;
@@ -24,73 +28,6 @@ export type SquadRoleCoverage = {
   naturalStarters: number;
   benchOptions: number;
   status: SquadRoleCoverageStatus;
-};
-
-export const CORE_POSITIONS = [
-  "Goalkeeper",
-  "Defender",
-  "Midfielder",
-  "Forward",
-] as const;
-
-const CANONICAL_POSITION_MAP: Record<string, string> = {
-  gk: "Goalkeeper",
-  goalkeeper: "Goalkeeper",
-  defender: "Defender",
-  def: "Defender",
-  wingback: "Defender",
-  midfielder: "Midfielder",
-  mid: "Midfielder",
-  forward: "Forward",
-  fwd: "Forward",
-  winger: "Forward",
-  rb: "RightBack",
-  rightback: "RightBack",
-  cb: "CenterBack",
-  centerback: "CenterBack",
-  centreback: "CenterBack",
-  lb: "LeftBack",
-  leftback: "LeftBack",
-  rwb: "RightWingBack",
-  rightwingback: "RightWingBack",
-  lwb: "LeftWingBack",
-  leftwingback: "LeftWingBack",
-  dm: "DefensiveMidfielder",
-  defensivemidfielder: "DefensiveMidfielder",
-  cm: "CentralMidfielder",
-  centralmidfielder: "CentralMidfielder",
-  am: "AttackingMidfielder",
-  attackingmidfielder: "AttackingMidfielder",
-  rm: "RightMidfielder",
-  rightmidfielder: "RightMidfielder",
-  lm: "LeftMidfielder",
-  leftmidfielder: "LeftMidfielder",
-  rw: "RightWinger",
-  rightwinger: "RightWinger",
-  lw: "LeftWinger",
-  leftwinger: "LeftWinger",
-  st: "Striker",
-  striker: "Striker",
-};
-
-const POSITION_GROUPS: Record<string, string> = {
-  Goalkeeper: "Goalkeeper",
-  Defender: "Defender",
-  Midfielder: "Midfielder",
-  Forward: "Forward",
-  RightBack: "Defender",
-  CenterBack: "Defender",
-  LeftBack: "Defender",
-  RightWingBack: "Defender",
-  LeftWingBack: "Defender",
-  DefensiveMidfielder: "Midfielder",
-  CentralMidfielder: "Midfielder",
-  AttackingMidfielder: "Midfielder",
-  RightMidfielder: "Midfielder",
-  LeftMidfielder: "Midfielder",
-  RightWinger: "Forward",
-  LeftWinger: "Forward",
-  Striker: "Forward",
 };
 
 const POSITION_LABELS: Record<string, string> = {
@@ -133,41 +70,6 @@ const POSITION_CODES: Record<string, string> = {
   Striker: "ST",
 };
 
-/**
- * Canonical football-order rank for sorting rosters by natural_position.
- * Order: GK → back line (CB → FB → WB) → midfield (DM → CM → AM → wide) → forwards (wingers → ST).
- *
- * Legacy coarse buckets sort at the *start* of their group (rank +0.5) so
- * unmigrated players stay adjacent to their granular teammates instead of
- * scattering to the end.
- */
-const POSITION_SORT_ORDER: Record<string, number> = {
-  Goalkeeper: 10,
-  Defender: 20,
-  CenterBack: 21,
-  LeftBack: 22,
-  RightBack: 23,
-  LeftWingBack: 24,
-  RightWingBack: 25,
-  Midfielder: 30,
-  DefensiveMidfielder: 31,
-  CentralMidfielder: 32,
-  AttackingMidfielder: 33,
-  LeftMidfielder: 34,
-  RightMidfielder: 35,
-  Forward: 40,
-  LeftWinger: 41,
-  RightWinger: 42,
-  Striker: 43,
-};
-
-/**
- * Rank a position for canonical sort ordering. Unknown values sort to the end.
- */
-export function positionSortRank(position: string): number {
-  return POSITION_SORT_ORDER[canonicalPosition(position)] ?? 999;
-}
-
 const GROUP_ROLE_PREFERENCES: Record<string, string[]> = {
   Goalkeeper: ["Goalkeeper"],
   Defender: ["CenterBack", "LeftBack", "RightBack", "LeftWingBack", "RightWingBack"],
@@ -180,17 +82,6 @@ const GROUP_ROLE_PREFERENCES: Record<string, string[]> = {
   ],
   Forward: ["Striker", "LeftWinger", "RightWinger"],
 };
-
-function normaliseKey(value: string): string {
-  return value.toLowerCase().replace(/[^a-z]/g, "");
-}
-
-export function canonicalPosition(position: string): string {
-  const trimmed = position.trim();
-  if (!trimmed) return trimmed;
-
-  return CANONICAL_POSITION_MAP[normaliseKey(trimmed)] || trimmed;
-}
 
 export function parseFormationSlots(formation: string): {
   def: number;
@@ -207,16 +98,9 @@ export function parseFormationSlots(formation: string): {
   return { def: 4, mid: 4, fwd: 2 };
 }
 
-export function normalisePosition(position: string): string {
-  const canonical = canonicalPosition(position);
-  return POSITION_GROUPS[canonical] || canonical;
-}
-
 export function positionCode(position: string): string {
   const normalized = canonicalPosition(position);
-  return (
-    POSITION_CODES[normalized] || normalized.substring(0, 3).toUpperCase()
-  );
+  return POSITION_CODES[normalized] || normalized.substring(0, 3).toUpperCase();
 }
 
 export function translatePositionLabel(
@@ -251,18 +135,13 @@ export function getCurrentPosition(
   player: PlayerData,
   xiActivePosition: Map<string, string>,
 ): string {
-  return (
-    xiActivePosition.get(player.id) || player.natural_position || player.position
-  );
+  return xiActivePosition.get(player.id) || naturalPositionOf(player);
 }
 
 export function getPreferredPositions(player: PlayerData): string[] {
   return [
     ...new Set(
-      [
-        player.natural_position || player.position,
-        ...(player.alternate_positions || []),
-      ]
+      [naturalPositionOf(player), ...(player.alternate_positions || [])]
         .filter(Boolean)
         .map(canonicalPosition),
     ),
@@ -282,13 +161,7 @@ export function buildPitchRows(formation: string): PitchRow[] {
       case 4:
         return ["LeftBack", "CenterBack", "CenterBack", "RightBack"];
       case 5:
-        return [
-          "LeftWingBack",
-          "CenterBack",
-          "CenterBack",
-          "CenterBack",
-          "RightWingBack",
-        ];
+        return ["LeftWingBack", "CenterBack", "CenterBack", "CenterBack", "RightWingBack"];
       default:
         return Array(count).fill("CenterBack");
     }
@@ -299,18 +172,9 @@ export function buildPitchRows(formation: string): PitchRow[] {
       case 2:
         return ["CentralMidfielder", "CentralMidfielder"];
       case 3:
-        return [
-          "DefensiveMidfielder",
-          "CentralMidfielder",
-          "AttackingMidfielder",
-        ];
+        return ["DefensiveMidfielder", "CentralMidfielder", "AttackingMidfielder"];
       case 4:
-        return [
-          "LeftMidfielder",
-          "CentralMidfielder",
-          "CentralMidfielder",
-          "RightMidfielder",
-        ];
+        return ["LeftMidfielder", "CentralMidfielder", "CentralMidfielder", "RightMidfielder"];
       case 5:
         return [
           "LeftMidfielder",
@@ -386,13 +250,6 @@ export function buildPitchRows(formation: string): PitchRow[] {
   ];
 }
 
-export function getPitchRowWidth(slotCount: number): string {
-  if (slotCount >= 5) return "88%";
-  if (slotCount === 4) return "82%";
-  if (slotCount === 3) return "68%";
-  if (slotCount === 2) return "50%";
-  return "28%";
-}
 export function getPitchSlotWidth(slotCount: number): number {
   if (slotCount >= 5) return 66;
   if (slotCount === 4) return 70;
@@ -419,12 +276,14 @@ export function comparePlayersForSlot(
   leftPlayer: PlayerData,
   rightPlayer: PlayerData,
   slotPosition: string,
+  positionTable: PositionTable,
+  familiarity?: FamiliarityTable,
 ): number {
   return (
-    Number(isPlayerOutOfPosition(leftPlayer, slotPosition)) -
-    Number(isPlayerOutOfPosition(rightPlayer, slotPosition)) ||
-    Number(!isPlayerExactForSlot(leftPlayer, slotPosition)) -
-    Number(!isPlayerExactForSlot(rightPlayer, slotPosition)) ||
+    Number(isPlayerOutOfPosition(leftPlayer, slotPosition, positionTable, familiarity)) -
+      Number(isPlayerOutOfPosition(rightPlayer, slotPosition, positionTable, familiarity)) ||
+    Number(!isPlayerExactForSlot(leftPlayer, slotPosition, familiarity)) -
+      Number(!isPlayerExactForSlot(rightPlayer, slotPosition, familiarity)) ||
     getPlayerOvr(rightPlayer) - getPlayerOvr(leftPlayer) ||
     rightPlayer.condition - leftPlayer.condition ||
     leftPlayer.full_name.localeCompare(rightPlayer.full_name)
@@ -435,6 +294,8 @@ export function buildStartingXIIds(
   available: PlayerData[],
   savedIds: string[],
   formation: string,
+  positionTable: PositionTable,
+  familiarity?: FamiliarityTable,
 ): string[] {
   const rows = buildPitchRows(formation);
   const slotPositions = rows.flatMap((row) => row.positions);
@@ -455,7 +316,9 @@ export function buildStartingXIIds(
     while (xi.length < 11) {
       const slotPosition = slotPositions[xi.length];
       const candidates = available.filter((player) => !used.has(player.id));
-      const bestPlayer = candidates.sort((a, b) => comparePlayersForSlot(a, b, slotPosition))[0];
+      const bestPlayer = candidates.sort((a, b) =>
+        comparePlayersForSlot(a, b, slotPosition, positionTable, familiarity),
+      )[0];
 
       if (!bestPlayer) break;
       xi.push(bestPlayer.id);
@@ -467,7 +330,9 @@ export function buildStartingXIIds(
   const xi: string[] = [];
   slotPositions.slice(0, 11).forEach((slotPosition) => {
     const candidates = available.filter((player) => !used.has(player.id));
-    const bestPlayer = candidates.sort((a, b) => comparePlayersForSlot(a, b, slotPosition))[0];
+    const bestPlayer = candidates.sort((a, b) =>
+      comparePlayersForSlot(a, b, slotPosition, positionTable, familiarity),
+    )[0];
 
     if (bestPlayer) {
       xi.push(bestPlayer.id);
@@ -515,9 +380,7 @@ export function getDeployedPosition(
   return slots[slotIndex] ?? null;
 }
 
-export function buildActivePositionMap(
-  pitchSlotRows: PitchSlotRow[],
-): Map<string, string> {
+export function buildActivePositionMap(pitchSlotRows: PitchSlotRow[]): Map<string, string> {
   const map = new Map<string, string>();
   pitchSlotRows.forEach((row) => {
     row.slots.forEach((slot) => {
@@ -529,59 +392,120 @@ export function buildActivePositionMap(
   return map;
 }
 
+/** The granular position a legacy bucket is graded as, as the backend reads it. */
+const BUCKET_AS_GRANULAR: Record<string, string> = {
+  Defender: "CenterBack",
+  Midfielder: "CentralMidfielder",
+  Forward: "Striker",
+};
+
+/**
+ * The positions the backend's `is_legacy_bucket` names: the goalkeeper is among them, so a player
+ * whose natural position is Goalkeeper is read by his `position`.
+ */
+const LEGACY_BUCKETS = new Set(["Goalkeeper", ...Object.keys(BUCKET_AS_GRANULAR)]);
+
+/** A position as it is graded: a legacy bucket as its granular position, anything else as it is. */
+function gradedPosition(position: string): string {
+  const canonical = canonicalPosition(position);
+  return BUCKET_AS_GRANULAR[canonical] ?? canonical;
+}
+
+/**
+ * The position a player is graded as playing: his natural position, or his coarse `position` when
+ * the natural one is still a legacy bucket. This is the backend's `primary_position`, kept here
+ * only while the screens grade a fit themselves (a copy to retire once they read the backend's).
+ */
+function primaryPositionOf(player: PlayerData): string {
+  const natural = canonicalPosition(player.natural_position || "");
+  const naturalIsBucket = natural === "" || LEGACY_BUCKETS.has(natural);
+  return gradedPosition(naturalIsBucket ? player.position : natural);
+}
+
+/**
+ * A winger and the wide midfielder on his side, one line apart on the same flank: the backend's
+ * `is_flank_partner` (player_rating.rs), which steps between them as within a line.
+ */
+const FLANK_PARTNERS: ReadonlySet<string> = new Set([
+  "RightWinger:RightMidfielder",
+  "RightMidfielder:RightWinger",
+  "LeftWinger:LeftMidfielder",
+  "LeftMidfielder:LeftWinger",
+]);
+
+/**
+ * Whether the slot is neither the player's position, one of his alternates, a position in his
+ * own line, nor the wide position on his flank in the next line: the backend's `out_of_position`. Until the backend's position table has loaded no line
+ * is known, and "out of position" would be a guess that reads every granular player as out, so it
+ * says no.
+ */
 export function isPlayerOutOfPosition(
   player: PlayerData,
   currentPos: string,
+  positionTable: PositionTable,
+  familiarity?: FamiliarityTable,
 ): boolean {
-  const canonicalCurrentPos = canonicalPosition(currentPos);
-  const normalizedCurrentPos = normalisePosition(currentPos);
-  return !getPreferredPositions(player).some(
-    (position) =>
-      position === canonicalCurrentPos ||
-      normalisePosition(position) === normalizedCurrentPos,
-  );
+  // The backend's grade, when the screen has it; null (not loaded, or not the club's) is no.
+  if (familiarity) {
+    return (
+      familiarity.familiarityOf(player.id, canonicalPosition(currentPos)) === "out_of_position"
+    );
+  }
+  if (!positionTable.loaded) return false;
+  const slot = gradedPosition(currentPos);
+  const primary = primaryPositionOf(player);
+  if (slot === primary) return false;
+  if ((player.alternate_positions || []).some((alternate) => gradedPosition(alternate) === slot)) {
+    return false;
+  }
+  if (FLANK_PARTNERS.has(`${primary}:${slot}`)) return false;
+  return positionTable.groupOf(primary) !== positionTable.groupOf(slot);
 }
 
 export function isPlayerExactForSlot(
   player: PlayerData,
   currentPos: string,
+  familiarity?: FamiliarityTable,
 ): boolean {
-  return canonicalPosition(player.natural_position || player.position) === canonicalPosition(currentPos);
+  if (familiarity) {
+    return familiarity.familiarityOf(player.id, canonicalPosition(currentPos)) === "natural";
+  }
+  return primaryPositionOf(player) === gradedPosition(currentPos);
 }
 
 export function getSquadTacticalFit(
   player: PlayerData,
   currentPos: string,
-): SquadTacticalFit {
+  positionTable: PositionTable,
+  familiarity?: FamiliarityTable,
+): SquadTacticalFit | null {
+  if (familiarity) {
+    // No grade (not loaded, a player outside the club) is no verdict, not "adapted".
+    const word = familiarity.familiarityOf(player.id, canonicalPosition(currentPos));
+    if (word === null) return null;
+    if (word === "natural") return "natural";
+    return word === "out_of_position" ? "out" : "adapted";
+  }
   if (isPlayerExactForSlot(player, currentPos)) {
     return "natural";
   }
 
-  if (isPlayerOutOfPosition(player, currentPos)) {
+  if (isPlayerOutOfPosition(player, currentPos, positionTable, familiarity)) {
     return "out";
   }
 
   return "adapted";
 }
 
-function averageAttributes(
-  player: PlayerData,
-  attributeKeys: Array<keyof PlayerData["attributes"]>,
-): number {
-  return (
-    attributeKeys.reduce((total, key) => total + player.attributes[key], 0) /
-    attributeKeys.length
-  );
-}
-
 export function getBestRoleForFormation(
   player: PlayerData,
   formation: string,
+  positionTable: PositionTable,
 ): string {
   const formationSlots = buildPitchRows(formation).flatMap((row) => row.positions);
   // Best role is an ability recommendation, so it is driven by the player's
   // natural position (not player.position, which is only a coarse bucket).
-  const naturalPosition = canonicalPosition(player.natural_position || player.position);
+  const naturalPosition = canonicalPosition(naturalPositionOf(player));
   const alternatePositions = (player.alternate_positions || []).map(canonicalPosition);
 
   // 1. The player's natural position has an exact slot in this formation.
@@ -592,7 +516,7 @@ export function getBestRoleForFormation(
   // 2. The closest role within the player's primary position group. This is
   //    preferred over tangential alternates so a DM in a DM-less formation
   //    resolves to CM, never to an unrelated alternate such as RB.
-  const playerGroup = normalisePosition(naturalPosition);
+  const playerGroup = positionTable.groupOf(naturalPosition);
   const groupRolePreferences = GROUP_ROLE_PREFERENCES[playerGroup] ?? [];
   const preferredGroupRole = groupRolePreferences.find((position) =>
     formationSlots.includes(position),
@@ -611,74 +535,25 @@ export function getBestRoleForFormation(
 
   // 4. Fallbacks: any slot in the player's group, else first preferred position.
   const firstGroupRole = formationSlots.find(
-    (position) => normalisePosition(position) === playerGroup,
+    (position) => positionTable.groupOf(position) === playerGroup,
   );
 
   return firstGroupRole ?? getPreferredPositions(player)[0] ?? naturalPosition;
-}
-
-// Penalty (in attribute points) applied to the style-fit score based on how
-// naturally the player suits their current field position. Tunable.
-const STYLE_FIT_POSITION_PENALTY: Record<SquadTacticalFit, number> = {
-  natural: 0,
-  adapted: 8,
-  out: 18,
-};
-
-export function getPlayStyleFit(
-  player: PlayerData,
-  playStyle: string,
-  currentPos?: string,
-): SquadStyleFit {
-  const attributeScore = (() => {
-    switch (playStyle) {
-      case "Attacking":
-        return averageAttributes(player, ["shooting", "dribbling", "pace", "passing"]);
-      case "Defensive":
-        return averageAttributes(player, ["defending", "tackling", "positioning", "strength"]);
-      case "Possession":
-        return averageAttributes(player, ["passing", "vision", "decisions", "composure"]);
-      case "Counter":
-        return averageAttributes(player, ["pace", "dribbling", "passing", "positioning"]);
-      case "HighPress":
-        return averageAttributes(player, ["stamina", "aggression", "teamwork", "pace", "tackling"]);
-      default:
-        return averageAttributes(player, ["decisions", "teamwork", "composure", "stamina"]);
-    }
-  })();
-
-  // A player asked to execute a style out of position is a worse fit regardless
-  // of raw attributes (e.g. a striker shoehorned at centre-back). When no
-  // position is supplied the score is attribute-only as before.
-  const positionPenalty = currentPos
-    ? STYLE_FIT_POSITION_PENALTY[getSquadTacticalFit(player, currentPos)]
-    : 0;
-  const fitScore = attributeScore - positionPenalty;
-
-  if (fitScore >= 72) {
-    return "strong";
-  }
-
-  if (fitScore >= 58) {
-    return "good";
-  }
-
-  return "risky";
 }
 
 export function buildRoleCoverageSummary(
   availablePlayers: PlayerData[],
   currentXiIds: string[],
   formation: string,
+  positionTable: PositionTable,
+  familiarity?: FamiliarityTable,
 ): SquadRoleCoverage[] {
   const slotPositions = buildPitchRows(formation).flatMap((row) => row.positions);
   const requiredByRole = new Map<string, number>();
   const naturalStartersByRole = new Map<string, number>();
   const benchOptionsByRole = new Map<string, number>();
   const xiSet = new Set(currentXiIds);
-  const playersById = new Map(
-    availablePlayers.map((player) => [player.id, player] as const),
-  );
+  const playersById = new Map(availablePlayers.map((player) => [player.id, player] as const));
 
   slotPositions.forEach((role) => {
     requiredByRole.set(role, (requiredByRole.get(role) ?? 0) + 1);
@@ -692,11 +567,8 @@ export function buildRoleCoverageSummary(
       return;
     }
 
-    if (getSquadTacticalFit(player, slotPosition) === "natural") {
-      naturalStartersByRole.set(
-        slotPosition,
-        (naturalStartersByRole.get(slotPosition) ?? 0) + 1,
-      );
+    if (getSquadTacticalFit(player, slotPosition, positionTable, familiarity) === "natural") {
+      naturalStartersByRole.set(slotPosition, (naturalStartersByRole.get(slotPosition) ?? 0) + 1);
     }
   });
 
@@ -744,11 +616,25 @@ export function buildRoleCoverageSummary(
     });
 }
 
-function getFitScore(player: PlayerData, currentPos: string): number {
-  const fit = getSquadTacticalFit(player, currentPos);
+/**
+ * Whether the screen can grade a lineup yet: the backend's position table has loaded and, for a
+ * screen that reads the backend's familiarity, that has too. Nothing is picked or saved before.
+ */
+export function lineupReady(positionTable: PositionTable, familiarity?: FamiliarityTable): boolean {
+  return positionTable.loaded && (familiarity?.loaded ?? true);
+}
+
+function getFitScore(
+  player: PlayerData,
+  currentPos: string,
+  positionTable: PositionTable,
+  familiarity?: FamiliarityTable,
+): number {
+  const fit = getSquadTacticalFit(player, currentPos, positionTable, familiarity);
 
   if (fit === "natural") return 2;
   if (fit === "adapted") return 1;
+  // Out of position, or no grade: nothing is picked on a missing one (the builders wait for it).
   return 0;
 }
 
@@ -757,7 +643,11 @@ export function buildPromoteToStartingXi(
   playersById: Map<string, PlayerData>,
   formation: string,
   playerId: string,
+  positionTable: PositionTable,
+  familiarity?: FamiliarityTable,
 ): string[] | null {
+  // As for the best-fit slot: no lines known yet means no pick that could be saved.
+  if (!lineupReady(positionTable, familiarity)) return currentXiIds;
   if (currentXiIds.includes(playerId)) {
     return currentXiIds;
   }
@@ -768,7 +658,7 @@ export function buildPromoteToStartingXi(
     return null;
   }
 
-  if (promotedPlayer.injury) {
+  if (!isMatchDayEligible(promotedPlayer)) {
     return null;
   }
 
@@ -777,7 +667,7 @@ export function buildPromoteToStartingXi(
   const targetSlotIndex = slotPositions
     .map((slotPosition, slotIndex) => {
       const incumbentId = currentXiIds[slotIndex];
-      const incumbentPlayer = incumbentId ? playersById.get(incumbentId) ?? null : null;
+      const incumbentPlayer = incumbentId ? (playersById.get(incumbentId) ?? null) : null;
 
       return {
         incumbentPlayer,
@@ -786,13 +676,23 @@ export function buildPromoteToStartingXi(
       };
     })
     .sort((leftSlot, rightSlot) => {
-      const promotedLeftScore = getFitScore(promotedPlayer, leftSlot.slotPosition);
-      const promotedRightScore = getFitScore(promotedPlayer, rightSlot.slotPosition);
+      const promotedLeftScore = getFitScore(
+        promotedPlayer,
+        leftSlot.slotPosition,
+        positionTable,
+        familiarity,
+      );
+      const promotedRightScore = getFitScore(
+        promotedPlayer,
+        rightSlot.slotPosition,
+        positionTable,
+        familiarity,
+      );
       const incumbentLeftScore = leftSlot.incumbentPlayer
-        ? getFitScore(leftSlot.incumbentPlayer, leftSlot.slotPosition)
+        ? getFitScore(leftSlot.incumbentPlayer, leftSlot.slotPosition, positionTable, familiarity)
         : -1;
       const incumbentRightScore = rightSlot.incumbentPlayer
-        ? getFitScore(rightSlot.incumbentPlayer, rightSlot.slotPosition)
+        ? getFitScore(rightSlot.incumbentPlayer, rightSlot.slotPosition, positionTable, familiarity)
         : -1;
       const incumbentLeftOvr = leftSlot.incumbentPlayer
         ? getPlayerOvr(leftSlot.incumbentPlayer)
@@ -854,7 +754,12 @@ export function buildAssignBestFitSlot(
   playersById: Map<string, PlayerData>,
   formation: string,
   playerId: string,
+  positionTable: PositionTable,
+  familiarity?: FamiliarityTable,
 ): string[] | null {
+  // Fit is graded by the backend's lines; without them every slot ties and the lowest index wins,
+  // which is the keeper's. A pick made on that would be saved, so nothing is picked yet.
+  if (!lineupReady(positionTable, familiarity)) return currentXiIds;
   const currentSlotIndex = currentXiIds.indexOf(playerId);
 
   if (currentSlotIndex < 0) {
@@ -870,14 +775,11 @@ export function buildAssignBestFitSlot(
 
   const bestSlotIndex = slotPositions
     .map((slotPosition, slotIndex) => ({
-      fitScore: getFitScore(player, slotPosition),
+      fitScore: getFitScore(player, slotPosition, positionTable, familiarity),
       slotIndex,
     }))
     .sort((leftSlot, rightSlot) => {
-      return (
-        rightSlot.fitScore - leftSlot.fitScore ||
-        leftSlot.slotIndex - rightSlot.slotIndex
-      );
+      return rightSlot.fitScore - leftSlot.fitScore || leftSlot.slotIndex - rightSlot.slotIndex;
     })[0]?.slotIndex;
 
   if (bestSlotIndex == null) {
@@ -892,7 +794,11 @@ export function buildDemoteFromStartingXi(
   availablePlayers: PlayerData[],
   formation: string,
   playerId: string,
+  positionTable: PositionTable,
+  familiarity?: FamiliarityTable,
 ): string[] | null {
+  // As for the best-fit slot: no lines known yet means no replacement that could be saved.
+  if (!lineupReady(positionTable, familiarity)) return currentXiIds;
   const slotIndex = currentXiIds.indexOf(playerId);
 
   if (slotIndex < 0) {
@@ -904,7 +810,7 @@ export function buildDemoteFromStartingXi(
     (player) => !currentXiIds.includes(player.id) && player.id !== playerId,
   );
   const replacement = benchCandidates.sort((leftPlayer, rightPlayer) =>
-    comparePlayersForSlot(leftPlayer, rightPlayer, slotPosition),
+    comparePlayersForSlot(leftPlayer, rightPlayer, slotPosition, positionTable, familiarity),
   )[0];
 
   if (!replacement) {
@@ -928,15 +834,11 @@ export function applyLineupDrop(
   }
 
   if (dragState.from === "xi") {
-    const fromIndex =
-      dragState.slotIndex ?? nextXiIds.indexOf(dragState.playerId);
+    const fromIndex = dragState.slotIndex ?? nextXiIds.indexOf(dragState.playerId);
     if (fromIndex < 0 || fromIndex === slotIndex) {
       return nextXiIds;
     }
-    [nextXiIds[fromIndex], nextXiIds[slotIndex]] = [
-      nextXiIds[slotIndex],
-      nextXiIds[fromIndex],
-    ];
+    [nextXiIds[fromIndex], nextXiIds[slotIndex]] = [nextXiIds[slotIndex], nextXiIds[fromIndex]];
     return nextXiIds;
   }
 

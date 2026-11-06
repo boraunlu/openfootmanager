@@ -3,17 +3,82 @@ import { useState } from "react";
 import { beforeEach } from "vitest";
 import { describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import type {
-  GameStateData,
-  PlayerData,
-  StaffData,
-  TeamData,
-} from "../../store/gameStore";
+import type { InvokeArgs } from "@tauri-apps/api/core";
+import type { GameStateData, PlayerData, StaffData, TeamData } from "../../store/gameStore";
+import type { PlayerKnowledge, VisibleWage } from "../../services/scoutingService";
 import PlayerProfile from "./PlayerProfile";
+import { createSeasonContext } from "../../test-utils/factories";
 
-function hasAnnualWage(text: string, amount: string): boolean {
-  return text.replace(/\s+/g, "").includes(`€${amount}/yr`);
+/**
+ * The fields these mocks read out of an invoke payload. Tauri's IPC boundary is untyped by
+ * nature — every command takes a different shape — so this names what is actually touched
+ * rather than reaching for `any` and switching type-checking off for the whole object.
+ */
+type MockInvokePayload = {
+  request?: { playerId?: string };
+  fee?: number;
+  weeklyWage?: number;
+};
+
+function hasWeeklyWage(text: string, amount: string): boolean {
+  return text.replace(/\s+/g, "").includes(`€${amount}/wk`);
 }
+
+// What the backend's contract warning stages read as on a badge, by player id; a test says which
+// players are at risk. The hook that asks for them has its own test.
+const riskLevels = vi.hoisted(() => ({
+  current: {} as Record<string, "critical" | "warning" | "stable">,
+}));
+
+vi.mock("../../hooks/useContractWarningStages", () => ({
+  useContractRiskLevels: () => (playerId: string) => riskLevels.current[playerId] ?? "stable",
+}));
+
+// What the club knows about each player, by id, as the backend's knowledge rule would answer; a test
+// names the rivals it shows. Everyone else reads as the club's own, which most of these tests render.
+// The hook that asks for it has its own test.
+// Each revision the profile hands the hook is kept, so a test can see when it would ask again.
+const knowledge = vi.hoisted(() => ({
+  current: {} as Record<string, PlayerKnowledge>,
+  revisions: [] as string[],
+}));
+
+vi.mock("../../hooks/usePlayerKnowledge", () => ({
+  usePlayerKnowledge: (_playerIds: string[], revision: string) => {
+    knowledge.revisions.push(revision);
+    return (playerId: string) => knowledge.current[playerId] ?? ({ kind: "own" } as const);
+  },
+}));
+
+// The wage the club may see, by player id, as the backend's `visible_wage` would answer. Everyone
+// else reads as the club's own player on his current wage, which the profile's revision key ends
+// with, as the backend would answer after a renewal.
+const wages = vi.hoisted(() => ({
+  current: {} as Record<string, VisibleWage>,
+  revisions: [] as string[],
+}));
+
+vi.mock("../../hooks/useVisibleWage", () => ({
+  useVisibleWage: (playerId: string, revision: string) => {
+    wages.revisions.push(revision);
+    return {
+      status: "answered" as const,
+      value:
+        wages.current[playerId] ??
+        ({ kind: "exact", weekly: Number(JSON.parse(revision).at(-1)) } as const),
+    };
+  },
+}));
+
+// The club holds no opinion of anyone's potential in these tests; PlayerProfile.potential.test.tsx
+// shows one, through the real hook. The hook has its own test.
+vi.mock("../../hooks/usePotentialOpinion", () => ({
+  usePotentialOpinion: () => ({ status: "answered", value: null }),
+}));
+// Nor its ratings at positions: PlayerProfilePositionRatings and usePositionRatings have their own.
+vi.mock("../../hooks/usePositionRatings", () => ({
+  usePositionRatings: () => ({ status: "answered", value: null }),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -22,7 +87,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("react-i18next", () => ({
   initReactI18next: {
     type: "3rdParty",
-    init: () => { },
+    init: () => {},
   },
   useTranslation: () => ({
     t: (key: string, params?: Record<string, string | number>) => {
@@ -37,6 +102,10 @@ vi.mock("react-i18next", () => ({
       if (key === "common.value") return "Value";
       if (key === "common.wage") return "Wage";
       if (key === "common.age") return "Age";
+      if (key.startsWith("common.ordinal.")) {
+        const suffixes: Record<string, string> = { one: "st", two: "nd", few: "rd", other: "th" };
+        return `${params?.n}${suffixes[key.split(".")[2]] ?? "th"}`;
+      }
       if (key === "common.viewTeam") return "View team";
       if (key === "common.freeAgent") return "Free Agent";
       if (key === "common.unknown") return "Unknown";
@@ -46,11 +115,11 @@ vi.mock("react-i18next", () => ({
       if (key === "finances.contractRiskCritical") return "Critical";
       if (key === "finances.contractRiskWarning") return "Warning";
       if (key === "finances.contractRiskStable") return "Stable";
-      if (key === "finances.contractExpiresOn")
-        return `Expires ${params?.date}`;
+      if (key === "finances.contractExpiresOn") return `Expires ${params?.date}`;
       if (key === "playerProfile.contractInfo") return "Contract Info";
       if (key === "playerProfile.dateOfBirth") return "Date of Birth";
       if (key === "playerProfile.weeklyWage") return "Weekly Wage";
+      if (key === "playerProfile.approximateWage") return `about ${params?.wage}`;
       if (key === "playerProfile.annualWage") return "Annual Wage";
       if (key === "playerProfile.noContract") return "No Contract";
       if (key === "playerProfile.yearsRemaining") return "Years Remaining";
@@ -58,13 +127,10 @@ vi.mock("react-i18next", () => ({
       if (key === "playerProfile.renewalTitle") return "Renew Contract";
       if (key === "playerProfile.renewalWage") return "Offered Wage";
       if (key === "playerProfile.renewalLength") return "Contract Length";
-      if (key === "playerProfile.renewalLengthYears")
-        return `${params?.count} years`;
+      if (key === "playerProfile.renewalLengthYears") return `${params?.count} years`;
       if (key === "playerProfile.renewalSubmit") return "Submit Offer";
-      if (key === "playerProfile.renewalBudgetWarning")
-        return "Exceeds wage budget";
-      if (key === "playerProfile.renewalInvalidWage")
-        return "Enter a valid weekly wage";
+      if (key === "playerProfile.renewalBudgetWarning") return "Exceeds wage budget";
+      if (key === "playerProfile.renewalInvalidWage") return "Enter a valid weekly wage";
       if (key === "playerProfile.renewalAccepted") return "Offer accepted";
       if (key === "playerProfile.renewalRejected") return "Offer rejected";
       if (key === "playerProfile.renewalCounter")
@@ -76,37 +142,30 @@ vi.mock("react-i18next", () => ({
       if (key === "playerProfile.letContractExpire") return "Let Expire";
       if (key === "playerProfile.reopenContractTalks") return "Reopen Talks";
       if (key === "playerProfile.terminateContract") return "Terminate Now";
-      if (key === "playerProfile.terminateContractTitle")
-        return "Terminate Contract";
+      if (key === "playerProfile.terminateContractTitle") return "Terminate Contract";
       if (key === "playerProfile.terminateContractBody")
         return `Release ${params?.name} immediately.`;
       if (key === "playerProfile.terminationSeverance") return "Severance";
-      if (key === "playerProfile.projectedHealthyPlayers")
-        return "Healthy players after release";
+      if (key === "playerProfile.projectedHealthyPlayers") return "Healthy players after release";
       if (key === "playerProfile.terminationUnsafe")
         return "This release would leave the squad unable to field a matchday XI.";
-      if (key === "playerProfile.confirmTerminateContract")
-        return "Terminate Contract";
-      if (key === "playerProfile.delegateRenewal")
-        return "Delegate to Assistant";
+      if (key === "playerProfile.confirmTerminateContract") return "Terminate Contract";
+      if (key === "playerProfile.delegateRenewal") return "Delegate to Assistant";
       if (key === "playerProfile.renewalDelegateMissingReport")
         return "Assistant report did not include this player.";
       if (key === "be.error.contracts.noAssistantManagerAssigned")
         return "Hire an assistant manager before delegating contract talks.";
       if (key === "be.error.contracts.playerHasNoActiveContract")
         return "This player does not have an active contract.";
-      if (key === "playerProfile.renewalConversationTitle")
-        return "Negotiation pulse";
-      if (key === "playerProfile.renewalProjectionTitle")
-        return "Projected financial impact";
+      if (key === "playerProfile.renewalConversationTitle") return "Negotiation pulse";
+      if (key === "playerProfile.renewalProjectionTitle") return "Projected financial impact";
       if (key === "playerProfile.renewalProjectionWageBill")
         return `Weekly wage bill ${params?.before} -> ${params?.after}`;
       if (key === "playerProfile.renewalProjectionBudgetUsage")
         return `Wage budget use ${params?.before}% -> ${params?.after}%`;
       if (key === "playerProfile.renewalProjectionRunway")
         return `Cash runway ${params?.before} -> ${params?.after}`;
-      if (key === "playerProfile.renewalRound")
-        return `Round ${params?.count}`;
+      if (key === "playerProfile.renewalRound") return `Round ${params?.count}`;
       if (key === "playerProfile.renewalPatience") return "Patience";
       if (key === "playerProfile.renewalTension") return "Tension";
       if (key === "playerProfile.renewalFeedbackFirmHeadline")
@@ -114,17 +173,14 @@ vi.mock("react-i18next", () => ({
       if (key === "playerProfile.renewalFeedbackFirmDetail")
         return "The discussion is still open, but wage level and contract length need to feel clearly worthwhile from their side.";
       if (key === "playerProfile.loanStatus") return "Loan Status";
-      if (key === "playerProfile.loanedInFrom")
-        return `On loan from ${params?.team}`;
-      if (key === "playerProfile.loanedOutTo")
-        return `On loan at ${params?.team}`;
+      if (key === "playerProfile.loanedInFrom") return `On loan from ${params?.team}`;
+      if (key === "playerProfile.loanedOutTo") return `On loan at ${params?.team}`;
       if (key === "playerProfile.loanBetweenClubs")
         return `On loan from ${params?.parent} to ${params?.loanTeam}`;
       if (key === "playerProfile.loanUntil") return `Until ${params?.date}`;
       if (key === "playerProfile.loanWageSplit")
         return `${params?.percent}% wages covered by loan club`;
-      if (key === "playerProfile.loanBuyOption")
-        return `Buy option ${params?.fee}`;
+      if (key === "playerProfile.loanBuyOption") return `Buy option ${params?.fee}`;
       if (key === "playerProfile.attributes") return "Attributes";
       if (key === "playerProfile.seasonStats") return "Season Stats";
       if (key === "playerProfile.advancedStats") return "Advanced Stats";
@@ -137,8 +193,7 @@ vi.mock("react-i18next", () => ({
       if (key === "playerProfile.per90") return "Per 90";
       if (key === "playerProfile.passAccuracy") return "Pass Accuracy";
       if (key === "playerProfile.percentile") return "Percentile";
-      if (key === "playerProfile.percentileUnavailable")
-        return "Percentile unavailable";
+      if (key === "playerProfile.percentileUnavailable") return "Percentile unavailable";
       if (key === "playerProfile.recentMatches") return "Recent Matches";
       if (key === "playerProfile.vs") return "vs";
       if (key === "playerProfile.noRecentMatches") return "No recent match data";
@@ -152,13 +207,11 @@ vi.mock("react-i18next", () => ({
       if (key === "playerProfile.movementLoanToBuy") return "Loan-to-buy";
       if (key === "playerProfile.movementFreeAgentSigning") return "Free agent";
       if (key === "playerProfile.movementReleased") return "Released";
-      if (key === "playerProfile.movementFromTo")
-        return `${params?.from} -> ${params?.to}`;
+      if (key === "playerProfile.movementFromTo") return `${params?.from} -> ${params?.to}`;
       if (key === "playerProfile.movementTo") return `Joined ${params?.to}`;
       if (key === "playerProfile.movementFrom") return `Left ${params?.from}`;
       if (key === "playerProfile.movementFee") return `Fee ${params?.fee}`;
-      if (key === "playerProfile.movementLoanUntil")
-        return `Loan until ${params?.date}`;
+      if (key === "playerProfile.movementLoanUntil") return `Loan until ${params?.date}`;
       if (key === "scouting.noScoutsHint") return "Hire a scout first";
       if (key === "scouting.scoutingInProgress") return "Scouting in progress";
       if (key === "scouting.scoutBtn") return "Scout";
@@ -174,11 +227,8 @@ vi.mock("react-i18next", () => ({
 }));
 
 vi.mock("../../utils/backendI18n", () => ({
-  resolveBackendText: (
-    _key?: string,
-    fallback?: string,
-    _params?: Record<string, string>,
-  ) => fallback ?? "",
+  resolveBackendText: (_key?: string, fallback?: string, _params?: Record<string, string>) =>
+    fallback ?? "",
 }));
 
 vi.mock("../../lib/countries", () => ({
@@ -290,6 +340,7 @@ function createStaff(overrides: Partial<StaffData> = {}): StaffData {
     id: "staff-1",
     first_name: "Alex",
     last_name: "Assistant",
+    display_name: "Alex Assistant",
     date_of_birth: "1980-01-01",
     nationality: "GB",
     role: "AssistantManager" as const,
@@ -309,11 +360,13 @@ function createStaff(overrides: Partial<StaffData> = {}): StaffData {
 
 function createGameState(player: PlayerData, staff: StaffData[] = []): GameStateData {
   return {
+    season_context: createSeasonContext(),
     clock: {
       current_date: "2026-08-01T00:00:00Z",
       start_date: "2026-07-01T00:00:00Z",
     },
     manager: {
+      display_name: "Jane Doe",
       id: "manager-1",
       first_name: "Jane",
       last_name: "Doe",
@@ -378,6 +431,10 @@ function defaultInvokeResponse(command: string) {
     return [];
   }
 
+  if (command === "get_scouted_report") {
+    return null;
+  }
+
   return createGameState(createPlayer());
 }
 
@@ -391,7 +448,6 @@ function RenewalHarness({ initialPlayer }: { initialPlayer?: PlayerData }) {
       player={gameState.players[0]}
       gameState={gameState}
       isOwnClub
-      onClose={vi.fn()}
       onGameUpdate={setGameState}
     />
   );
@@ -399,10 +455,10 @@ function RenewalHarness({ initialPlayer }: { initialPlayer?: PlayerData }) {
 
 describe("PlayerProfile contract surfaces", () => {
   beforeEach(() => {
+    riskLevels.current = {};
+    knowledge.current = {};
     vi.mocked(invoke).mockReset();
-    vi.mocked(invoke).mockImplementation(async (command: string) =>
-      defaultInvokeResponse(command),
-    );
+    vi.mocked(invoke).mockImplementation(async (command: string) => defaultInvokeResponse(command));
   });
 
   // The dashboard opens a profile straight into one of these modals when the
@@ -417,15 +473,12 @@ describe("PlayerProfile contract surfaces", () => {
         gameState={createGameState(player, [createStaff()])}
         isOwnClub
         startWithRenewalModal
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Submit Offer" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Submit Offer" })).toBeInTheDocument();
     });
   });
 
@@ -461,7 +514,6 @@ describe("PlayerProfile contract surfaces", () => {
         gameState={createGameState(player, [createStaff()])}
         isOwnClub
         startWithTerminationModal
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
@@ -489,7 +541,6 @@ describe("PlayerProfile contract surfaces", () => {
         isOwnClub={false}
         startWithRenewalModal
         startWithTerminationModal
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
@@ -498,35 +549,135 @@ describe("PlayerProfile contract surfaces", () => {
       expect(screen.getByText("Contract Info")).toBeInTheDocument();
     });
     expect(screen.queryByRole("button", { name: "Submit Offer" })).toBeNull();
-    expect(invoke).not.toHaveBeenCalledWith(
-      "preview_contract_termination",
-      expect.anything(),
-    );
+    expect(invoke).not.toHaveBeenCalledWith("preview_contract_termination", expect.anything());
   });
 
-  it("renders expiry date, years remaining, and contract risk for the selected player", () => {
-    const player = createPlayer();
-    const gameState = createGameState(player);
+  /**
+   * Given a player at another club whom a scout reported on, flagged out of date by the backend
+   * When the profile opens
+   * Then the scouted attributes show instead of the hidden placeholder, marked out of date
+   */
+  it("shows a scouted player's snapshot attributes with the backend's out-of-date verdict", async () => {
+    const player = createPlayer({ team_id: "team-2" });
+    knowledge.current = {
+      [player.id]: { kind: "scouted", scouted_on: "2026-03-10", current: false },
+    };
+    vi.mocked(invoke).mockImplementation(async (command: string, args?: InvokeArgs) => {
+      if (command === "get_scouted_report") {
+        expect(args).toEqual({ playerId: player.id });
+        return {
+          player_id: player.id,
+          scouted_on: "2026-03-10",
+          attributes: { ...player.attributes, pace: 77 },
+          out_of_date: true,
+        };
+      }
+      return defaultInvokeResponse(command);
+    });
 
     render(
       <PlayerProfile
         player={player}
-        gameState={gameState}
-        isOwnClub
-        onClose={vi.fn()}
+        gameState={createGameState(player, [createStaff()])}
+        isOwnClub={false}
+        onGameUpdate={vi.fn()}
       />,
     );
 
+    expect(await screen.findByText("playerProfile.scoutReportOutOfDate")).toBeInTheDocument();
+    expect(screen.getByText("77")).toBeInTheDocument();
+    expect(screen.queryByText("playerProfile.attributesHidden")).not.toBeInTheDocument();
+  });
+
+  /**
+   * Given a player nobody has scouted
+   * When the profile opens
+   * Then the attributes stay hidden
+   */
+  it("keeps the attributes hidden when the backend has no report", async () => {
+    const player = createPlayer({ team_id: "team-2" });
+    knowledge.current = { [player.id]: { kind: "unknown" } };
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "get_scouted_report") return null;
+      return defaultInvokeResponse(command);
+    });
+
+    render(
+      <PlayerProfile
+        player={player}
+        gameState={createGameState(player, [createStaff()])}
+        isOwnClub={false}
+        onGameUpdate={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("get_scouted_report", { playerId: player.id });
+    });
+    expect(screen.getByText("playerProfile.attributesHidden")).toBeInTheDocument();
+  });
+
+  /**
+   * Given a player born on 10 March 2000 and a game date of 1 August 2030
+   * When the profile opens
+   * Then it shows age 30
+   */
+  it("shows the age on the game's current date", () => {
+    const player = createPlayer({ date_of_birth: "2000-03-10" });
+    const state = createGameState(player);
+    state.clock = { ...state.clock, current_date: "2030-08-01T00:00:00Z" };
+
+    render(<PlayerProfile player={player} gameState={state} isOwnClub />);
+
+    expect(screen.getByText("Age 30")).toBeInTheDocument();
+  });
+
+  /**
+   * Given a player's profile, shown under the dashboard header that already has a Back
+   * When it renders
+   * Then it adds no second Back of its own
+   */
+  it("leaves Back to the dashboard header", () => {
+    const player = createPlayer();
+
+    render(<PlayerProfile player={player} gameState={createGameState(player)} isOwnClub />);
+
+    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
+  });
+
+  /**
+   * Given the same player the day before and the day after his birthday in 2031
+   * When the profile opens on each date
+   * Then it shows 30, then 31
+   */
+  it.each([
+    { date: "2031-03-09T00:00:00Z", age: 30 },
+    { date: "2031-03-10T00:00:00Z", age: 31 },
+  ])("changes the age when the birthday passes ($date)", ({ date, age }) => {
+    const player = createPlayer({ date_of_birth: "2000-03-10" });
+    const state = createGameState(player);
+    state.clock = { ...state.clock, current_date: date };
+
+    render(<PlayerProfile player={player} gameState={state} isOwnClub />);
+
+    expect(screen.getByText(`Age ${age}`)).toBeInTheDocument();
+  });
+
+  it("renders expiry date, years remaining, and contract risk for the selected player", () => {
+    const player = createPlayer();
+    riskLevels.current = { [player.id]: "critical" };
+    const gameState = createGameState(player);
+
+    render(<PlayerProfile player={player} gameState={gameState} isOwnClub />);
+
     expect(screen.getByText("Contract Info")).toBeInTheDocument();
-    expect(screen.getByText("Expires 2026-10-15")).toBeInTheDocument();
+    expect(screen.getByText("Expires October 15, 2026")).toBeInTheDocument();
     expect(screen.getByText("Years Remaining")).toBeInTheDocument();
     expect(screen.getByText("Contract Risk")).toBeInTheDocument();
     expect(screen.getByText("Critical")).toBeInTheDocument();
-    expect(screen.getByText("Annual Wage")).toBeInTheDocument();
+    expect(screen.getByText("Weekly Wage")).toBeInTheDocument();
     expect(
-      screen.getAllByText((_, element) =>
-        hasAnnualWage(element?.textContent ?? "", "12K"),
-      ).length,
+      screen.getAllByText((_, element) => hasWeeklyWage(element?.textContent ?? "", "12K")).length,
     ).toBeGreaterThan(0);
   });
 
@@ -558,26 +709,14 @@ describe("PlayerProfile contract surfaces", () => {
     );
 
     render(
-      <PlayerProfile
-        player={player}
-        gameState={gameState}
-        isOwnClub
-        onClose={vi.fn()}
-        onGameUpdate={vi.fn()}
-      />,
+      <PlayerProfile player={player} gameState={gameState} isOwnClub onGameUpdate={vi.fn()} />,
     );
 
     expect(screen.getByText("Loan Status")).toBeInTheDocument();
     expect(screen.getByText("On loan from Beta FC")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Renew Contract" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Let Expire" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Terminate Now" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Renew Contract" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Let Expire" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Terminate Now" })).not.toBeInTheDocument();
   });
 
   it("shows contract actions for players loaned out by the manager club", () => {
@@ -612,7 +751,6 @@ describe("PlayerProfile contract surfaces", () => {
         player={player}
         gameState={gameState}
         isOwnClub={false}
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
@@ -633,13 +771,7 @@ describe("PlayerProfile contract surfaces", () => {
     const onSelectTeam = vi.fn();
 
     render(
-      <PlayerProfile
-        player={player}
-        gameState={gameState}
-        isOwnClub
-        onClose={vi.fn()}
-        onSelectTeam={onSelectTeam}
-      />,
+      <PlayerProfile player={player} gameState={gameState} isOwnClub onSelectTeam={onSelectTeam} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Alpha FC" }));
@@ -653,13 +785,7 @@ describe("PlayerProfile contract surfaces", () => {
     const onSelectTeam = vi.fn();
 
     render(
-      <PlayerProfile
-        player={player}
-        gameState={gameState}
-        isOwnClub
-        onClose={vi.fn()}
-        onSelectTeam={onSelectTeam}
-      />,
+      <PlayerProfile player={player} gameState={gameState} isOwnClub onSelectTeam={onSelectTeam} />,
     );
 
     fireEvent.contextMenu(screen.getByTestId("player-profile-team-link"));
@@ -750,14 +876,7 @@ describe("PlayerProfile contract surfaces", () => {
       return defaultInvokeResponse(command);
     });
 
-    render(
-      <PlayerProfile
-        player={player}
-        gameState={gameState}
-        isOwnClub
-        onClose={vi.fn()}
-      />,
-    );
+    render(<PlayerProfile player={player} gameState={gameState} isOwnClub />);
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("get_player_stats_overview", {
@@ -770,6 +889,44 @@ describe("PlayerProfile contract surfaces", () => {
       expect(screen.getByText("88th")).toBeInTheDocument();
     });
   });
+
+  /**
+   * Given the backend overview flags the season rating as available or not
+   * When the profile opens for a player with a stored 7.2 average
+   * Then the season card shows 7.2 only when the flag says so
+   */
+  it.each([
+    { seasonRatingRated: true, shown: "7.2" },
+    { seasonRatingRated: false, shown: "–" },
+  ])(
+    "shows the season average only when the backend flags it ($seasonRatingRated)",
+    async ({ seasonRatingRated, shown }) => {
+      const player = createPlayer({
+        stats: { ...createPlayer().stats, avg_rating: 7.2, minutes_played: 450 },
+      });
+      vi.mocked(invoke).mockImplementation(async (command: string) => {
+        if (command === "get_player_stats_overview") {
+          return {
+            ...createAdvancedStatsSummary(),
+            percentileEligible: true,
+            seasonRatingRated,
+          };
+        }
+        if (command === "get_player_match_history") {
+          return [];
+        }
+        return defaultInvokeResponse(command);
+      });
+
+      render(<PlayerProfile player={player} gameState={createGameState(player)} isOwnClub />);
+
+      await waitFor(() => {
+        expect(
+          screen.getByText("playerProfile.avgRating").previousElementSibling,
+        ).toHaveTextContent(shown);
+      });
+    },
+  );
 
   it("loads and renders recent player match history", async () => {
     const player = createPlayer({
@@ -809,6 +966,7 @@ describe("PlayerProfile contract surfaces", () => {
             shots: 5,
             shots_on_target: 3,
             rating: 8.4,
+            rated: true,
           },
         ];
       }
@@ -816,14 +974,7 @@ describe("PlayerProfile contract surfaces", () => {
       return defaultInvokeResponse(command);
     });
 
-    render(
-      <PlayerProfile
-        player={player}
-        gameState={createGameState(player)}
-        isOwnClub
-        onClose={vi.fn()}
-      />,
-    );
+    render(<PlayerProfile player={player} gameState={createGameState(player)} isOwnClub />);
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("get_player_match_history", {
@@ -863,14 +1014,7 @@ describe("PlayerProfile contract surfaces", () => {
       ],
     });
 
-    render(
-      <PlayerProfile
-        player={player}
-        gameState={createGameState(player)}
-        isOwnClub
-        onClose={vi.fn()}
-      />,
-    );
+    render(<PlayerProfile player={player} gameState={createGameState(player)} isOwnClub />);
 
     expect(screen.getByText("Movement History")).toBeInTheDocument();
     expect(screen.getByText("Gamma FC -> Alpha FC")).toBeInTheDocument();
@@ -880,31 +1024,28 @@ describe("PlayerProfile contract surfaces", () => {
   });
 
   it("validates renewal offers before submission", async () => {
-    vi.mocked(invoke).mockImplementation(
-      async (command: string, payload?: any) => {
-        if (command === "preview_renewal_financial_impact") {
-          const offered = Number(payload?.weeklyWage ?? 0);
-          return {
-            projection: {
-              current_annual_wage_bill: 24000,
-              projected_annual_wage_bill: 24000 - 12000 + offered,
-              annual_wage_budget: 50000,
-              annual_soft_cap: 55000,
-              current_weekly_wage_spend: 461,
-              projected_weekly_wage_spend: Math.round(
-                (24000 - 12000 + offered) / 52,
-              ),
-              current_cash_runway_weeks: 1084,
-              projected_cash_runway_weeks: 500,
-              currently_over_budget: false,
-              policy_allows: offered <= 55000,
-            },
-          };
-        }
+    vi.mocked(invoke).mockImplementation(async (command: string, payload?: InvokeArgs) => {
+      const args = payload as MockInvokePayload | undefined;
+      if (command === "preview_renewal_financial_impact") {
+        const offered = Number(args?.weeklyWage ?? 0);
+        return {
+          projection: {
+            current_annual_wage_bill: 24000,
+            projected_annual_wage_bill: 24000 - 12000 + offered,
+            annual_wage_budget: 50000,
+            annual_soft_cap: 55000,
+            current_weekly_wage_spend: 24000,
+            projected_weekly_wage_spend: 24000 - 12000 + offered,
+            current_cash_runway_weeks: 1084,
+            projected_cash_runway_weeks: 500,
+            currently_over_budget: false,
+            policy_allows: offered <= 55000,
+          },
+        };
+      }
 
-        return defaultInvokeResponse(command);
-      },
-    );
+      return defaultInvokeResponse(command);
+    });
 
     render(<RenewalHarness />);
 
@@ -922,9 +1063,7 @@ describe("PlayerProfile contract surfaces", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Exceeds wage budget")).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Submit Offer" }),
-      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Submit Offer" })).toBeDisabled();
       expect(screen.getByText("Projected financial impact")).toBeInTheDocument();
     });
   });
@@ -964,6 +1103,7 @@ describe("PlayerProfile contract surfaces", () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("propose_renewal", {
+        careerToken: 0,
         playerId: "player-1",
         weeklyWage: 15000,
         contractYears: 3,
@@ -972,17 +1112,14 @@ describe("PlayerProfile contract surfaces", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Offer accepted")).toBeInTheDocument();
-      expect(screen.getByText("Expires 2029-08-01")).toBeInTheDocument();
+      expect(screen.getByText("Expires August 1, 2029")).toBeInTheDocument();
       expect(
-        screen.getAllByText((_, element) =>
-          hasAnnualWage(element?.textContent ?? "", "15K"),
-        ).length,
+        screen.getAllByText((_, element) => hasWeeklyWage(element?.textContent ?? "", "15K"))
+          .length,
       ).toBeGreaterThan(0);
       expect(screen.getByText("Stable")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Submit Offer" }),
-      ).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Submit Offer" })).not.toBeInTheDocument();
     });
   });
 
@@ -1055,13 +1192,9 @@ describe("PlayerProfile contract surfaces", () => {
     fireEvent.click(screen.getByRole("button", { name: "Submit Offer" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByText("Wants more: €16,000/wk for 4 years"),
-      ).toBeInTheDocument();
+      expect(screen.getByText("Wants more: €16,000/wk for 4 years")).toBeInTheDocument();
       expect(screen.getByText("Negotiation pulse")).toBeInTheDocument();
-      expect(
-        screen.getByText("They want stronger terms before moving."),
-      ).toBeInTheDocument();
+      expect(screen.getByText("They want stronger terms before moving.")).toBeInTheDocument();
       expect(screen.getByText("Round 1")).toBeInTheDocument();
       expect(screen.getByText("Patience")).toBeInTheDocument();
       expect(screen.getByText("Tension")).toBeInTheDocument();
@@ -1107,9 +1240,7 @@ describe("PlayerProfile contract surfaces", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(
-          "Previous talks cooled off, so this starts as a fresh conversation.",
-        ),
+        screen.getByText("Previous talks cooled off, so this starts as a fresh conversation."),
       ).toBeInTheDocument();
       expect(screen.getByText("Round 1")).toBeInTheDocument();
     });
@@ -1152,18 +1283,16 @@ describe("PlayerProfile contract surfaces", () => {
         player={createPlayer()}
         gameState={createGameState(createPlayer(), [createStaff()])}
         isOwnClub
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Renew Contract" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Delegate to Assistant" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Delegate to Assistant" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("delegate_renewals", {
+        careerToken: 0,
         playerIds: ["player-1"],
         maxWageIncreasePct: 35,
         maxContractYears: 3,
@@ -1198,20 +1327,15 @@ describe("PlayerProfile contract surfaces", () => {
         player={createPlayer()}
         gameState={createGameState(createPlayer(), [createStaff()])}
         isOwnClub
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Renew Contract" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Delegate to Assistant" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Delegate to Assistant" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByText("Assistant report did not include this player."),
-      ).toBeInTheDocument();
+      expect(screen.getByText("Assistant report did not include this player.")).toBeInTheDocument();
     });
   });
 
@@ -1248,24 +1372,19 @@ describe("PlayerProfile contract surfaces", () => {
         player={createPlayer()}
         gameState={createGameState(createPlayer(), [createStaff()])}
         isOwnClub
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Renew Contract" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Delegate to Assistant" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Delegate to Assistant" }));
 
     await waitFor(() => {
       expect(screen.getByText("Offer rejected")).toBeInTheDocument();
     });
 
     // Not terminal: the manager can still put an offer in themselves.
-    expect(
-      screen.getByRole("button", { name: "Submit Offer" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit Offer" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
   });
 
@@ -1298,20 +1417,15 @@ describe("PlayerProfile contract surfaces", () => {
         player={createPlayer()}
         gameState={createGameState(createPlayer(), [createStaff()])}
         isOwnClub
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Renew Contract" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Delegate to Assistant" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Delegate to Assistant" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByText("Talks are blocked after your earlier decision"),
-      ).toBeInTheDocument();
+      expect(screen.getByText("Talks are blocked after your earlier decision")).toBeInTheDocument();
     });
 
     // Terminal: nothing left for the manager to offer.
@@ -1324,9 +1438,7 @@ describe("PlayerProfile contract surfaces", () => {
     fireEvent.click(screen.getByRole("button", { name: "Renew Contract" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Delegate to Assistant" }),
-      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Delegate to Assistant" })).toBeDisabled();
     });
   });
 
@@ -1344,21 +1456,16 @@ describe("PlayerProfile contract surfaces", () => {
         player={createPlayer()}
         gameState={createGameState(createPlayer(), [createStaff()])}
         isOwnClub
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Renew Contract" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Delegate to Assistant" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Delegate to Assistant" }));
 
     await waitFor(() => {
       expect(
-        screen.getByText(
-          "Hire an assistant manager before delegating contract talks.",
-        ),
+        screen.getByText("Hire an assistant manager before delegating contract talks."),
       ).toBeInTheDocument();
     });
   });
@@ -1401,6 +1508,7 @@ describe("PlayerProfile contract surfaces", () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("set_contract_exit_intent", {
+        careerToken: 0,
         playerId: "player-1",
         reason: "manager_profile_action",
       });
@@ -1411,6 +1519,7 @@ describe("PlayerProfile contract surfaces", () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("clear_contract_exit_intent", {
+        careerToken: 0,
         playerId: "player-1",
       });
       expect(screen.getByRole("button", { name: "Let Expire" })).toBeInTheDocument();
@@ -1449,9 +1558,7 @@ describe("PlayerProfile contract surfaces", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
     });
-    expect(
-      screen.queryByRole("button", { name: "Submit Offer" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Submit Offer" })).not.toBeInTheDocument();
   });
 
   it("localizes contract action failures instead of showing raw backend keys", async () => {
@@ -1468,9 +1575,7 @@ describe("PlayerProfile contract surfaces", () => {
     fireEvent.click(screen.getByRole("button", { name: "Let Expire" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByText("This player does not have an active contract."),
-      ).toBeInTheDocument();
+      expect(screen.getByText("This player does not have an active contract.")).toBeInTheDocument();
     });
   });
 
@@ -1497,6 +1602,7 @@ describe("PlayerProfile contract surfaces", () => {
     fireEvent.click(screen.getByRole("button", { name: "Let Expire" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("set_contract_exit_intent", {
+        careerToken: 0,
         playerId: "player-1",
         reason: "manager_profile_action",
       });
@@ -1506,16 +1612,11 @@ describe("PlayerProfile contract surfaces", () => {
     expect(terminate).toBeDisabled();
 
     fireEvent.click(terminate);
-    expect(invoke).not.toHaveBeenCalledWith(
-      "preview_contract_termination",
-      expect.anything(),
-    );
+    expect(invoke).not.toHaveBeenCalledWith("preview_contract_termination", expect.anything());
 
     releaseExitIntent?.();
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Terminate Now" }),
-      ).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Terminate Now" })).toBeEnabled();
     });
   });
 
@@ -1581,6 +1682,7 @@ describe("PlayerProfile contract surfaces", () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("terminate_contract_now", {
+        careerToken: 0,
         playerId: "player-1",
       });
       expect(screen.getByText("No Contract")).toBeInTheDocument();
@@ -1594,9 +1696,7 @@ describe("PlayerProfile contract surfaces", () => {
 describe("PlayerProfile switching between players", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
-    vi.mocked(invoke).mockImplementation(async (command: string) =>
-      defaultInvokeResponse(command),
-    );
+    vi.mocked(invoke).mockImplementation(async (command: string) => defaultInvokeResponse(command));
   });
 
   function scoutStaff(): StaffData {
@@ -1614,7 +1714,6 @@ describe("PlayerProfile switching between players", () => {
         player={first}
         gameState={gameState}
         isOwnClub={false}
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
@@ -1622,6 +1721,7 @@ describe("PlayerProfile switching between players", () => {
     fireEvent.click(screen.getByRole("button", { name: "Scout" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("send_scout", {
+        careerToken: 0,
         scoutId: "scout-1",
         playerId: "player-1",
       });
@@ -1637,7 +1737,6 @@ describe("PlayerProfile switching between players", () => {
         player={second}
         gameState={createGameState(second, [scoutStaff()])}
         isOwnClub={false}
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
@@ -1666,6 +1765,7 @@ describe("PlayerProfile switching between players", () => {
               goals: 1,
               assists: 0,
               rating: 7.5,
+              rated: true,
               minutes_played: 90,
             },
           ];
@@ -1681,7 +1781,6 @@ describe("PlayerProfile switching between players", () => {
         player={first}
         gameState={createGameState(first)}
         isOwnClub
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
@@ -1700,7 +1799,6 @@ describe("PlayerProfile switching between players", () => {
         player={second}
         gameState={createGameState(second)}
         isOwnClub
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
@@ -1714,9 +1812,7 @@ describe("PlayerProfile switching between players", () => {
 describe("PlayerProfile free agent signing", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
-    vi.mocked(invoke).mockImplementation(async (command: string) =>
-      defaultInvokeResponse(command),
-    );
+    vi.mocked(invoke).mockImplementation(async (command: string) => defaultInvokeResponse(command));
   });
 
   it("shows Offer Contract button for a free agent player", () => {
@@ -1732,14 +1828,11 @@ describe("PlayerProfile free agent signing", () => {
         player={freeAgent}
         gameState={gameState}
         isOwnClub={false}
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
 
-    expect(
-      screen.getByRole("button", { name: "Offer Contract" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Offer Contract" })).toBeInTheDocument();
   });
 
   it("does not show Offer Contract for a retired free agent", () => {
@@ -1756,14 +1849,11 @@ describe("PlayerProfile free agent signing", () => {
         player={retired}
         gameState={gameState}
         isOwnClub={false}
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
 
-    expect(
-      screen.queryByRole("button", { name: "Offer Contract" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Offer Contract" })).not.toBeInTheDocument();
   });
 
   it("opens the contract modal when Offer Contract is clicked", async () => {
@@ -1780,7 +1870,6 @@ describe("PlayerProfile free agent signing", () => {
         player={freeAgent}
         gameState={gameState}
         isOwnClub={false}
-        onClose={vi.fn()}
         onGameUpdate={vi.fn()}
       />,
     );
@@ -1788,9 +1877,7 @@ describe("PlayerProfile free agent signing", () => {
     fireEvent.click(screen.getByRole("button", { name: "Offer Contract" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("dialog", { name: "Offer Contract" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("dialog", { name: "Offer Contract" })).toBeInTheDocument();
     });
   });
 
@@ -1809,6 +1896,9 @@ describe("PlayerProfile free agent signing", () => {
     const onGameUpdate = vi.fn();
 
     vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "get_free_agent_opening_offer") {
+        return { weekly_wage: 3000, contract_years: 3 };
+      }
       if (command === "offer_free_agent_contract") {
         return {
           outcome: "accepted",
@@ -1829,7 +1919,6 @@ describe("PlayerProfile free agent signing", () => {
         player={freeAgent}
         gameState={createGameState(freeAgent)}
         isOwnClub={false}
-        onClose={vi.fn()}
         onGameUpdate={onGameUpdate}
       />,
     );
@@ -1839,16 +1928,248 @@ describe("PlayerProfile free agent signing", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Offer Contract" })).toBeInTheDocument();
     });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Submit Offer" })).toBeEnabled();
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Submit Offer" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("offer_free_agent_contract", {
+        careerToken: 0,
         playerId: "player-1",
         weeklyWage: 3000,
         contractYears: 3,
       });
       expect(onGameUpdate).toHaveBeenCalled();
     });
+  });
+});
+
+describe("PlayerProfile shows only what the club knows", () => {
+  beforeEach(() => {
+    riskLevels.current = {};
+    knowledge.current = {};
+    knowledge.revisions = [];
+    wages.current = {};
+    wages.revisions = [];
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockImplementation(async (command: string) => defaultInvokeResponse(command));
+  });
+
+  // Renders a rival's profile, then the same profile on `next`, and says whether the profile handed
+  // the knowledge and wage hooks a new revision for it: whether they would ask the backend again.
+  function asksAgainOn(next: (gameState: GameStateData) => GameStateData) {
+    const player = rival();
+    const gameState = createGameState(player);
+    const { rerender } = render(
+      <PlayerProfile
+        player={player}
+        gameState={gameState}
+        isOwnClub={false}
+        onGameUpdate={vi.fn()}
+      />,
+    );
+    const last = (revisions: string[]) => revisions[revisions.length - 1];
+    const before = [last(knowledge.revisions), last(wages.revisions)];
+    rerender(
+      <PlayerProfile
+        player={player}
+        gameState={next(gameState)}
+        isOwnClub={false}
+        onGameUpdate={vi.fn()}
+      />,
+    );
+    return [last(knowledge.revisions) !== before[0], last(wages.revisions) !== before[1]];
+  }
+
+  /**
+   * Given a rival's profile open on the last day of a season
+   * When the season rolls over on the same date (promotion and relegation change who is known)
+   * Then the profile asks again what the club knows and which wage it may see
+   */
+  it("asks again about a rival when the season rolls over on the same date", () => {
+    expect(
+      asksAgainOn((gameState) => ({
+        ...gameState,
+        season_context: { ...gameState.season_context, season_start: "2099-07-01" },
+      })),
+    ).toEqual([true, true]);
+  });
+
+  /**
+   * Given a rival's profile open
+   * When another career is installed under it, on the same date, with the same clubs
+   * Then the profile asks again what the club knows and which wage it may see
+   */
+  it("asks again about a rival when another career is installed under the profile", () => {
+    expect(
+      asksAgainOn((gameState) => ({
+        ...gameState,
+        career_token: (gameState.career_token ?? 0) + 1,
+      })),
+    ).toEqual([true, true]);
+  });
+
+  // Condition 80, morale 75, a weekly wage of 12K (also on his contract in the movement history)
+  // and the Wonderkid tag: each one something a club only knows about its own player. The tag
+  // shows only as the club's opinion (PlayerProfile.potential.test.tsx); his own copy, which
+  // tells his true potential, never shows.
+  function rival(): PlayerData {
+    return createPlayer({
+      team_id: "team-2",
+      ovr: 77,
+      condition: 80,
+      morale: 75,
+      traits: ["Wonderkid"],
+      movement_history: [
+        {
+          date: "2025-07-01",
+          kind: "initial_contract",
+          to_team_id: "team-2",
+          to_team_name: "Rival FC",
+          contract: {
+            start: "2025-07-01",
+            end: "2028-06-30",
+            weekly_wage: 12_000,
+            source: "initial",
+          },
+        },
+      ],
+    });
+  }
+
+  // The movement history's wage on a contract, which only the club's own player shows.
+  const showsMovementWage = () => screen.queryByText("playerProfile.movementWage") !== null;
+
+  function renderProfile(player: PlayerData) {
+    render(
+      <PlayerProfile
+        player={player}
+        gameState={createGameState(player, [createStaff()])}
+        isOwnClub={false}
+        onGameUpdate={vi.fn()}
+      />,
+    );
+  }
+
+  // The contract card's weekly wage row: its value, apart from its label.
+  const contractWageValue = () =>
+    screen.getByText("Weekly Wage").parentElement?.textContent?.replace("Weekly Wage", "").trim();
+
+  const showsWage = () =>
+    screen.queryAllByText((_, element) => hasWeeklyWage(element?.textContent ?? "", "12K")).length >
+    0;
+
+  /**
+   * Given a player at a club in another division, never scouted
+   * When his profile opens
+   * Then his OVR, condition, morale, wage, attributes and Wonderkid tag are not shown; his market
+   *      value, which is public, is
+   */
+  it("shows only public facts about a player the club does not know", async () => {
+    const player = rival();
+    knowledge.current = { [player.id]: { kind: "unknown" } };
+    wages.current = { [player.id]: { kind: "hidden" } };
+
+    renderProfile(player);
+
+    expect(await screen.findByText("playerProfile.attributesHidden")).toBeInTheDocument();
+    expect(screen.queryByText("80%")).not.toBeInTheDocument();
+    expect(screen.queryByText("75%")).not.toBeInTheDocument();
+    expect(showsWage()).toBe(false);
+    expect(contractWageValue()).toBe("–");
+    expect(showsMovementWage()).toBe(false);
+    expect(screen.queryByText("77")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Wonderkid/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("€350K").length).toBeGreaterThan(0);
+  });
+
+  /**
+   * Given a player at a club in the manager's own division, never scouted
+   * When his profile opens
+   * Then his OVR and attributes show, as the staff see him every season; the Wonderkid tag, which
+   *      tells his potential, waits for a scout; his condition, morale and wage stay his club's
+   *      business
+   */
+  it("shows a known rival's attributes but not his potential or his club's private state", async () => {
+    const player = rival();
+    knowledge.current = { [player.id]: { kind: "known" } };
+    wages.current = { [player.id]: { kind: "hidden" } };
+
+    renderProfile(player);
+
+    expect(await screen.findByText("77")).toBeInTheDocument();
+    expect(screen.queryByText(/Wonderkid/)).not.toBeInTheDocument();
+    expect(screen.queryByText("playerProfile.attributesHidden")).not.toBeInTheDocument();
+    expect(screen.queryByText("80%")).not.toBeInTheDocument();
+    expect(screen.queryByText("75%")).not.toBeInTheDocument();
+    expect(showsWage()).toBe(false);
+    expect(contractWageValue()).toBe("–");
+    expect(showsMovementWage()).toBe(false);
+  });
+
+  /**
+   * Given a player in another division whom a scout reported on this season
+   * When his profile opens
+   * Then the scout's attributes show and his wage reads as about the figure, but not his OVR (no
+   *      estimate yet), his condition, his morale or his own Wonderkid tag
+   */
+  it("shows a scouted player's report but not what the scout could not see", async () => {
+    const player = rival();
+    knowledge.current = {
+      [player.id]: { kind: "scouted", scouted_on: "2026-09-01", current: true },
+    };
+    wages.current = { [player.id]: { kind: "approximate", weekly: 16_000 } };
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "get_scouted_report") {
+        return {
+          player_id: player.id,
+          scouted_on: "2026-09-01",
+          attributes: player.attributes,
+          out_of_date: false,
+        };
+      }
+      return defaultInvokeResponse(command);
+    });
+
+    renderProfile(player);
+
+    await waitFor(() => {
+      expect(screen.queryByText("playerProfile.attributesHidden")).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Wonderkid/)).not.toBeInTheDocument();
+    expect(screen.queryByText("80%")).not.toBeInTheDocument();
+    expect(screen.queryByText("77")).not.toBeInTheDocument();
+    expect(contractWageValue()).toBe("about €16,000/wk");
+    expect(screen.getAllByText("about €16K/wk").length).toBeGreaterThan(0);
+    expect(showsMovementWage()).toBe(false);
+  });
+
+  /**
+   * Given the club's own player
+   * When his profile opens
+   * Then his condition, morale and exact wage show; his own Wonderkid tag does not, as only the
+   *      club's opinion of him tags him
+   */
+  it("shows the club's own player's private state but not his own Wonderkid tag", () => {
+    const player = createPlayer({
+      ovr: 77,
+      condition: 80,
+      morale: 75,
+      traits: ["Wonderkid"],
+      movement_history: rival().movement_history,
+    });
+    knowledge.current = { [player.id]: { kind: "own" } };
+
+    render(<PlayerProfile player={player} gameState={createGameState(player)} isOwnClub />);
+
+    expect(screen.getAllByText("80%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("75%").length).toBeGreaterThan(0);
+    expect(showsWage()).toBe(true);
+    expect(contractWageValue()).not.toBe("–");
+    expect(showsMovementWage()).toBe(true);
+    expect(screen.getByText("77")).toBeInTheDocument();
+    expect(screen.queryByText(/Wonderkid/)).not.toBeInTheDocument();
   });
 });

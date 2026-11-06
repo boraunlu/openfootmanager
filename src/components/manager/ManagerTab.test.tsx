@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { GameStateData, TeamData } from "../../store/gameStore";
 import ManagerTab from "./ManagerTab";
+import { createSeasonContext } from "../../test-utils/factories";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -76,11 +77,13 @@ function createTeam(overrides: Partial<TeamData> = {}): TeamData {
 
 function createGameState(withHistory: boolean): GameStateData {
   return {
+    season_context: createSeasonContext(),
     clock: {
       current_date: "2026-08-10T00:00:00Z",
       start_date: "2026-07-01T00:00:00Z",
     },
     manager: {
+      display_name: "Jane Doe",
       id: "manager-1",
       first_name: "Jane",
       last_name: "Doe",
@@ -100,18 +103,18 @@ function createGameState(withHistory: boolean): GameStateData {
       },
       career_history: withHistory
         ? [
-          {
-            team_id: "team-0",
-            team_name: "Old Town FC",
-            start_date: "2021-07-01",
-            end_date: null,
-            matches: 40,
-            wins: 20,
-            draws: 10,
-            losses: 10,
-            best_league_position: 3,
-          },
-        ]
+            {
+              team_id: "team-0",
+              team_name: "Old Town FC",
+              start_date: "2021-07-01",
+              end_date: null,
+              matches: 40,
+              wins: 20,
+              draws: 10,
+              losses: 10,
+              best_league_position: 3,
+            },
+          ]
         : [],
     },
     teams: [createTeam(), createTeam({ id: "team-0", name: "Old Town FC", short_name: "OLD" })],
@@ -139,12 +142,7 @@ describe("ManagerTab", () => {
   it("offers team navigation from the current club and career history", () => {
     const onSelectTeam = vi.fn();
 
-    render(
-      <ManagerTab
-        gameState={createGameState(true)}
-        onSelectTeam={onSelectTeam}
-      />,
-    );
+    render(<ManagerTab gameState={createGameState(true)} onSelectTeam={onSelectTeam} />);
 
     fireEvent.contextMenu(screen.getByTestId("manager-current-team"));
     fireEvent.click(screen.getByRole("menuitem", { name: "View team" }));

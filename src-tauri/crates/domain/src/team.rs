@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Team {
     pub id: String,
     pub name: String,
@@ -14,6 +15,8 @@ pub struct Team {
     pub stadium_capacity: u32,
 
     // Current state
+    /// Cash on hand, in integer euros. Equal to the sum of cash-journal posts
+    /// for this club once the journal has been seeded.
     pub finance: i64,
     pub manager_id: Option<String>,
     pub reputation: u32,
@@ -75,7 +78,7 @@ pub struct Team {
     pub history: Vec<TeamSeasonRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, TS)]
 pub struct MatchRoles {
     pub captain: Option<String>,
     pub vice_captain: Option<String>,
@@ -86,7 +89,7 @@ pub struct MatchRoles {
 
 /// Tactical role for a player within the team's formation.
 /// Each role biases attribute weighting in match resolution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum PlayerRole {
     // Goalkeeper
     #[default]
@@ -163,7 +166,7 @@ impl std::str::FromStr for PlayerRole {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 #[serde(default)]
 pub struct TacticsPhaseSettings {
     // With ball
@@ -180,7 +183,7 @@ pub struct TacticsPhaseSettings {
     pub break_speed: BreakSpeed,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum BuildUpStyle {
     Short,
     #[default]
@@ -188,7 +191,7 @@ pub enum BuildUpStyle {
     Long,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum PitchWidth {
     Narrow,
     #[default]
@@ -196,14 +199,14 @@ pub enum PitchWidth {
     Wide,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum Tempo {
     Patient,
     #[default]
     Direct,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum DefensiveLine {
     VeryLow,
     Low,
@@ -212,7 +215,7 @@ pub enum DefensiveLine {
     High,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum PressingIntensity {
     Passive,
     #[default]
@@ -220,7 +223,7 @@ pub enum PressingIntensity {
     Aggressive,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum DefensiveShape {
     Stretched,
     #[default]
@@ -228,7 +231,7 @@ pub enum DefensiveShape {
     Compact,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum MarkingStyle {
     #[default]
     Zonal,
@@ -236,7 +239,7 @@ pub enum MarkingStyle {
     ManToMan,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum CounterPressDuration {
     #[default]
     None,
@@ -244,7 +247,7 @@ pub enum CounterPressDuration {
     Long,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum BreakSpeed {
     Slow,
     #[default]
@@ -252,7 +255,7 @@ pub enum BreakSpeed {
     Fast,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum TrainingFocus {
     #[default]
     Physical,
@@ -263,7 +266,7 @@ pub enum TrainingFocus {
     Recovery,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum TrainingIntensity {
     Low,
     #[default]
@@ -273,7 +276,7 @@ pub enum TrainingIntensity {
 
 /// Weekly training schedule controlling how many days per week are training vs rest.
 /// Rest days give full condition recovery with no training cost.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, TS)]
 pub enum TrainingSchedule {
     /// 6 training days, 1 rest (Sunday). Max growth, minimal recovery.
     Intense,
@@ -310,7 +313,7 @@ impl TrainingSchedule {
 
 /// A named training group with its own focus. Players in a group train
 /// with the group's focus instead of the team-wide default.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct TrainingGroup {
     pub id: String,
     pub name: String,
@@ -318,13 +321,13 @@ pub struct TrainingGroup {
     pub player_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct TeamColors {
     pub primary: String,
     pub secondary: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, TS)]
 pub enum KitPattern {
     #[default]
     Solid,
@@ -361,13 +364,13 @@ impl std::str::FromStr for KitPattern {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 pub struct TeamMedia {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub enum PlayStyle {
     Balanced,
     Attacking,
@@ -377,7 +380,7 @@ pub enum PlayStyle {
     HighPress,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct TeamSeasonRecord {
     pub season: u32,
     pub league_position: u32,
@@ -387,9 +390,13 @@ pub struct TeamSeasonRecord {
     pub lost: u32,
     pub goals_for: u32,
     pub goals_against: u32,
+    /// The league this record's table belongs to; blank on a record saved before it was kept,
+    /// which reads as "unknown" (see `ofm_core::hall_of_fame` for what a title is).
+    #[serde(default)]
+    pub competition_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub enum FinancialTransactionKind {
     PrizeMoney,
     ContractTermination,
@@ -397,7 +404,7 @@ pub enum FinancialTransactionKind {
     CommercialCampaign,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub struct FinancialTransaction {
     pub date: String,
     pub description: String,
@@ -405,7 +412,7 @@ pub struct FinancialTransaction {
     pub kind: FinancialTransactionKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub enum SponsorshipBonusCriterion {
     LeaguePosition {
         max_position: u32,
@@ -417,7 +424,7 @@ pub enum SponsorshipBonusCriterion {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, TS)]
 #[serde(default)]
 pub struct Sponsorship {
     pub sponsor_name: String,
@@ -433,7 +440,7 @@ pub enum FacilityType {
     Scouting,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(default)]
 pub struct Facilities {
     pub training: u8,

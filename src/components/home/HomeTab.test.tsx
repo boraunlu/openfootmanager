@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import HomeTab from "./HomeTab";
@@ -9,6 +9,20 @@ import type {
   PlayerData,
   TeamData,
 } from "../../store/gameStore";
+import {
+  createConditionStatus,
+  createSeasonContext,
+  createSquadFitness,
+} from "../../test-utils/factories";
+
+const squadMocks = vi.hoisted(() => ({
+  getSquad: vi.fn().mockResolvedValue([]),
+  getSquadFitness: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("../../services/squadService", () => ({
+  getSquad: squadMocks.getSquad,
+  getSquadFitness: squadMocks.getSquadFitness,
+}));
 
 const backendI18nMocks = vi.hoisted(() => ({
   resolveBoardObjective: vi.fn((value: unknown) => value),
@@ -21,14 +35,28 @@ vi.mock("../NextMatchDisplay", () => ({
 }));
 
 vi.mock("./HomeSquadOverviewCard", () => ({
-  default: ({ avgCondition, avgOvr, exhaustedCount }: { avgCondition: number; avgOvr: number; exhaustedCount: number }) => (
-    <div data-testid="home-squad-overview">{`${avgCondition}|${avgOvr}|${exhaustedCount}`}</div>
+  default: ({
+    avgCondition,
+    avgConditionTone,
+    avgOvr,
+    exhaustedCount,
+  }: {
+    avgCondition: number;
+    avgConditionTone: string | null;
+    avgOvr: number;
+    exhaustedCount: number;
+  }) => (
+    <div data-testid="home-squad-overview">
+      {`${avgCondition}|${avgOvr}|${exhaustedCount}|tone:${avgConditionTone}`}
+    </div>
   ),
 }));
 
 vi.mock("./HomeUnavailablePlayersCard", () => ({
   default: ({ players }: { players: Array<{ full_name: string }> }) => (
-    <div data-testid="home-unavailable-players">{players.map((player) => player.full_name).join(",")}</div>
+    <div data-testid="home-unavailable-players">
+      {players.map((player) => player.full_name).join(",")}
+    </div>
   ),
 }));
 
@@ -43,13 +71,12 @@ vi.mock("react-i18next", () => ({
     i18n: { language: "en" },
     t: (key: string, params?: Record<string, string | number>) => {
       if (key === "home.nextOpponent") return "Next Opponent";
-      if (key === "home.noUpcomingOpponent")
-        return "No upcoming league fixture.";
+      if (key === "home.noUpcomingOpponent") return "No upcoming league fixture.";
       if (key === "home.leagueDigest") return "League Digest";
       if (key === "home.noLeagueDigest") return "No league digest yet.";
       if (key === "dashboard.news") return "News";
       if (key === "dashboard.schedule") return "Schedule";
-      if (key === "home.matchdayN") return `Matchday ${params?.n}`;
+      if (key === "common.matchday") return `Matchday ${params?.n}`;
       if (key === "season.friendly") return "Friendly";
       if (key === "home.home") return "Home";
       if (key === "home.away") return "Away";
@@ -163,6 +190,8 @@ function createPlayer(overrides: Partial<PlayerData> = {}): PlayerData {
 
 function createFixture(overrides: Partial<FixtureData> = {}): FixtureData {
   return {
+    competitive: true,
+    advancing_team_id: null,
     id: "fixture-1",
     matchday: 2,
     date: "2025-01-12",
@@ -191,15 +220,15 @@ function createNewsArticle(overrides: Partial<NewsArticle> = {}): NewsArticle {
   };
 }
 
-function createGameState(
-  overrides: Partial<GameStateData> = {},
-): GameStateData {
+function createGameState(overrides: Partial<GameStateData> = {}): GameStateData {
   return {
+    season_context: createSeasonContext(),
     clock: {
       current_date: "2025-01-20T00:00:00Z",
       start_date: "2025-01-01T00:00:00Z",
     },
     manager: {
+      display_name: "Jane Doe",
       id: "manager-1",
       first_name: "Jane",
       last_name: "Doe",
@@ -266,15 +295,13 @@ function createGameState(
   };
 }
 
-describe("HomeTab", function (): void {
-  it("resolves latest news articles before rendering the home widget", function (): void {
-    backendI18nMocks.resolveNewsArticle.mockImplementationOnce(
-      (value: unknown) => ({
-        ...(value as NewsArticle),
-        headline: "Resolved headline",
-        source: "Resolved source",
-      }),
-    );
+describe("HomeTab", (): void => {
+  it("resolves latest news articles before rendering the home widget", (): void => {
+    backendI18nMocks.resolveNewsArticle.mockImplementationOnce((value: unknown) => ({
+      ...(value as NewsArticle),
+      headline: "Resolved headline",
+      source: "Resolved source",
+    }));
 
     render(
       <HomeTab
@@ -303,7 +330,7 @@ describe("HomeTab", function (): void {
     expect(screen.getByText(/Resolved source/)).toBeInTheDocument();
   });
 
-  it("renders the next opponent and league digest widgets when data is available", function (): void {
+  it("renders the next opponent and league digest widgets when data is available", (): void => {
     render(
       <HomeTab
         gameState={createGameState({
@@ -326,7 +353,7 @@ describe("HomeTab", function (): void {
     expect(screen.getAllByText("Standings headline").length).toBeGreaterThan(0);
   });
 
-  it("renders widget empty states when opponent and digest data are unavailable", function (): void {
+  it("renders widget empty states when opponent and digest data are unavailable", (): void => {
     render(
       <HomeTab
         gameState={createGameState({
@@ -347,51 +374,94 @@ describe("HomeTab", function (): void {
     expect(screen.getByText("No league digest yet.")).toBeInTheDocument();
   });
 
-  it("keeps youth academy players out of first-team home summaries", function (): void {
+  // Given the backend's fitness summary for the squad (45 on average, four exhausted of whom one
+  //       is critical)
+  // When Home shows the squad overview
+  // Then it shows those figures: the average and the exhausted count (four, not the one critical)
+  //      are the backend's, not a sum the screen makes over the players it holds.
+  it("shows the squad fitness the backend reports", async () => {
+    squadMocks.getSquadFitness.mockResolvedValueOnce(
+      createSquadFitness({ average_condition: 45, exhausted_count: 4, critical_count: 1 }),
+    );
+    render(<HomeTab gameState={createGameState()} visitedOnboardingTabs={new Set()} />);
+    await waitFor(() => expect(screen.getByTestId("home-squad-overview")).toHaveTextContent("45|"));
+    expect(screen.getByTestId("home-squad-overview")).toHaveTextContent("45|0|4");
+  });
+
+  // Given the backend's summary painting an average of 90 critical (the band rule is the
+  //       backend's, the fixture contradicts the number on purpose)
+  // When Home shows the squad overview
+  // Then the card is given the backend's tone for the average, not one picked from 90.
+  it("gives the squad overview the backend's tone for the average", async () => {
+    squadMocks.getSquadFitness.mockResolvedValueOnce(
+      createSquadFitness({
+        average_condition: 90,
+        average_status: createConditionStatus("Critical"),
+      }),
+    );
+    render(<HomeTab gameState={createGameState()} visitedOnboardingTabs={new Set()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("home-squad-overview")).toHaveTextContent("90|0|0|tone:bad"),
+    );
+  });
+
+  // Given the backend has not answered yet (or has no healthy first-team player to average)
+  // When Home shows the squad overview
+  // Then the average is absent (null), not an invented 0.
+  it("has no average condition until the backend gives one", async () => {
+    squadMocks.getSquadFitness.mockResolvedValueOnce(
+      createSquadFitness({ players: 0, average_condition: null }),
+    );
+    render(<HomeTab gameState={createGameState()} visitedOnboardingTabs={new Set()} />);
+
+    expect(screen.getByTestId("home-squad-overview")).toHaveTextContent("null|");
+    await waitFor(() => expect(squadMocks.getSquadFitness).toHaveBeenCalled());
+    expect(screen.getByTestId("home-squad-overview")).toHaveTextContent("null|");
+  });
+  it("keeps youth academy players out of first-team home summaries", async () => {
+    squadMocks.getSquadFitness.mockResolvedValueOnce(
+      createSquadFitness({ players: 1, average_condition: 80 }),
+    );
+    const players = [
+      createPlayer({
+        id: "senior-1",
+        full_name: "Senior Starter",
+        condition: 80,
+        injury: {
+          name: "hamstring_strain",
+          days_remaining: 5,
+        },
+      }),
+      createPlayer({
+        id: "youth-1",
+        full_name: "Youth Prospect",
+        condition: 10,
+        injury: {
+          name: "ankle_sprain",
+          days_remaining: 14,
+        },
+        squad_role: "Youth",
+      }),
+    ];
+    squadMocks.getSquad.mockResolvedValueOnce(players);
     render(
       <HomeTab
-        gameState={createGameState({
-          players: [
-            createPlayer({
-              id: "senior-1",
-              full_name: "Senior Starter",
-              condition: 80,
-              injury: {
-                name: "hamstring_strain",
-                days_remaining: 5,
-              },
-            }),
-            createPlayer({
-              id: "youth-1",
-              full_name: "Youth Prospect",
-              condition: 10,
-              injury: {
-                name: "ankle_sprain",
-                days_remaining: 14,
-              },
-              squad_role: "Youth",
-            }),
-          ],
-        })}
+        gameState={createGameState({ players })}
         visitedOnboardingTabs={new Set<string>()}
       />,
     );
 
-    expect(screen.getByTestId("home-squad-overview")).toHaveTextContent(
-      "80|1|0",
+    await waitFor(() =>
+      expect(screen.getByTestId("home-squad-overview")).toHaveTextContent("80|1|0"),
     );
-    expect(screen.getByTestId("home-unavailable-players")).toHaveTextContent(
-      "Senior Starter",
-    );
-    expect(screen.getByTestId("home-unavailable-players")).not.toHaveTextContent(
-      "Youth Prospect",
-    );
+    expect(screen.getByTestId("home-unavailable-players")).toHaveTextContent("Senior Starter");
+    expect(screen.getByTestId("home-unavailable-players")).not.toHaveTextContent("Youth Prospect");
   });
 
   // Regression: HomeTab sorted gameState.news and league.standings IN PLACE
   // during render — a mutation of the Zustand store's arrays that silently
   // reordered them for every other consumer.
-  it("does not mutate the store's news or standings arrays when rendering", function (): void {
+  it("does not mutate the store's news or standings arrays when rendering", (): void => {
     const gameState = createGameState({
       news: [
         createNewsArticle({ id: "news-old", date: "2025-01-10" }),
@@ -433,18 +503,11 @@ describe("HomeTab", function (): void {
     const newsOrder = newsBefore.map((article) => article.id);
     const standingsOrder = standingsBefore.map((entry) => entry.team_id);
 
-    render(
-      <HomeTab
-        gameState={gameState}
-        visitedOnboardingTabs={new Set<string>()}
-      />,
-    );
+    render(<HomeTab gameState={gameState} visitedOnboardingTabs={new Set<string>()} />);
 
     expect(gameState.news).toBe(newsBefore);
     expect(gameState.news.map((article) => article.id)).toEqual(newsOrder);
     expect(gameState.league!.standings).toBe(standingsBefore);
-    expect(gameState.league!.standings.map((entry) => entry.team_id)).toEqual(
-      standingsOrder,
-    );
+    expect(gameState.league!.standings.map((entry) => entry.team_id)).toEqual(standingsOrder);
   });
 });

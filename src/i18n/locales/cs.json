@@ -24,7 +24,9 @@
     "openDiscord": "Otevřít Discord",
     "openGithub": "Otevřít GitHub",
     "mainMenu": "Hlavní menu",
-    "worldEditor": "Editor světa"
+    "worldEditor": "Editor světa",
+    "startupOptionsRejected": "Tato nastavení kariéry nebylo možné použít. Vraťte se na obrazovku světa a zkontrolujte rok začátku, fázi začátku a kolik minulé historie se má vygenerovat.",
+    "reportBug": "Nahlásit chybu"
   },
   "managerProfiles": {
     "saveConfirm": {
@@ -56,10 +58,7 @@
   "validation": {
     "required": "Pole {{field}} je povinné",
     "maxLength": "Pole {{field}} nesmí překročit {{max}} znaků",
-    "minStartYear": "Výchozí rok musí být {{min}} nebo novější",
-    "minAge": "Manažer musí mít alespoň {{min}} let — pro pokračování změňte datum narození.",
-    "invalidDate": "Neplatné datum",
-    "invalidDob": "Neplatné datum narození"
+    "minStartYear": "Výchozí rok musí být {{min}} nebo novější"
   },
   "worldSelect": {
     "title": "Vybrat svět",
@@ -171,6 +170,7 @@
     "digestSimulating": "Zpracování...",
     "digestMatchDay": "Zápasový den",
     "digestMatchDayDesc": "Vaše utkání je připraveno k odehrání.",
+    "matchModeMenu": "Vybrat režim zápasu",
     "digestReturnHome": "Zpět na hlavní panel",
     "digestBlocked": "Vyžadována akce",
     "digestBlockedDesc": "Před pokračováním musíte vyřešit některé záležitosti.",
@@ -395,17 +395,31 @@
     "traits": "Vlastnosti",
     "condition": "Kondice",
     "delegateToYouthAcademy": "Přeřadit do akademie",
-    "promoteToSeniorSquad": "Povýšit do A-týmu",
-    "potWorldClass": "Světová třída",
-    "potExcellent": "Excelentní",
-    "potPromising": "Nadějný",
-    "potDecent": "Slušný",
-    "potLimited": "Omezený"
+    "promoteToSeniorSquad": "Povýšit do A-týmu"
   },
   "common": {
+    "ratingTier": {
+      "S": "S",
+      "A": "A",
+      "B": "B"
+    },
+    "ordinal": {
+      "one": "{{n}}.",
+      "two": "{{n}}.",
+      "few": "{{n}}.",
+      "other": "{{n}}."
+    },
     "currentWage": "Současný plat",
     "loading": "Nahrávání...",
     "loadingGameState": "Nahrávání stavu...",
+    "detailsFor": "Podrobnosti: {{name}}",
+    "overallRating": "Hodnocení {{value}}",
+    "overallRatingTier": "Hodnocení {{value}}, úroveň {{tier}}",
+    "namedRating": "{{name}} {{value}}",
+    "namedRatingTier": "{{name}} {{value}}, úroveň {{tier}}",
+    "listViewLabel": "Zobrazit jako",
+    "listViewTable": "Tabulka",
+    "listViewCards": "Karty",
     "noResults": "Výsledky nenalezeny.",
     "place": {
       "1": "1.",
@@ -414,6 +428,17 @@
       "other": "{{n}}."
     },
     "pts": "Bod",
+    "playedFull": "Zápasy",
+    "wonFull": "Výhry",
+    "drawnFull": "Remízy",
+    "lostFull": "Prohry",
+    "ptsFull": "Body",
+    "recentForm": "Aktuální forma",
+    "formResult": {
+      "W": "V",
+      "D": "R",
+      "L": "P"
+    },
     "played": "Z",
     "won": "V",
     "drawn": "R",
@@ -578,7 +603,11 @@
       "twistedAnkle": "Podvrtnutý kotník",
       "kneeBruise": "Pohmožděné koleno",
       "hamstringTightness": "Ztuhlý zadní stehenní sval",
-      "calfStrain": "Natažené lýtko"
+      "calfStrain": "Natažené lýtko",
+      "ankleLigamentSprain": "Podvrtnutí vazů kotníku",
+      "hamstringTear": "Natržení hamstringu",
+      "kneeLigamentTear": "Přetržení vazů v koleni",
+      "metatarsalFracture": "Zlomenina metatarzu"
     },
     "scoutRatings": {
       "excellent": "Vynikající",
@@ -611,7 +640,14 @@
     "listView": "Seznam",
     "radarView": "Radar",
     "competition": "Soutěž",
-    "confirmDelete": "Potvrdit smazání"
+    "confirmDelete": "Potvrdit smazání",
+    "firstPage": "První stránka",
+    "previousPage": "Předchozí stránka",
+    "nextPage": "Další stránka",
+    "lastPage": "Poslední stránka",
+    "sortBy": "Seřadit podle",
+    "sortAscending": "Vzestupně",
+    "lineupLoading": "Údaje o postech se ještě načítají, změny sestavy proto zatím nejsou dostupné."
   },
   "teamSelection": {
     "title": "Vyberte si klub",
@@ -660,21 +696,15 @@
     "coverageNeedsAttention": "Počet skupin rolí vyžadujících pokrytí: {{count}}",
     "coverageBadge": "Základ {{starters}}/{{required}} · Lavička {{bench}}",
     "bestRole": "Nejlepší role",
-    "formationFit": "Vhodnost do sestavy",
     "startingXi": "Základní sestava",
-    "styleFit": "Vhodnost stylu",
+    "notMatchDayEligible": "Není k dispozici pro nominaci",
     "starter": "Člen základu",
     "benchOption": "Lavička",
     "naturalFit": "Přirozená pozice",
-    "adaptedFit": "Přizpůsobená pozice",
+    "adaptedFit": "Může tam hrát",
     "needsCover": "Vyžaduje pokrytí",
     "makeStarter": "Dát do základu",
     "sendToBench": "Posadit na lavičku",
-    "styleFitValues": {
-      "strong": "Vhodnost stylu: Silná",
-      "good": "Vhodnost stylu: Dobrá",
-      "risky": "Vhodnost stylu: Riziková"
-    },
     "noBench": "Žádní hráči na lavičce.",
     "viewProfile": "Zobrazit profil",
     "swapPlayer": "Prohodit hráče",
@@ -684,6 +714,8 @@
     "removeFromLoanList": "Odebrat z listiny hostování",
     "outOfPosition": "Mimo svou pozici",
     "outOfPositionTooltip": "Hraje mimo hráčovu preferovanou roli",
+    "pitchTokenTooltip": "Kondice {{condition}} % · {{fit}}",
+    "pitchTokenConditionOnly": "Kondice {{condition}} %",
     "dragHint": "Přetáhněte hráče z lavičky na hřiště nebo prohoďte členy základní sestavy mezi sebou.",
     "benchDragHint": "Použijte seznam lavičky pro přímé přetažení hráčů na hřiště.",
     "dropPlayerHere": "Pusťte hráče sem",
@@ -714,6 +746,11 @@
     "myTactics": "Moje taktiky",
     "newTactic": "Nová taktika",
     "duplicateTactic": "Duplikovat",
+    "deleteTactic": "Smazat",
+    "deleteTacticTitle": "Smazat tuto taktiku?",
+    "deleteTacticBody": "Taktika „{{name}}“ bude odstraněna z knihovny. Tým si ponechá současnou formaci a styl hry.",
+    "deleteTacticConfirm": "Smazat",
+    "resetTactic": "Obnovit výchozí",
     "saveAsTactic": "Uložit jako taktiku",
     "updateTactic": "Aktualizovat taktiku",
     "tacticSaved": "Uloženo",
@@ -841,7 +878,7 @@
     "clearSelection": "Zrušit výběr",
     "compareWithSelected": "Porovnat s vybraným",
     "selectForSwap": "Vybrat pro výměnu",
-    "assignBestFit": "Přiřadit nejvhodnější pozici",
+    "assignBestFit": "Přiřadit nejlepší pozici",
     "moveToBench": "Přesunout na lavičku",
     "promoteToLineup": "Zařadit do základní sestavy",
     "makeCaptain": "Jmenovat kapitánem",
@@ -870,11 +907,10 @@
     "positionSelector": "Taktická pozice",
     "playablePositions": "Pozice",
     "slotFit": "Vhodnost pozice",
-    "styleFit": "Vhodnost stylu",
     "responsibilities": "Povinnosti",
     "noSpecialRoles": "Žádné speciální role",
     "naturalFit": "Přirozená pozice",
-    "adaptedFit": "Přizpůsobená role",
+    "adaptedFit": "Může tam hrát",
     "moraleLevels": {
       "superb": "Vynikající",
       "veryGood": "Velmi dobrá",
@@ -888,11 +924,6 @@
       "sharp": "V plné formě",
       "managing": "Zvládá zátěž",
       "risk": "Riziko zranění"
-    },
-    "styleFitLevels": {
-      "strong": "Skvělá shoda",
-      "good": "Dobrá shoda",
-      "risky": "Riziková shoda"
     },
     "tokenStates": {
       "ready": "Připraven",
@@ -914,6 +945,7 @@
     "aTrainingDay": "tréninkový den",
     "aRestDay": "den volna",
     "currentlyTraining": "Aktuální trénink: <strong>{{attrs}}</strong> s intenzitou <strong>{{intensity}}</strong>.",
+    "goalkeepersLabel": "Brankáři",
     "recoveryNote": "V dny volna se hráči zaměří na odpočinek a obnovu kondice.",
     "effectiveFocus": "Zaměření",
     "trainingAppliedNote": "Trénink probíhá v naplánované tréninkové dny při postupu v čase. Dny volna poskytují plnou regeneraci.",
@@ -1039,6 +1071,7 @@
     "youthSearches": "vyhledávání mládeže",
     "hireStaff": "Najmout člena personálu",
     "best": "Nejlepší",
+    "staffActions": "Akce člena personálu {{name}}",
     "roles": {
       "AssistantManager": "Asistent manažera",
       "Coach": "Trenér",
@@ -1076,6 +1109,7 @@
     "seasonIncome": "Sezónní příjmy",
     "seasonExpenses": "Sezónní výdaje",
     "perWeekSuffix": "/týd",
+    "snapshotLoadFailed": "Finance klubu se nepodařilo načíst.",
     "perYearSuffix": "/rok",
     "wagePerWeek": "Plat/týdně",
     "wagePerYear": "Plat/ročně",
@@ -1140,6 +1174,15 @@
   },
   "inbox": {
     "title": "Doručená pošta",
+    "archive": {
+      "heading": "Starší zprávy",
+      "load": "Načíst starší zprávy",
+      "loadMore": "Načíst další starší zprávy",
+      "loading": "Načítání starších zpráv…",
+      "empty": "Žádné starší zprávy.",
+      "end": "Další starší zprávy nejsou.",
+      "error": "Starší zprávy se nepodařilo načíst."
+    },
     "nMessages": "Počet zpráv: {{count}}",
     "noMessages": "Žádné zprávy",
     "noMessagesInCategory": "V této kategorii nejsou žádné zprávy",
@@ -1162,6 +1205,7 @@
     "sortNewest": "Nejnovější jako první",
     "sortOldest": "Nejstarší jako první",
     "selectMessages": "Vybrat zprávy",
+    "selectAll": "Vybrat vše",
     "cancelSelection": "Zrušit výběr",
     "selectedCount": "Vybráno: {{count}}",
     "deleteSelected": "Smazat vybrané",
@@ -1225,6 +1269,15 @@
     "employed": "Zaměstnaný",
     "unemployed": "Bez angažmá",
     "reputation": "Reputace",
+    "reputationBand": {
+      "world_class": "Světová třída",
+      "established": "Uznávaný",
+      "great": "Výborný",
+      "good": "Dobrý",
+      "average": "Průměrný",
+      "below_average": "Podprůměrný",
+      "unknown": "Neznámý"
+    },
     "winRate": "Úspěšnost výher",
     "matches": "Zápasy",
     "currentClub": "Aktuální klub",
@@ -1263,6 +1316,14 @@
     }
   },
   "transfers": {
+    "offerHistory": "Historie nabídek",
+    "viewOfferHistory": "Zobrazit historii nabídek",
+    "offerRecordedOn": "Nabídka ze dne {{date}}.",
+    "loanOfferStartsOn": "Hostování začíná {{date}}.",
+    "dealAlreadyAgreed": "Změna klubu tohoto hráče je dohodnutá a čeká na registraci.",
+    "dealOwnPlayer": "Tento hráč již patří vašemu klubu.",
+    "dealActiveLoan": "Tento hráč je momentálně na hostování.",
+    "dealRetired": "Tento hráč ukončil kariéru.",
     "bidImpactWageBill": "Týdenní mzdové náklady {{before}} → {{after}}",
     "bidImpactWeeklyWageBudget": "Týdenní mzdový rozpočet {{budget}}",
     "bidImpactIncomingWage": "Mzda hráče {{wage}} / týden",
@@ -1322,6 +1383,7 @@
     "bidImpactWagePressure": "Předpokládané využití platového rozpočtu: {{percent}} %",
     "bidImpactOverTransferBudget": "Tato nabídka přesahuje váš přestupový rozpočet",
     "bidImpactOverBalance": "Tato nabídka by uvrhla klub do dluhů",
+    "bidImpactOverWagePolicy": "Vedení by jeho plat odmítlo: porušuje mzdovou politiku klubu",
     "bidAccepted": "Nabídka přijata! Hráč podepsal smlouvu.",
     "bidCountered": "Vrátili se s upravenými podmínkami.",
     "bidRejected": "Nabídka odmítnuta — částka je příliš nízká.",
@@ -1394,6 +1456,9 @@
     "resumeNegotiationHint": "Jednání s tímto klubem stále probíhají.",
     "resumeNegotiationHeadline": "Druhý klub čeká na váš další krok.",
     "resumeNegotiationDetail": "Jejich poslední reakce směřovala k částce {{fee}}.",
+    "resumeRefusedHeadline": "Vaši poslední nabídku odmítli.",
+    "resumeRefusedDetail": "Nová nabídka naváže na jednání odtud. Jejich poslední signál mířil k {{fee}}.",
+    "talksResumeOn": "Jednání lze obnovit {{date}}.",
     "transferFeedbackAcceptedHeadline": "Druhý klub je připraven obchodovat.",
     "transferFeedbackAcceptedDetail": "Vaše nabídka se trefila do jejich představ, takže jednání se posunula rychle dopředu.",
     "transferFeedbackScheduledHeadline": "Dohoda schválena pro příští přestupové okno.",
@@ -1401,7 +1466,13 @@
     "transferFeedbackCounterHeadline": "Před stvrzením dohody požadují více.",
     "transferFeedbackCounterDetail": "Nabídka byla dostatečně vysoká na to, aby se pokračovalo v jednání, ale druhá strana dává najevo, že si představuje cenu bližší k {{fee}}.",
     "transferFeedbackRejectedHeadline": "Tato fáze vyjednávání byla ukončena.",
-    "transferFeedbackRejectedDetail": "Návrh je nepřesvědčil. Pro opětovné zahájení vážných rozhovorů budete muset nabídnout vyšší částku, bližší k {{fee}}."
+    "transferFeedbackRejectedDetail": "Návrh je nepřesvědčil. Pro opětovné zahájení vážných rozhovorů budete muset nabídnout vyšší částku, bližší k {{fee}}.",
+    "transferFeedbackBrokeOffHeadline": "Odešli od jednání.",
+    "transferFeedbackBrokeOffDetail": "Po několika nabídkách, které nestačily, klub jednání ukončil. Bylo by potřeba odstupné kolem {{fee}}. Dejte jim čas, než to zkusíte znovu.",
+    "registrationFailureInsufficientFunds": "Registrace selhala: kupující nemá dost peněz",
+    "registrationFailureLoanConflict": "Registrace selhala: konflikt s hostováním",
+    "registrationFailurePlayerUnavailable": "Registrace selhala: hráč není dostupný",
+    "registrationFailureRegistrationBlocked": "Registrace zablokována"
   },
   "transferCentreWorld": {
     "title": "Přestupové centrum",
@@ -1427,6 +1498,8 @@
     "fixtures": "Zápasy",
     "standings": "Tabulka",
     "matchday": "{{number}}. kolo",
+    "movedFrom": "Přesunuto z {{date}}",
+    "dateRange": "{{from}} až {{to}}",
     "season": "{{number}}. sezóna",
     "international": "Mezinárodní",
     "internationalDuty": "Plní reprezentační povinnosti",
@@ -1455,6 +1528,10 @@
   "players": {
     "searchPlaceholder": "Hledat podle jména nebo národnosti...",
     "allPos": "Všechny pozice",
+    "filterAgeMin": "Min. věk",
+    "filterAgeMax": "Max. věk",
+    "filterOvrMin": "Min. hodnocení",
+    "filterOvrMax": "Max. hodnocení",
     "allTeams": "Všechny týmy",
     "nPlayersFound": "Nalezení hráči: {{count}}",
     "noMatch": "Vašim filtrům neodpovídají žádní hráči.",
@@ -1468,6 +1545,7 @@
     "yourTeam": "Váš tým",
     "squad": "Soupiska",
     "avgOvr": "Prům. hodnocení",
+    "manager": "Manažer",
     "rep": "Rep.",
     "est": "Založeno"
   },
@@ -1575,6 +1653,7 @@
     "dateOfBirth": "Datum narození",
     "noContract": "Bez smlouvy",
     "weeklyWage": "Týdenní plat",
+    "approximateWage": "přibližně {{wage}}",
     "annualWage": "Roční plat",
     "yearsRemaining": "Zbývá let",
     "contractRisk": "Riziko vypršení smlouvy",
@@ -1612,6 +1691,7 @@
     "renewalFeedbackTenseDetail": "Nízká důvěra, slabá morálka nebo tlak na smlouvu nutí jejich stranu k tvrdému přístupu. Další slabá nabídka by mohla dveře definitivně zavřít.",
     "renewalFeedbackAcceptedHeadline": "Nabídka se jim líbila a jednání se posunula rychle.",
     "renewalFeedbackAcceptedDetail": "Nabídka byla dost blízko jejich očekáváním, takže jednání zůstala konstruktivní.",
+    "renewalFeedbackAcceptedToKeepSquadFloorDetail": "Přijali. Smlouva posouvá mzdové náklady nad politiku představenstva, ale představenstvo ji povolilo: bez tohoto hráče by kádr klesl pod minimum, které musí klub udržet.",
     "renewalFeedbackAcceptedLateHeadline": "Nabídku přijali, ale už jim docházela trpělivost.",
     "renewalFeedbackAcceptedLateDetail": "Dohodu se vám podařilo uzavřít až po tvrdé výměně názorů. Jejich strana byla blízko k odchodu od vyjednávání.",
     "renewalFeedbackBlockedHeadline": "K rozhovorům se zatím nechtějí vracet.",
@@ -1626,6 +1706,8 @@
     "attributes": "Atributy",
     "attributesHidden": "Skryté atributy",
     "scoutToView": "Pro zobrazení podrobných atributů musíte hráče vyskautovat nebo podepsat.",
+    "scoutedOn": "Skautováno {{date}}",
+    "scoutReportOutOfDate": "Zastaralé",
     "seasonStats": "Sezónní statistiky",
     "advancedStats": "Pokročilé statistiky",
     "shots": "Střely",
@@ -1638,6 +1720,7 @@
     "passAccuracy": "Úspěšnost přihrávek",
     "percentile": "Percentil",
     "percentileUnavailable": "Percentil není k dispozici",
+    "percentileGroup": "Porovnání s: {{position}} v {{league}}",
     "recentMatches": "Nedávné zápasy",
     "recentMatchesScore": "Skóre",
     "recentMatchesGoalsAssists": "G / A",
@@ -1664,6 +1747,19 @@
     "movementLoanToBuy": "Hostování s opcí",
     "movementFreeAgentSigning": "Volný hráč",
     "movementReleased": "Uvolněn",
+    "movementRenewal": "Prodloužení",
+    "movementRetired": "Ukončil kariéru",
+    "movementInitialContract": "Úvodní smlouva",
+    "movementReleasedExpired": "Smlouva vypršela",
+    "movementReleasedTerminated": "Smlouva rozvázána",
+    "movementContractRange": "Smlouva od {{start}} do {{end}}",
+    "movementContractUntil": "Smlouva do {{end}}",
+    "movementContractFrom": "Smlouva od {{start}}",
+    "movementWage": "Plat {{wage}}/týd",
+    "movementDateUnknown": "Datum neznámé",
+    "movementLegacyContract": "Z uložené hry před historií smluv",
+    "movementRenewedWith": "Prodloužení v klubu {{club}}",
+    "movementAtClub": "V klubu {{club}}",
     "movementFromTo": "{{from}} → {{to}}",
     "movementTo": "Příchod do {{to}}",
     "movementFrom": "Odchod z {{from}}",
@@ -1677,7 +1773,27 @@
     "renewalProjectionTitle": "Předpokládaný finanční dopad",
     "renewalProjectionWageBill": "Týdenní mzdové náklady: {{before}} → {{after}}",
     "renewalProjectionBudgetUsage": "Využití platového rozpočtu: {{before}} % → {{after}} %",
-    "renewalProjectionRunway": "Finanční rezerva: {{before}} → {{after}}"
+    "renewalProjectionRunway": "Finanční rezerva: {{before}} → {{after}}",
+    "potentialOpinion": {
+      "scoutsOpinion": "Názor skauta",
+      "coachesOpinion": "Názor trenérského týmu",
+      "bandS": "Může se stát jedním z nejlepších",
+      "bandA": "Může se stát stabilním členem základní sestavy",
+      "bandB": "Může být užitečným hráčem kádru",
+      "bandRest": "Pravděpodobně se už výrazně nezlepší",
+      "range": "Potenciál {{low}}–{{high}}",
+      "confident": "Jistě",
+      "fairlySure": "Docela jistě",
+      "unsure": "Nejistě",
+      "guess": "Jen odhad",
+      "byScout": "Skautská zpráva: {{scout}}, {{date}}"
+    },
+    "positions": {
+      "title": "Pozice",
+      "wherePlayed": "kde ho nasazujete"
+    },
+    "loadFailed": "Nepodařilo se načíst",
+    "retryWage": "Znovu načíst plat"
   },
   "teamProfile": {
     "clubInfo": "Informace o klubu",
@@ -1750,6 +1866,8 @@
     "confirmAdvanceDesc": "Vyžádat potvrzení před posunem o další den",
     "continueToNextEvent": "Tlačítko Pokračovat přeskočí k další události",
     "continueToNextEventDesc": "Pokračovat posouvá čas dopředu až do vašeho dalšího zápasu, blokační události, uzávěrky přestupů nebo důležitých zpráv",
+    "skipShootoutPicker": "Přeskočit výběr pořadí penalt",
+    "skipShootoutPickerDesc": "Penaltový rozstřel začne v automatickém pořadí, aniž byste ho museli nastavovat",
     "savesData": "Uložené pozice a data",
     "autoSave": "Automatické ukládání",
     "autoSaveDesc": "Automaticky uložit hru po skončení každého dne",
@@ -1777,6 +1895,21 @@
     },
     "uiScale": "Měřítko rozhraní",
     "uiScaleDesc": "Upravit velikost písma a mezery pro lepší čitelnost",
+    "sidebarWidth": "Šířka postranního panelu",
+    "sidebarWidthDesc": "Jak široký je otevřený postranní panel. „Široký“ zobrazí každou položku nabídky na jednom řádku.",
+    "sidebarWidthOptions": {
+      "compact": "Kompaktní",
+      "standard": "Standardní",
+      "wide": "Široký"
+    },
+    "sidebarBehaviour": "Postranní panel",
+    "sidebarBehaviourDesc": "Jak se postranní panel otevírá. Je-li okno příliš úzké, otevře se přes stránku.",
+    "sidebarBehaviourOptions": {
+      "normal": "Normální",
+      "hover": "Rozbalit při najetí",
+      "click": "Rozbalit kliknutím",
+      "icons": "Jen ikony"
+    },
     "uiScaleOptions": {
       "small": "Malé",
       "normal": "Normální",
@@ -1790,7 +1923,16 @@
     "enterFullscreen": "Vstoupit",
     "exitFullscreen": "Ukončit",
     "switchToLightMode": "Přepnout do světlého motivu",
-    "switchToDarkMode": "Přepnout do tmavého motivu"
+    "switchToDarkMode": "Přepnout do tmavého motivu",
+    "help": "Nápověda",
+    "reportBug": "Nahlásit chybu",
+    "reportBugDesc": "Napište nám, co se pokazilo — vaše protokoly se připojí automaticky.",
+    "report": "Nahlásit",
+    "yourReports": "Vaše hlášení",
+    "yourReportsDesc": "Referenční kódy hlášení, která jste odeslali. Uveďte kód, pokud se chcete na hlášení zeptat nebo ho nechat smazat.",
+    "noReports": "Zatím jste neodeslali žádné hlášení.",
+    "reportOutcomeUnknown": "Výsledek není znám: hlášení možná dorazilo. Opětovné odeslání ho může doručit dvakrát.",
+    "reportIncludedSave": "S uloženou hrou"
   },
   "preMatch": {
     "formationFit": "Vhodnost rozestavení",
@@ -1886,6 +2028,7 @@
     "step1Min": "Posunout o 1 minutu",
     "teamControls": "Ovládání týmu",
     "subs": "Střídání",
+    "subsClosed": "Po prodloužení jsou střídání uzavřena",
     "formation": "Rozestavení",
     "playStyle": "Herní styl",
     "keyEvents": "Klíčové události",
@@ -1920,6 +2063,16 @@
     "quickTacticalTweaks": "Rychlé taktické úpravy",
     "selectBenchToCompare": "Vyberte hráče z lavičky pro porovnání",
     "confirmSubstitution": "Potvrdit střídání",
+    "queueSubstitution": "Přidat do fronty",
+    "queuedSubstitutions": "Střídání ve frontě",
+    "confirmAllSubstitutions": "Potvrdit vše ({{count}})",
+    "confirmSubstitutions": "Potvrdit střídání: {{count}}",
+    "removeQueuedSubstitution": "Odebrat {{off}} → {{on}} z fronty",
+    "alreadyQueued": "Už čeká ve frontě na střídání",
+    "substitutionsPartlyMade": "Provedeno střídání: {{applied}} z {{total}}",
+    "substitutionRefused": "Střídání zamítnuto: {{off}} za {{on}}. {{reason}}",
+    "roleFor": "Role hráče {{player}}",
+    "roleChangeRefused": "Roli hráče {{player}} se nepodařilo změnit. {{reason}}",
     "noBenchAvailable": "Na lavičce nejsou k dispozici žádní hráči",
     "history": "Historie",
     "player": "Hráč",
@@ -1963,7 +2116,47 @@
       "suddenDeath": "Náhlá smrt",
       "shootoutScore": "Penalty: {{h}} – {{a}}",
       "homeKick": "Domácí se chystá na penaltu...",
-      "awayKick": "Hosté se chystají na penaltu..."
+      "awayKick": "Hosté se chystají na penaltu...",
+      "kickScored": "Penalta {{n}}, proměněná",
+      "kickMissed": "Penalta {{n}}, neproměněná",
+      "kickToCome": "Penalta {{n}}, ještě se kope",
+      "kickSheet": "Záznam penalt",
+      "kickColumn": "Penalta",
+      "sheetCaption": "Každé kolo rozstřelu: kdo kopal a jak to dopadlo",
+      "scored": "Proměněná",
+      "missed": "Neproměněná",
+      "toCome": "Čeká se",
+      "notTaken": "Nekopána",
+      "afterExtraTime": "{{home}} – {{away}} po prodloužení",
+      "kickAnnounceScored": "Penalta {{n}}, {{team}}: {{kicker}} proměňuje.",
+      "kickAnnounceMissed": "Penalta {{n}}, {{team}}: {{kicker}} neproměňuje.",
+      "stepFailed": "Rozstřel nemohl pokračovat. Zkuste to znovu.",
+      "nextKick": "Další penalta",
+      "orderHeading": "Vaše pořadí penalt",
+      "orderStep": "Krok 1 ze 2",
+      "orderHint": "Jako první kope váš exekutor penalt, pak nejlepší střelci a brankář nakonec. Přetáhněte hráče, nebo ho zvedněte mezerníkem či Enterem a posouvejte šipkami.",
+      "useAutoOrder": "Automatické pořadí",
+      "startShootout": "Zahájit rozstřel",
+      "penTaker": "Exekutor",
+      "moving": "Přesouvá se",
+      "sitsOut": "Nekope",
+      "sitsOutNote": "Počet exekutorů na každé straně: {{k}}",
+      "sitsOutLine": "Pod touto čarou nekopou: {{n}}. Počet exekutorů na každé straně: {{k}}.",
+      "moveKicker": "Přesunout: {{name}}, penalta {{n}} z {{k}}",
+      "moveSitter": "Přesunout: {{name}}, nekope",
+      "liftedKick": "{{name}}, penalta {{n}} z {{k}}. Šipkami přesunete, mezerníkem položíte, Escape vrátí zpět.",
+      "liftedSitsOut": "{{name}}, nekope. Šipkami přesunete, mezerníkem položíte, Escape vrátí zpět.",
+      "movedKick": "{{name}}, penalta {{n}} z {{k}}",
+      "movedSitsOut": "{{name}} nekope",
+      "droppedKick": "{{name}}: položen na penaltu {{n}} z {{k}}.",
+      "droppedSitsOut": "{{name}}: položen, nekope.",
+      "putBackKick": "{{name}}: vrácen na penaltu {{n}} z {{k}}.",
+      "putBackSitsOut": "{{name}}: vrácen, nekope.",
+      "autoOrderRestored": "Obnoveno automatické pořadí.",
+      "columnShooting": "Stř.",
+      "columnComposure": "Klid",
+      "opponentOrderHidden": "Pořadí týmu {{team}} zůstane skryté, dokud se každý jeho hráč nepostaví k míči.",
+      "orderFailed": "Vaše pořadí se nepodařilo nastavit. Zkuste to znovu."
     },
     "fullTime": "Konec zápasu",
     "ft": "KZ",
@@ -2022,6 +2215,7 @@
     "roundSummaryUnavailable": "Shrnutí kola není k dispozici.",
     "otherMatches": "Ostatní zápasy",
     "otherMatchesToday": "Dnešní ostatní zápasy",
+    "elsewhereInYourLeague": "Jinde ve vaší lize",
     "otherMatchesUnavailable": "Kontext ostatních zápasů pro toto kolo není zatím k dispozici.",
     "viewDetails": "Zobrazit detaily",
     "matchDetails": "Detaily zápasu",
@@ -2210,7 +2404,7 @@
     "preMatchPrep": "Předzápasová příprava",
     "startingLineup": "Základní sestava",
     "setPiecesCaptain": "Standardní situace a kapitán",
-    "formationFit": "Vhodnost pro rozestavení",
+    "formationFit": "Formace",
     "selecting": "Vybírání...",
     "autoSelectXI": "Automaticky vybrat nejlepší XI",
     "startingXI": "Základní jedenáctka",
@@ -2504,7 +2698,14 @@
     "yourResult": "Váš výsledek",
     "continue": "Pokračovat",
     "notableUpset": "Velké překvapení",
-    "pts": "b."
+    "pts": "b.",
+    "cupPenalties": "({{home}}–{{away}} na penalty)",
+    "cupAdvances": "{{team}} postupuje dál",
+    "cupTiesPending": "Některá utkání se ještě odehrají",
+    "resume": "Pokračovat",
+    "pausedResumesAt": "Pozastaveno · pokračuje: {{speed}}",
+    "playingAt": "Běží: {{speed}}",
+    "spaceKey": "Mezerník"
   },
   "endOfSeason": {
     "seasonComplete": "Sezóna dokončena",
@@ -2545,11 +2746,44 @@
     "compare": "Porovnat"
   },
   "be": {
+    "condition": {
+      "fresh": "Odpočatý",
+      "tiring": "Unavuje se",
+      "exhausted": "Vyčerpaný",
+      "critical": "Kritický"
+    },
     "error": {
+      "squadFloor": {
+        "wouldLeaveShort": "Tento hráč nemůže odejít: kádr by klesl pod minimum, které musí klub udržet. Dotčená řada: {{group}}.",
+        "wouldLeaveSeniorsShort": "Tento hráč nemůže odejít: klubu by v A-týmu zůstalo méně než {{floor}} hráčů, což je minimum, které musí klub udržet."
+      },
       "noActiveGameSession": "Žádná aktivní herní relace",
+      "careerChanged": "Kariéra se změnila dříve, než to bylo možné uložit.",
       "noActiveSaveSession": "Žádná aktivní relace ukládání",
       "saveNotFound": "Uložená pozice '{{saveId}}' nebyla nalezena.",
       "saveManagerUnavailable": "Uložená data jsou dočasně nedostupná.",
+      "report": {
+        "bundleFailed": "Soubor hlášení se nepodařilo zapsat. Zkontrolujte, jestli máte právo zápisu do zvolené složky.",
+        "saveMissing": "Váš uložený soubor se nepodařilo najít, takže se nic nezapsalo. Zrušte zaškrtnutí uložené hry a zkuste to znovu, nebo nejdřív načtěte kariéru.",
+        "upload": {
+          "consentRequired": "Nejprve zaškrtněte políčko a souhlaste s odesláním těchto souborů.",
+          "notConfigured": "Tato verze hry neumí posílat hlášení přímo. Použijte formulář na GitHubu.",
+          "attachmentsUnavailable": "Přikládání souborů zatím není k dispozici.",
+          "alreadySending": "Hlášení se stále odesílá. Počkejte, až skončí, a zkuste to znovu.",
+          "disabled": "Odesílání hlášení je momentálně vypnuté. Použijte formulář na GitHubu.",
+          "tooManyFiles": "K tomuto hlášení je připojeno příliš mnoho souborů.",
+          "capacity": "Server pro hlášení je momentálně plný. Použijte formulář na GitHubu.",
+          "imagesUnavailable": "Server pro hlášení teď nedokáže zpracovat snímky obrazovky. Zkuste to bez nich nebo použijte formulář na GitHubu.",
+          "rateLimitedWait": "Z vašeho připojení bylo v poslední době odesláno příliš mnoho hlášení. Zkuste to znovu asi za {{minutes}} min.",
+          "tooLarge": "Hlášení je příliš velké na přímé odeslání.",
+          "rateLimited": "Z vašeho připojení bylo nedávno odesláno příliš mnoho hlášení. Chvíli počkejte, než to zkusíte znovu.",
+          "rejected": "Server pro hlášení toto hlášení nepřijal.",
+          "serverError": "Server pro hlášení narazil na problém a hlášení nemohl přijmout.",
+          "unreachable": "Server pro hlášení se nepodařilo zastihnout, takže nic nebylo odesláno. Zkontrolujte připojení k internetu.",
+          "unconfirmed": "Spojení se přerušilo dřív, než server odpověděl. Hlášení možná dorazilo. Pokud je odešlete znovu, tým je může obdržet dvakrát.",
+          "prepareFailed": "Hlášení se nepodařilo připravit k odeslání. Stále ho můžete uložit a použít formulář na GitHubu."
+        }
+      },
       "saveDeleteFailed": "Nepodařilo se smazat soubor uložené pozice.",
       "settings": {
         "loadFailed": "Nepodařilo se načíst nastavení.",
@@ -2588,11 +2822,19 @@
       "managedTeamNotFound": "Spravovaný tým nebyl nalezen",
       "unknownFacilityType": "Neznámý typ zázemí",
       "liveMatch": {
+        "inProgress": "Probíhá zápas. Před uložením, posunem času nebo zahájením dalšího zápasu jej dokončete.",
         "noLeague": "Pro tento zápas nejsou k dispozici žádná data o lize.",
         "fixtureNotFound": "Vybrané utkání nebylo nalezeno.",
+        "fixtureNotScheduled": "Tento zápas již není naplánován a nelze ho odehrát.",
+        "emptySquad": "Jeden z týmů nemá k dispozici žádné hráče, takže zápas nelze odehrát.",
         "maxSubstitutionsReached": "Bylo dosaženo maximálního počtu střídání",
         "preMatchSwapTooLate": "Předzápasové změny v sestavě jsou povoleny pouze před výkopem",
         "cannotSubstituteSentOffPlayer": "Nelze střídat vyloučeného hráče",
+        "noSubstitutionsForShootout": "Po skončení prodloužení už nelze střídat: penaltový rozstřel kopou hráči, kteří byli na hřišti při závěrečném hvizdu.",
+        "shootoutOrderNotNow": "Pořadí exekutorů lze určit jen po prodloužení, před prvním kopem.",
+        "shootoutOrderNotYourSide": "Lze určit jen pořadí exekutorů vlastního týmu.",
+        "notYourSide": "Pokyny lze dávat jen vlastnímu týmu.",
+        "shootoutOrderNotEligible": "Pořadí exekutorů musí obsahovat každého hráče, který smí kopat, právě jednou.",
         "playerNotOnPitch": "Hráč není na hřišti",
         "playerAlreadySubstitutedOff": "Hráč již byl vystřídán",
         "playerNotOnBench": "Hráč není na lavički",
@@ -2606,13 +2848,14 @@
       "worldReadFileFailed": "Nepodařilo se načíst databázový soubor světa.",
       "package": {
         "invalid": "Tento balíček světa je neplatný a nepodařilo se ho načíst.",
-        "invalidPackageId": "ID balíčku „{{id}}“ nelze použít. Nesmí být prázdné ani se jmenovat „assets“ a nesmí obsahovat „/“, „\\“, „..“ ani řídicí znaky.",
+        "invalidPackageId": "ID balíčku „{{id}}“ nelze použít. Musí to být prostý název souboru: nesmí být prázdné ani „assets“, nesmí začínat tečkou ani končit tečkou či mezerou, může mít nejvýše 251 bajtů, nesmí obsahovat „/“, „\\“, „..“, řídicí znaky ani interpunkční znaménka vyhrazená systémem Windows a nesmí to být název vyhrazený systémem Windows, jako CON nebo NUL.",
         "readFailed": "Soubor balíčku nebylo možné načíst.",
         "missingSchema": "V souboru balíčku chybí pole „schema“.",
         "worldExportNotPackage": "Tato složka je exportovaný svět, nikoli projekt balíčku. Exportované světy používají jiný formát a nelze je zde upravovat.",
         "notAProjectDirectory": "Toto není složka projektu balíčku. Vyberte složku, která obsahuje package.json balíčku — nebo pro nainstalovaný balíček .ofm použijte „Otevřít soubor .ofm“.",
         "unknownSchema": "Neznámé schéma „{{schema}}“.",
-        "invalidEntity": "Záznam „{{schema}}“ je neplatný.",
+        "invalidEntity": "Záznam „{{schema}}“ je neplatný: {{detail}}",
+        "duplicateWorld": "Balíček už má manifest v souboru „{{first}}“; balíček může mít jen jeden soubor „world“.",
         "missingId": "Záznamu typu {{kind}} chybí ID.",
         "missingMetadata": "V manifestu balíčku chybí povinné pole „{{field}}“.",
         "duplicateId": "Duplicitní ID typu {{kind}}: „{{id}}“.",
@@ -2638,6 +2881,14 @@
         "potentialBelowOverall": "„{{entity}}“ má potenciál {{potential}}, což je méně než jeho celkové hodnocení {{ability}}. Strop hráče nemůže být pod jeho současnou úrovní.",
         "potentialBelowAttributes": "„{{entity}}“ má potenciál {{potential}}, což je méně než celkové hodnocení {{ability}}, které vychází z jeho atributů. Strop hráče nemůže být pod jeho současnou úrovní.",
         "potentialBelowDefaultAbility": "„{{entity}}“ má potenciál {{potential}}, což je méně než výchozí úroveň {{ability}} použitá, když není zadáno celkové hodnocení ani atributy.",
+        "invalidDate": "„{{entity}}“ má v poli {{field}} hodnotu „{{value}}“, což není skutečné datum. Použijte formát RRRR-MM-DD.",
+        "contractEndAndLength": "„{{entity}}“ má zadané contractEnd i contractLength. Uveďte jen jedno z nich: říkají totéž dvěma způsoby.",
+        "contractLengthOutOfRange": "„{{entity}}“ má contractLength {{length}}. Smlouva trvá od 1 do {{max}} let.",
+        "contractEndNotAfterStart": "Smlouva „{{entity}}“ končí ({{end}}) v den, kdy začíná ({{start}}), nebo dříve.",
+        "playerFieldOutOfRange": "„{{entity}}“ má hodnotu {{field}} mimo povolený rozsah. Musí být mezi {{min}} a {{max}}.",
+        "alternatePositionInvalid": "„{{entity}}“ uvádí jako alternativní pozici {{position}}. Alternativa musí být konkrétní pozice, odlišná od pozice samotného hráče a uvedená jen jednou.",
+        "identityNeedsSpecificPosition": "„{{entity}}“ má slabší nohu nebo alternativní pozice, ale {{position}} je obecná skupina, takže by je hra přepočítala z atributů hráče a zahodila to, co jste napsali. Zadejte hráči konkrétní pozici, například CentralMidfielder nebo Striker.",
+        "careerEntryNeedsClub": "„{{entity}}“ má záznam kariéry (řádek {{row}}) bez názvu klubu.",
         "unsupportedFormatVersion": "Tento balíček byl vytvořen v novější verzi hry (formát {{version}}; tato verze podporuje {{supported}}). Pro otevření hru aktualizujte."
       },
       "conflict": {
@@ -2649,11 +2900,13 @@
         "fallbackTeamsFilled": "Byl definován pouze jeden tým. Aby byla hra hratelná, byli automaticky vygenerováni procedurální soupeři."
       },
       "competitionDef": {
+        "invalidCalendar": "Neplatný kalendář soutěže: zkontrolujte skupinu divizí, úroveň, fázi a datum ukončení.",
         "invalidEmbedded": "Definice soutěží tohoto světa jsou neplatné a nepodařilo se je načíst.",
         "invalidStandalone": "Vybraný soubor s definicí soutěže je neplatný.",
         "parseFailed": "Soubor s definicí soutěže se nepodařilo načíst jako JSON.",
         "unsupportedVersion": "Nepodporovaná verze formátu {{version}}; tato sestava podporuje verzi maximálně do {{supported}}.",
         "berthUnknownTarget": "Kvalifikační místo odkazuje na neznámou soutěž „{{target}}“.",
+        "berthSelfTarget": "Kvalifikační místo odkazuje na vlastní soutěž „{{target}}“.",
         "berthInvalidRange": "Neplatný rozsah pozic pro kvalifikační místo {{from}}–{{to}}.",
         "berthRequiresLeague": "Místa za umístění a do play-off lze udělit pouze na základě ligové tabulky.",
         "berthRequiresCup": "Místo pro vítěze poháru lze udělit pouze na základě vyřazovací soutěže.",
@@ -2665,18 +2918,21 @@
         "unknownCountry": "Neznámá země „{{country}}“.",
         "groupConfigOnNonGroupFormat": "Nastavení skupin se vztahuje pouze na formát se základními skupinami a vyřazovací fází.",
         "groupSizeTooSmall": "Velikost skupiny {{groupSize}} je příliš malá (minimum jsou 2).",
+        "invalidGroupQualification": "S těmito účastníky nelze splnit nastavení postupu ze skupin.",
         "zeroLegs": "Soutěž vyžaduje alespoň jeden zápas na kolo.",
         "noParticipants": "Žádní účastníci: zadejte explicitní seznam nebo selektor.",
         "bothParticipantSources": "Zadejte buď explicitní seznam, nebo selektor, nikoliv obojí.",
         "tooFewParticipants": "Je vyžadována účast alespoň dvou účastníků.",
         "unknownTeam": "Neznámý tým „{{team}}“.",
+        "duplicateTeam": "Tým „{{team}}“ je uveden vícekrát.",
         "selectorMissingCountry": "Tento selektor vyžaduje zemi.",
         "selectorCountTooSmall": "Tento selektor vyžaduje počet alespoň 2.",
         "selectorMissingRegion": "Tento selektor vyžaduje region.",
         "unknownSourceCompetition": "Neznámá zdrojová soutěž „{{source}}“.",
         "selectorMissingSource": "Tento selektor vyžaduje zdrojovou soutěž.",
         "unknownExcludedCompetition": "Neznámá vyloučená soutěž „{{excluded}}“.",
-        "selectorCycle": "Kruhová kvalifikace mezi soutěžemi."
+        "selectorCycle": "Kruhová kvalifikace mezi soutěžemi.",
+        "duplicateTierPriority": "Několik soutěží země {{country}} sdílí prioritu {{priority}}. Nižší číslo znamená vyšší soutěž a každá úroveň potřebuje vlastní, jinak nikdo nepostoupí ani nesestoupí."
       },
       "worldParseFailed": "Nepodařilo se zpracovat databázový soubor světa.",
       "worldWriteFileFailed": "Nepodařilo se exportovat databázový soubor světa.",
@@ -2685,6 +2941,7 @@
       "saveLoad": {
         "corrupted": "Tento soubor uložené pozice je poškozený a nelze jej načíst.",
         "incompatibleVersion": "Tato uložená pozice byla vytvořena v novější verzi hry (uložená pozice v{{saveVersion}}; tato sestava podporuje verzi maximálně do v{{supported}}). Chcete-li ji načíst, aktualizujte hru.",
+        "incompatibleLayout": "Data této uložené pozice neodpovídají verzi, kterou udává, a nelze ji bezpečně načíst. Soubor nebyl nijak změněn.",
         "missingData": "V této uložené pozici chybí požadovaná data a nelze ji načíst.",
         "invalidWorld": "Data světa nebo modifikací v této uložené pozici jsou neplatná a nelze ji načíst.",
         "unknown": "Tuto uloženou pozici nebylo možné načíst kvůli neočekávané chybě."
@@ -2719,7 +2976,9 @@
         "marketingCampaignCoolingDown": "Obchodní tým potřebuje čas, než spustí další marketingovou kampaň.",
         "facilityUpgradeInsufficientFunds": "Nedostatek finančních prostředků na toto vylepšení zázemí. Potřebujete {{amount}}.",
         "facilityUpgradeOverBudget": "Vylepšování zázemí je zablokováno, dokud klub překračuje svůj platový rozpočet.",
-        "facilityUpgradeCritical": "Vylepšování zázemí je zablokováno, dokud je klub pod vážným finančním tlakem."
+        "facilityUpgradeCritical": "Vylepšování zázemí je zablokováno, dokud je klub pod vážným finančním tlakem.",
+        "amountOverflow": "Tento peněžní pohyb je příliš velký na zaúčtování.",
+        "openingBalanceReserved": "Počáteční zůstatek se vytváří automaticky a nelze ho zadat přímo."
       },
       "createManager": {
         "nameRequired": "Jméno a příjmení jsou povinné údaje.",
@@ -2741,6 +3000,8 @@
         "transferBudgetTooLow": "Přestupový rozpočet je příliš nízký",
         "playerNotOwnedByUser": "Hráč nebyl nalezen nebo není váš",
         "offerNotPending": "Nabídka nebyla nalezena nebo nečeká na vyřízení",
+        "talksBrokenOff": "Tento klub ukončil jednání o tomto hráči. Zkuste to později.",
+        "loanBorrowerCannotAffordWages": "Hostující klub si tento podíl na mzdě nemůže dovolit. Jeho týdenní mzdový rozpočet je {{budget}}.",
         "counterOfferMustExceedCurrentOffer": "Protinabídka musí být vyšší než aktuální nabídka",
         "loanCounterMustImproveTerms": "Protinabídka hostování musí vylepšit stávající podmínky",
         "playerNotLoanListed": "Hráč není na listině pro hostování",
@@ -2763,7 +3024,7 @@
         "terminationWouldLeaveMatchdaySquadShort": "Ukončení této smlouvy by způsobilo, že váš kádr nebude schopen postavit zápasovou jedenáctku",
         "noAssistantManagerAssigned": "K vašemu týmu není přiřazen žádný asistent manažera",
         "playerHasNoTeam": "Hráč nemá žádný tým",
-        "boardWagePolicy": "Prodloužení smlouvy je zablokováno mzdovou politikou představenstva. Pro nápravu udržujte roční platy blízko částky {{budget}}."
+        "boardWagePolicy": "Prodloužení smlouvy je zablokováno mzdovou politikou představenstva. Pro nápravu udržujte týdenní platy blízko částky {{budget}}."
       },
       "scouting": {
         "scoutNotFound": "Skaut nebyl nalezen",
@@ -2776,7 +3037,17 @@
         "youthAssignmentNotFound": "Úkol pro nábor mládeže nebyl nalezen",
         "scoutAlreadyAssignedToSearch": "Skaut je již k tomuto vyhledávání přiřazen"
       },
-      "invalidPath": "Neplatná cesta."
+      "invalidPath": "Neplatná cesta.",
+      "customTactic": {
+        "nameRequired": "Dejte taktice název dlouhý nejvýše 60 znaků.",
+        "invalidFormation": "Tuto formaci hra nezná.",
+        "invalidPlayStyle": "Tento herní styl hra nezná.",
+        "notFound": "Tato taktika už neexistuje."
+      },
+      "anotherClubsSquad": "Tento kádr patří jinému klubu.",
+      "startingXiPlayerNotEligible": "Hráč v této sestavě nemůže nastoupit v základu tvého klubu.",
+      "startingXiDuplicatePlayer": "Jeden hráč je v této sestavě dvakrát.",
+      "startingXiWrongSize": "Základní sestava musí mít přesně jedenáct hráčů, nebo všechny způsobilé hráče, pokud jich klub má méně."
     },
     "sender": {
       "boardOfDirectors": "Představenstvo",
@@ -2823,22 +3094,6 @@
         "randomDescription": "Náhodně vygenerovaná liga s {{teamCount}} týmy napříč Evropou",
         "exportedName": "Exportovaný svět",
         "exportedDescription": "Svět s {{teamCount}} týmy exportovaný z uložené hry"
-      },
-      "welcome": {
-        "subject0": "Vítejte v týmu {{team}}",
-        "subject1": "Nová éra v týmu {{team}}",
-        "subject2": "{{team}} čeká na vaše vedení",
-        "body0": "Představenstvo klubu {{team}} vás s potěšením vítá jako nového manažera.\n\nDo vašeho působení vkládáme velké naděje a věříme, že dokážete tento klub dovést ke slávě. Vaším prvním úkolem bude zhodnotit kádr a připravit taktický plán na nadcházející sezónu.\n\nPřejeme vám hodně štěstí.",
-        "body1": "Jménem celé rodiny {{team}} s nadšením oznamujeme vaše jmenování do funkce manažera.\n\nFanoušci se už nemohou dočkat, až uvidí vaši vizi. Věnujte prosím čas posouzení kádru, kontrole naší finanční situace a nastavení taktického přístupu.\n\nPředstavenstvo stojí za vámi.",
-        "body2": "Vítejte v týmu {{team}}! Fanoušci i zaměstnanci jsou nadšeni z budoucnosti pod vaším vedením.\n\nDoporučujeme začít analýzou silných a slabých stránek vašeho kádru, a poté nastavit preferované rozestavení a tréninkový režim.\n\nNadcházející sezónu prověří skutečná zkouška — buďme na vás hrdí.",
-        "actionReview": "Zkontrolovat kádr",
-        "actionThank": "Poděkovat představenstvu"
-      },
-      "schedule": {
-        "subject": "Rozpis sezóny byl zveřejněn",
-        "body0": "Rozpis soutěže {{league}} byl zveřejněn. Sezóna odstartuje {{start}}.\n\nProhlédněte si seznam zápasů a ujistěte se, že je váš kádr připraven na nadcházející výzvy. Předsezónní příprava bude klíčová.",
-        "body1": "Seznam zápasů potvrzen! Sezóna soutěže {{league}} začíná {{start}}.\n\nPečlivě si prostudujte úvodní utkání — silný start může udávat tón celé kampani. Ujistěte se, že jsou vaši klíčoví hráči v zápasové kondici.",
-        "actionView": "Zobrazit zápasy"
       },
       "preMatch": {
         "subject": "Nadcházející zápas: vs {{opponent}} ({{venue}})",
@@ -2890,12 +3145,21 @@
       },
       "wageOverBudget": {
         "subject": "Mzdové náklady překračují rozpočet",
-        "body": "Naše roční mzdové náklady ({{annualWages}}) momentálně překračují vyhrazený rozpočet na platy ({{wageBudget}}).\n\nAčkoliv to v krátkodobém horizontu dokážeme utáhnout, představenstvo by rádo vidělo mzdové náklady pod kontrolou."
+        "body": "Naše týdenní mzdové náklady ({{weeklyWageBill}}) momentálně překračují vyhrazený rozpočet na platy ({{wageBudget}}).\n\nAčkoliv to v krátkodobém horizontu dokážeme utáhnout, představenstvo by rádo vidělo mzdové náklady pod kontrolou."
       },
       "financeBoardPressure": {
         "subject": "Hodnocení představenstva — Finanční tlak",
         "bodyWarning": "Představenstvo má i nadále obavy o finance klubu. Důvěra ve vaše vedení tento týden klesla o {{penalty}} bodů.\n\nMusíte zlepšit situaci ohledně mezd a krátkodobého cash flow, než představenstvu dojde trpělivost.",
         "bodyCritical": "Představenstvo zhodnotilo zhoršující se finanční situaci klubu a důvěra ve vaše vedení tento týden klesla o {{penalty}} bodů.\n\nFinanční rezervy a mzdové závazky jsou nyní v kritickém stavu. Očekávají se okamžitá nápravná opatření."
+      },
+      "financeLevers": {
+        "subject": "Klubu se otevřely možnosti záchrany",
+        "body": "Peněz je málo, a tím se otevírají možnosti nápravy. Ty, které jsou klubu právě dostupné, jsou uvedeny níže; každá vás zavede na kartu Finance.",
+        "action": {
+          "boardSupport": "Požádat o podporu vedení",
+          "sponsorPitch": "Oslovit nového sponzora",
+          "marketingCampaign": "Spustit marketingovou kampaň"
+        }
       },
       "marketingCampaign": {
         "subject": "Zpráva o marketingové kampani",
@@ -3085,6 +3349,11 @@
         "body0": "Špatné zprávy z tréninkového areálu. Hráč {{player}} utrpěl během dnešního tréninku zranění: {{injury}}.\n\nLékařský tým odhaduje dobu rekonvalescence na {{days}} dní. Jeho zotavení budeme pečlivě sledovat.",
         "body1": "Hráč {{player}} se bohužel na dnešním tréninku zranil a jeho diagnózou je {{injury}}.\n\nPrvní odhad: mimo hru přibližně na {{days}} dní. O jeho pokroku vás budeme průběžně informovat."
       },
+      "matchInjury": {
+        "subject": "Zranění v zápase — {{player}} ({{injury}})",
+        "body0": "Špatné zprávy ze zápasu: {{player}} se na hřišti zranil.\n\nDiagnóza: {{injury}}. Lékařský tým odhaduje výpadek na {{days}} dní a bude průběh léčby pozorně sledovat.",
+        "body1": "{{player}} z dnešního zápasu neodešel bez úhony.\n\nDiagnóza: {{injury}}. První odhad: mimo hru přibližně {{days}} dní. Budeme vás informovat o postupu."
+      },
       "mediaPositive": {
         "subject": "Pozitivní ohlas v tisku — {{player}}",
         "body": "V místních novinách dnes vyšel velmi pozitivní článek o hráči {{player}}.\n\nVyzdvihují jeho skvělou současnou formu a oddanost týmu {{team}}. Tento druh mediálního pokrytí velmi prospívá hráčovu sebevědomí i image klubu."
@@ -3224,6 +3493,28 @@
         "subject": "{{player}} podepisuje smlouvu s týmem {{team}}",
         "body": "Hráč {{player}} se připojil k týmu {{team}} jako volný hráč a podepsal smlouvu na {{years}} let."
       },
+      "squadBelowFloor": {
+        "subject": "Kádr pod minimem: {{group}}",
+        "body": "Šéfe, chybí nám hráči. {{group}}: registrováno {{have}}, přitom klub jich musí mít alespoň {{floor}}. Před dalším zápasem prosím doplňte kádr — pokud při výkopu nebudeme moci postavit tým, budu muset povýšit hráče z akademie nebo podepsat volné hráče, aby se zápas mohl odehrát.",
+        "totalSubject": "Kádr pod minimální velikostí",
+        "totalBody": "Šéfe, v A-týmu nám zbývá jen {{have}} hráčů, přitom klub jich musí mít alespoň {{floor}}, aby obstál. Před dalším zápasem prosím doplňte kádr — pokud při výkopu nebudeme moci postavit tým, budu muset povýšit hráče z akademie nebo podepsat volné hráče, aby se zápas mohl odehrát."
+      },
+      "squadToppedUp": {
+        "subject": "Nouzové posily: {{team}}",
+        "body": "Šéfe, neměli jsme dost hráčů, abychom postavili tým, a tak jsem před výkopem přesunul do A-týmu tyto hráče, nejprve z akademie a pak z volných hráčů: {{players}}."
+      },
+      "youthIntake": {
+        "subject": "Nový ročník akademie: {{team}}",
+        "body": "Šéfe, do akademie přišel nový ročník: {{players}}.",
+        "bodyPartlyRefused": "Šéfe, nově v akademii tuto sezonu: {{players}}. Představenstvo odmítlo platit mzdy zbytku ročníku.",
+        "bodyAllRefused": "Šéfe, představenstvo odmítlo platit mzdy novému ročníku, a tak do akademie tuto sezonu nikdo nepřišel."
+      },
+      "squadCannotBeFilled": {
+        "subject": "Nikdo k dispozici: {{group}}",
+        "body": "Šéfe, nepodařilo se nám doplnit kádr a nebylo koho přivést. {{group}}: {{have}} z {{floor}}, které musí klub udržet, a ani naše akademie, ani trh volných hráčů nemá nikoho, kdo by mezeru zaplnil.",
+        "totalSubject": "Nikdo k dispozici pro doplnění kádru",
+        "totalBody": "Šéfe, v A-týmu nám zbývá jen {{have}} hráčů, méně než {{floor}}, které musí klub udržet, a ani naše akademie, ani trh volných hráčů nemá nikoho, kdo by mezeru zaplnil."
+      },
       "delegatedRenewals": {
         "subject": "Zpráva asistenta — Prodloužení smluv",
         "body": "Šéfe, prošel jsem náš seznam smluv k prodloužení v klubu {{team}}. Dokončeno: {{successes}}, stále se jedná: {{stalled}}, selhalo: {{failures}}.",
@@ -3235,8 +3526,9 @@
         "notes": {
           "managerBlocked": "Řekl jste mi, abych jednání o nové smlouvě zatím znovu neotvíral.",
           "completed": "Tento případ se mi podařil uzavřít, aniž byste musel zasahovat.",
+          "completedToKeepSquadFloor": "Hotovo, nad rámec mzdové politiky představenstva. Představenstvo to povolilo, protože bez tohoto hráče bychom klesli pod minimální kádr.",
           "beyondLimits": "Jeho strana požaduje přibližně {{wage}}/týdně na {{years}} let, což přesahuje limity mého pověření.",
-          "boardWagePolicy": "Mzdová politika představenstva toto prodloužení blokuje. Během naší nápravy udržujte roční platy blízko částky {{budget}}.",
+          "boardWagePolicy": "Mzdová politika představenstva toto prodloužení blokuje. Během naší nápravy udržujte týdenní platy blízko částky {{budget}}.",
           "prefersManager": "Byli by ochotni naslouchat, ale stále požadují kolem {{wage}}/týdně na {{years}} let a raději by jednali přímo s vámi.",
           "relationshipBlocked": "Za současné situace kolem smluv a našich vztahů nejsou ochotni se mi skrze mou osobu zavázat."
         }
@@ -3316,7 +3608,12 @@
       },
       "transferComplete": {
         "subject": "Přestup dokončen: {{player}}",
-        "body": "Přestup hráče {{player}} byl dokončen za odstupnou částku {{fee}}.\n\nHráč se připojil k týmu a je k dispozici pro výběr do sestavy."
+        "body": "Přestup hráče {{player}} byl dokončen za odstupnou částku {{fee}}.\n\nHráč se připojil k týmu a je k dispozici pro výběr do sestavy.",
+        "bodySold": "Přestup hráče {{player}} do klubu {{buyer}} byl dokončen za {{fee}}. Hráč opustil tým a připojil se ke klubu {{buyer}}."
+      },
+      "transferAgreed": {
+        "subject": "Přestup dohodnut: {{player}}",
+        "body": "Přestup hráče {{player}} z klubu {{seller}} do klubu {{buyer}} byl dohodnut za {{fee}}. Registrace je naplánována na {{start}}."
       },
       "transferOffer": {
         "subject": "Příchozí nabídka na hráče {{player}}",
@@ -3327,6 +3624,11 @@
         "subject": "Zájem o přestup hráče {{player}}",
         "body": "Kluby s aktivní nabídkou na hráče {{player}}: {{n}}. Nejnovější dotaz: {{team}} ({{fee}}). Pro odpověď zkontrolujte nabídky v záložce Přestupy.",
         "actionReview": "Zkontrolovat nabídky"
+      },
+      "loanAgreed": {
+        "subject": "Hostování dohodnuto: {{player}}",
+        "bodyWithOption": "Hráč {{player}} bude hostovat z klubu {{parent}} v klubu {{borrower}} od {{start}} do {{end}}. Klub {{borrower}} bude hradit {{contribution}} % platu. Opce na odkup: {{fee}}.",
+        "bodyNoOption": "Hráč {{player}} bude hostovat z klubu {{parent}} v klubu {{borrower}} od {{start}} do {{end}}. Klub {{borrower}} bude hradit {{contribution}} % platu. Bez opce na odkup."
       },
       "loanOffer": {
         "subject": "Nabídka hostování pro hráče {{player}}",
@@ -3341,6 +3643,21 @@
       "loanBuyOptionExercised": {
         "subject": "Uplatněna opce na odkup z hostování: {{player}}",
         "body": "Opce na odkup hráče {{player}} byla uplatněna za částku {{fee}}. Hostování se nyní mění v trvalý přestup."
+      },
+      "transferRegistrationFailed": {
+        "subject": "Registrace přestupu selhala: {{player}}",
+        "InsufficientFunds": "Dohodnutý přestup hráče {{player}} do {{buyer}} za {{fee}} nebylo možné zaregistrovat dne {{start}}, protože hotovost nebo přestupový rozpočet kupujícího již nepokrývá částku. Nebyla zaplacena žádná přestupová částka.",
+        "LoanConflict": "Dohodnutý přestup hráče {{player}} do {{buyer}} za {{fee}} nebylo možné zaregistrovat dne {{start}}, protože hráč hostuje nebo má dohodnuté hostování čekající na registraci. Nebyla zaplacena žádná přestupová částka.",
+        "PlayerUnavailable": "Dohodnutý přestup hráče {{player}} do {{buyer}} za {{fee}} nebylo možné zaregistrovat dne {{start}}, protože hráč již není dostupný v prodávajícím klubu. Nebyla zaplacena žádná přestupová částka.",
+        "RegistrationBlocked": "Dohodnutý přestup hráče {{player}} do {{buyer}} za {{fee}} nebylo možné zaregistrovat dne {{start}}, protože již není splněna některá podmínka registrace. Nebyla zaplacena žádná přestupová částka."
+      },
+      "matchesMoved": {
+        "subject": "Zápasy přesunuty",
+        "body": "Některé vaše zápasy byly přesunuty, aby si hráči zachovali odpočinek a byly dodrženy reprezentační přestávky:\n{{matches}}"
+      },
+      "savedDataSetAside": {
+        "subject": "Některá uložená data byla odložena stranou",
+        "body": "Část této uložené hry se při načítání nepodařilo přečíst. Byla odložena stranou, nikoli ztracena, a vaše kariéra pokračuje. Pokud vám něco chybí, hlášení chyby ({{settings}} → {{reportBug}}, s přiloženou uloženou hrou) nám umožní se na to podívat."
       }
     },
     "news": {
@@ -3377,6 +3694,10 @@
         "reportPreseason": {
           "title": "{{home}} {{homeGoals}} - {{awayGoals}} {{away}}: Zpráva z předsezónního turnaje",
           "body": "V předsezónním turnaji {{home}} {{homeGoals}} - {{awayGoals}} {{away}}. Obě strany využily toto střetnutí k nabrání ostrosti před soutěžní kampaní.{{scorersSection}}"
+        },
+        "reportCompetition": {
+          "title": "{{home}} {{homeGoals}} - {{awayGoals}} {{away}}: Zpráva ze zápasu ({{competition}})",
+          "body": "{{competition}}: zápas skončil {{home}} {{homeGoals}} - {{awayGoals}} {{away}}.{{scorersSection}}"
         }
       },
       "roundup": {
@@ -3450,7 +3771,9 @@
       "weeklyDigest": {
         "headline": "Týdenní přehled — Týden od {{weekStart}}",
         "bodyNoTopScorer": "Nejnovější týdenní přehled je tady. Tabulku vede {{leader}} a dění v divizi tento týden utváří {{storylineCount}} hlavních událostí.",
-        "bodyWithTopScorer": "Nejnovější týdenní přehled je tady. Tabulku vede {{leader}}, zatímco střeleckým tabulkám vévodí {{topScorer}} s {{topScorerGoals}} góly. Dění v divizi tento týden utváří {{storylineCount}} hlavních událostí."
+        "bodyWithTopScorer": "Nejnovější týdenní přehled je tady. Tabulku vede {{leader}}, zatímco střeleckým tabulkám vévodí {{topScorer}} s {{topScorerGoals}} góly. Dění v divizi tento týden utváří {{storylineCount}} hlavních událostí.",
+        "bodyNoTopScorerNoStorylines": "Nejnovější týdenní přehled je tady. Tabulku vede {{leader}}.",
+        "bodyWithTopScorerNoStorylines": "Nejnovější týdenní přehled je tady. Tabulku vede {{leader}}, zatímco střeleckým tabulkám vévodí {{topScorer}} s {{topScorerGoals}} góly."
       },
       "preseasonDigest": {
         "headline": "Předsezónní přehled — Týden od {{weekStart}}",
@@ -3512,6 +3835,13 @@
     },
     "save": {
       "defaultName": "Kariéra {{manager}}"
+    },
+    "warning": {
+      "package": {
+        "countryWithoutRegion": "Tento balíček definuje zemi „{{name}}“ ({{code}}), která není v seznamu zemí hry, a nezařazuje ji do žádné konfederace, takže její kluby jsou vedeny v Evropě. Přiřaďte jí konfederaci.",
+        "freeAgentFieldIgnored": "Hráč „{{id}}“ nemá klub, je tedy volný hráč bez smlouvy: pole „{{field}}“ se ignoruje. Přiřaďte mu klub, aby se použilo, nebo pole odstraňte.",
+        "repeatedNamePool": "Sada jmen pro {{country}} už byla uvedena v {{first}}; sada v tomto souboru ji nahrazuje. Ponechte jen jednu, nebo je přiřaďte různým zemím."
+      }
     }
   },
   "traits": {
@@ -3759,6 +4089,7 @@
     "saveSuccess": "Uloženo",
     "saveTeam": "Uložit tým",
     "issues": "{{count}} problém(ů)",
+    "warnings": "Varování: {{count}}",
     "packageId": "ID balíčku",
     "packageName": "Název balíčku",
     "description": "Popis",
@@ -3839,7 +4170,25 @@
     "playerPosition": "Pozice",
     "playerFoot": "Preferovaná noha",
     "playerDateOfBirth": "Datum narození",
+    "playerAgeToday": "dnes {{age}} let",
     "playerAge": "Věk",
+    "playerAgeHelp": "Používá se, když chybí datum narození: hráči je tolik let v den zahájení kariéry, ať je to kterýkoli rok.",
+    "playerContractSection": "Smlouva",
+    "playerContractStart": "Začátek smlouvy",
+    "playerContractEnd": "Konec smlouvy",
+    "playerContractLength": "Délka smlouvy (roky)",
+    "playerContractLengthHelp": "Alternativa ke konečnému datu. Počítá se od data začátku, pokud existuje, jinak od roku zahájení kariéry, takže hráč nikdy není hned bez smlouvy. Zadejte konečné datum nebo délku, ne obojí.",
+    "playerWageHelp": "Za týden. Pokud pole necháte prázdné, dopočítá se z hodnoty hráče.",
+    "playerStatusSection": "Stav",
+    "playerAlternatePositions": "Alternativní posty",
+    "playerAlternatePositionsHelp": "Další posty, na kterých hráč může hrát. Jen u konkrétního postu, jako je Striker: obecná skupina jako Forward je odvodí z atributů.",
+    "playerCareerSection": "Kariérní historie",
+    "careerEntryRow": "Kariérní záznam",
+    "careerEntryClubName": "Název klubu",
+    "careerEntryPackageTeam": "Klub z tohoto balíčku",
+    "careerEntryNoPackageTeam": "Není v tomto balíčku",
+    "addCareerEntry": "Přidat sezónu",
+    "removeCareerEntry": "Odebrat sezónu",
     "playerOverall": "Celkové hodnocení (1–99)",
     "playerPotential": "Potenciál (1–99)",
     "playerPotentialHelp": "Kam až tento hráč může dojít. Nechte prázdné a engine vylosuje strop podle jeho úrovně a věku. Nesmí být pod současnou úrovní a hráč, který ho dosáhl, se přestane zlepšovat.",
@@ -3899,6 +4248,7 @@
     "openPackageFileInvalid": "Vyberte platný soubor balíčku .ofm",
     "noItemSelected": "Vyberte položku ze seznamu, nebo klikněte na Přidat pro vytvoření nové",
     "issuesBadge": "{{count}} problémů",
+    "warningsBadge": "Varování: {{count}}",
     "issuesTitle": "Problémy s validací",
     "noIssues": "Žádné problémy — svět je validní",
     "saving": "Ukládání…",
@@ -3974,6 +4324,8 @@
     "staffId": "ID",
     "staffFirstName": "Jméno",
     "staffLastName": "Příjmení",
+    "staffKnownAs": "Známý jako (volitelné)",
+    "staffKnownAsPlaceholder": "např. Cafu",
     "staffClub": "Klub",
     "staffNationality": "Národnost",
     "staffDateOfBirth": "Datum narození",
@@ -4031,5 +4383,78 @@
   "generation": {
     "title": "Generování a dokončení",
     "coverage": "Vaše balíčky pokrývají"
+  },
+  "errorBoundary": {
+    "title": "Něco se pokazilo",
+    "description": "Na této obrazovce došlo k chybě, ze které se nepodařilo zotavit. Zkuste to nejdřív znovu — načtení restartuje hru a neuložený postup se ztratí.",
+    "retry": "Zkusit znovu",
+    "reload": "Načíst hru znovu"
+  },
+  "errors": {
+    "title": "Něco se pokazilo"
+  },
+  "reportBug": {
+    "describeTitle": "Nahlásit chybu",
+    "describeIntro": "Napište nám, co se pokazilo. Vaše protokoly a údaje o hře se připojí automaticky. Celý seznam uvidíte dřív, než se cokoli uloží.",
+    "previewTitle": "Co se odešle",
+    "previewIntro": "Všechno níže, a nic jiného. Nic neopustí tenhle počítač, dokud nevyberete, kam to uložit.",
+    "doneTitle": "Hlášení uloženo",
+    "doneIntro": "Formulář chyby je otevřený v prohlížeči a vaše odpovědi jsou už vyplněné.",
+    "whatHappened": "Co se stalo",
+    "whatHappenedPlaceholder": "Hra zamrzla po kliknutí na Na hřiště…",
+    "expected": "Co jste čekali",
+    "expectedPlaceholder": "Zápas měl normálně začít…",
+    "steps": "Postup pro zopakování",
+    "stepsPlaceholder": "1. Začít novou hru\n2. Postoupit na hrací den\n3. Kliknout na Na hřiště…",
+    "required": "Povinné",
+    "fillRequired": "Vyplňte prosím, co se stalo a co jste čekali.",
+    "frequencyLabel": "Jak často se to stává",
+    "gameContext": "Vaše kariéra",
+    "frequency": {
+      "everyTime": "Pokaždé",
+      "sometimes": "Občas",
+      "once": "Jen jednou"
+    },
+    "itemWhatYouWrote": "Co jste napsali",
+    "itemWhatYouWroteDesc": "Váš popis, očekávání, postup a jak často k tomu dochází.",
+    "itemSetup": "Váš systém",
+    "itemLogs": "Vaše poslední soubory protokolu",
+    "itemLogsDesc": "Vaše domovská složka a uživatelské jméno se před uložením odstraní, stejně jako název počítače, pokud ho systém uvádí.",
+    "itemCrash": "Pád z vaší poslední relace",
+    "itemCrashDesc": "Přiloženo, protože při vaší minulé hře něco spadlo.",
+    "optionalHeading": "Přidejte, pokud chcete — ve výchozím stavu vypnuto",
+    "includeSave": "Moje uložená hra",
+    "includeSaveDesc": "Umožní nám přehrát přesně tu situaci, ve které jste se ocitli.",
+    "includeSaveNoCareer": "Žádná kariéra není otevřená, není co přiložit.",
+    "nothingSentYet": "Nic se neuloží ani neotevře, dokud nestisknete tlačítko níže. Odeslání formuláře vyžaduje účet na GitHubu — soubor je váš tak jako tak.",
+    "savedTo": "Soubor s hlášením byl uložen sem:",
+    "dragItIn": "Přetáhněte ho do formuláře na GitHubu v prohlížeči a odešlete. A to je všechno.",
+    "browserDidNotOpen": "Prohlížeč se neotevřel. Soubor výše je uložený — přiložte ho k novému issue na GitHubu, až budete moci.",
+    "review": "Zkontrolovat, co se odešle",
+    "saveAndOpen": "Uložit soubor a otevřít GitHub",
+    "working": "Pracuji…",
+    "previewIntroUpload": "Vše níže a nic jiného. Nic neopustí tento počítač, dokud nestisknete Odeslat nebo si soubor sami neuložíte.",
+    "consentLabel": "Odeslat tyto soubory týmu OpenFoot Manager",
+    "consentDesc": "Souhlasím s odesláním souborů ze seznamu výše. Účet není potřeba. Hlášení se uchovávají, dokud je tým nevyřídí.",
+    "send": "Odeslat",
+    "saveAndOpenInstead": "Místo toho uložit soubor a použít GitHub",
+    "nothingSentYetUpload": "Nic neopustí tento počítač, dokud nestisknete Odeslat. Dáváte přednost GitHubu? Uložte soubor a přiložte ho k formuláři sami — k tomu potřebujete účet na GitHubu.",
+    "uploadFailedFallback": "Stále ho můžete poslat přes GitHub: uložte soubor a přiložte ho k formuláři.",
+    "technicalDetails": "Technické podrobnosti",
+    "tooLargeUntickSave": "Když odškrtnete uloženou hru, hlášení bude mnohem menší.",
+    "sentTitle": "Hlášení odesláno",
+    "sentIntro": "Děkujeme. Vaše hlášení dorazilo týmu OpenFoot Manager a uchovává se, dokud nebude vyřízeno.",
+    "referenceCode": "Váš referenční kód",
+    "referenceCodeHint": "Uveďte tento kód, když se budete na hlášení ptát. Chcete-li ho nechat smazat, napište s tímto kódem na bugreport@openfootmanager.com. Není to heslo: nikdo podle něj vaše hlášení neuvidí.",
+    "referenceCodeSaved": "Najdete ho znovu v Nastavení → Nápověda → Vaše hlášení.",
+    "notRecorded": "Tento kód se nepodařilo přidat do seznamu vašich hlášení. Zapište si ho, prosím.",
+    "copyCodeFor": "Kopírovat kód {{code}}",
+    "codeCopied": "Zkopírováno"
+  },
+  "crashPrompt": {
+    "title": "Hra se neočekávaně ukončila",
+    "body": "Vaše poslední hraní skončilo pádem hry. Nahlášení nám pomůže chybu opravit — než cokoli opustí váš počítač, uvidíte vše, co by se odeslalo.",
+    "report": "Nahlásit",
+    "notNow": "Teď ne"
   }
 }

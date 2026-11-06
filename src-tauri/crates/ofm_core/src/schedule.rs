@@ -3,7 +3,11 @@ use domain::league::{
     CompetitionFormat, CompetitionRules, CompetitionScope, CompetitionType, Fixture,
     FixtureCompetition, FixtureStatus, KnockoutRoundState, League, StandingEntry,
 };
+#[cfg(test)]
 use uuid::Uuid;
+
+/// The ordinary-table cadence shared by default and authored construction.
+pub(crate) const LEAGUE_MATCHDAY_GAP_DAYS: u32 = 7;
 
 /// Generate a full double round-robin schedule (home & away) for the given teams.
 /// Matchdays are spaced 7 days apart starting from `start_date`.
@@ -17,7 +21,10 @@ pub fn generate_league(
     let n = team_ids.len();
     assert!(n >= 2);
 
-    let league_id = Uuid::new_v4().to_string();
+    let season_key = season.to_string();
+    let mut id_parts = vec!["league", name, &season_key];
+    id_parts.extend(team_ids.iter().map(String::as_str));
+    let league_id = crate::seed::derived_id(&id_parts);
     let mut league = League::new(league_id, name.to_string(), season, team_ids);
     append_round_robin_fixtures(&mut league, team_ids, start_date);
     league
@@ -49,7 +56,7 @@ pub fn build_round_robin_fixtures(
         start_date,
         fixture_competition,
         2,
-        7,
+        LEAGUE_MATCHDAY_GAP_DAYS.into(),
     )
 }
 
@@ -102,7 +109,15 @@ pub fn build_round_robin_fixtures_with(
                     continue; // Paired with the phantom slot: a bye.
                 }
                 fixtures.push(Fixture {
-                    id: Uuid::new_v4().to_string(),
+                    postponement: None,
+                    id: crate::seed::derived_id(&[
+                        "fixture",
+                        competition_id,
+                        &matchday.to_string(),
+                        &date_str,
+                        &team_ids[home],
+                        &team_ids[away],
+                    ]),
                     competition_id: competition_id.to_string(),
                     matchday,
                     date: date_str.clone(),
@@ -173,6 +188,7 @@ pub fn regenerate_league_for_season(league: &mut League, season: u32, start_date
 
     league.participant_ids = team_ids.clone();
     league.season = season;
+    crate::calendar_identity::record_regenerated_calendar(league, start_date);
     league.fixtures.clear();
     league.standings = team_ids
         .iter()
@@ -188,6 +204,7 @@ pub fn regenerate_league_for_season(league: &mut League, season: u32, start_date
 /// and participants but clearing previous fixtures, standings, and rounds.
 pub fn regenerate_knockout_for_season(cup: &mut League, season: u32, start_date: DateTime<Utc>) {
     cup.season = season;
+    crate::calendar_identity::record_regenerated_calendar(cup, start_date);
     cup.fixtures.clear();
     cup.standings.clear();
     cup.knockout_rounds.clear();
@@ -214,7 +231,11 @@ pub fn generate_knockout_cup(
     kind: CompetitionType,
     scope: CompetitionScope,
 ) -> League {
-    let competition_id = Uuid::new_v4().to_string();
+    let season_key = season.to_string();
+    let start_key = start_date.to_rfc3339();
+    let mut id_parts = vec!["knockout", name, &season_key, &start_key];
+    id_parts.extend(team_ids.iter().map(String::as_str));
+    let competition_id = crate::seed::derived_id(&id_parts);
     let mut cup = League::new(competition_id.clone(), name.to_string(), season, team_ids);
     cup.kind = kind.clone();
     cup.scope = scope;
@@ -239,6 +260,14 @@ pub fn generate_knockout_cup(
     cup
 }
 
+/// Byes that reduce an uneven knockout field to a power of two.
+/// Shared by bracket construction and completed-edition verification.
+pub(crate) fn knockout_bye_count(entrants: usize) -> Option<usize> {
+    entrants
+        .checked_next_power_of_two()
+        .map(|size| size - entrants)
+}
+
 /// Seed the next knockout round of `cup` from `team_ids` (strongest first —
 /// any byes for a non-power-of-two field go to the leading seeds).
 pub fn seed_knockout_round(
@@ -258,7 +287,13 @@ pub fn seed_knockout_round(
     // When the entrant count is not a power of two, the strongest seeds (which
     // the caller passes first) receive a bye into the next round so the bracket
     // converges to a power of two.
-    let byes = team_ids.len().next_power_of_two() - team_ids.len();
+    let Some(byes) = knockout_bye_count(team_ids.len()) else {
+        log::warn!(
+            "[schedule] a knockout field of {} entrants cannot form a bracket",
+            team_ids.len()
+        );
+        return;
+    };
     let (bye_teams, playing_teams) = team_ids.split_at(byes);
 
     let mpd = cup.rules.knockout_matches_per_day.max(1) as usize;
@@ -267,9 +302,19 @@ pub fn seed_knockout_round(
         if pair.len() < 2 {
             continue;
         }
-        let fixture_id = Uuid::new_v4().to_string();
+        let fixture_id = crate::seed::derived_id(&[
+            "tie",
+            &cup.id,
+            // The season too: a renewed cup keeps its id and often its pairings.
+            &cup.season.to_string(),
+            &start_date.to_rfc3339(),
+            &round_index.to_string(),
+            &pair[0],
+            &pair[1],
+        ]);
         round_fixture_ids.push(fixture_id.clone());
         cup.fixtures.push(Fixture {
+            postponement: None,
             id: fixture_id,
             competition_id: cup.id.clone(),
             matchday: round_index,
@@ -418,7 +463,13 @@ pub fn generate_preseason_friendlies(
             };
 
             fixtures.push(Fixture {
-                id: Uuid::new_v4().to_string(),
+                postponement: None,
+                id: crate::seed::derived_id(&[
+                    "friendly",
+                    &date,
+                    &team_ids[home_idx],
+                    &team_ids[away_idx],
+                ]),
                 competition_id: String::new(),
                 matchday: 0,
                 date: date.clone(),
@@ -437,46 +488,12 @@ pub fn generate_preseason_friendlies(
     fixtures
 }
 
-/// Add three weekly friendlies to every South American domestic division.
-/// Shared regional-cup clubs are never booked twice on the same date.
-pub fn append_south_american_preseason_friendlies(
-    competitions: &mut [League],
-    international_dates: &[String],
-) {
-    append_regional_preseason_friendlies(competitions, international_dates, true);
-}
-
-/// Preserve the established four-match preseason for all other domestic
-/// divisions, applying it to every division rather than a single global one.
-pub fn append_other_preseason_friendlies(
-    competitions: &mut [League],
-    international_dates: &[String],
-) {
-    append_regional_preseason_friendlies(competitions, international_dates, false);
-}
-
-fn append_regional_preseason_friendlies(
-    competitions: &mut [League],
-    international_dates: &[String],
-    south_american: bool,
-) {
-    use std::collections::HashSet;
-    let reserved: HashSet<String> = international_dates.iter().cloned().collect();
-    let mut occupied: HashSet<(String, String)> = competitions
-        .iter()
-        .flat_map(|competition| {
-            competition
-                .fixtures
-                .iter()
-                .filter(|fixture| fixture.competition != FixtureCompetition::Friendly)
-                .flat_map(|fixture| {
-                    [
-                        (fixture.home_team_id.clone(), fixture.date.clone()),
-                        (fixture.away_team_id.clone(), fixture.date.clone()),
-                    ]
-                })
-        })
-        .collect();
+/// Add preseason friendlies to upcoming domestic divisions: three weekly
+/// rounds in South America and four elsewhere. Past dates are never created.
+/// A friendly that clashes with anything else is not handled here: the calendar
+/// sweep drops it, because a friendly always yields.
+pub fn append_preseason_friendlies(competitions: &mut [League], current_date: DateTime<Utc>) {
+    let today = current_date.date_naive();
     let competitive_dates: Vec<(String, chrono::NaiveDate)> = competitions
         .iter()
         .flat_map(|competition| competition.fixtures.iter())
@@ -497,7 +514,6 @@ fn append_regional_preseason_friendlies(
     for competition in competitions.iter_mut().filter(|competition| {
         competition.kind == CompetitionType::League
             && competition.scope == CompetitionScope::Domestic
-            && (competition.region_id.as_deref() == Some("south-america")) == south_american
     }) {
         if competition
             .fixtures
@@ -516,46 +532,26 @@ fn append_regional_preseason_friendlies(
         else {
             continue;
         };
-        let friendly_count = if south_american { 3 } else { 4 };
+        // Rollover retains foreign-hemisphere divisions that are mid-season.
+        // Their old opener is not a new preseason to schedule against.
+        if first_date.date_naive() <= today {
+            continue;
+        }
+        let friendly_count = if competition.region_id.as_deref() == Some("south-america") {
+            3
+        } else {
+            4
+        };
         let friendlies =
             generate_preseason_friendlies(&competition.participant_ids, first_date, friendly_count)
                 .into_iter()
                 .filter(|fixture| {
-                    !reserved.contains(&fixture.date)
-                        && !occupied.contains(&(fixture.home_team_id.clone(), fixture.date.clone()))
-                        && !occupied.contains(&(fixture.away_team_id.clone(), fixture.date.clone()))
+                    // A career may open partway through preseason. Keep today's
+                    // games (fixtures run by calendar day), but never create past ones.
+                    date_str_to_utc(&fixture.date).is_some_and(|date| date.date_naive() >= today)
                 })
                 .collect::<Vec<_>>();
-        for fixture in &friendlies {
-            occupied.insert((fixture.home_team_id.clone(), fixture.date.clone()));
-            occupied.insert((fixture.away_team_id.clone(), fixture.date.clone()));
-        }
         append_fixtures(competition, friendlies);
-    }
-}
-
-/// Push any fixture that lands on a reserved date (e.g. an international
-/// window) forward to the next free day, so club matches never clash with
-/// national-team call-ups. Order is preserved.
-pub fn shift_fixtures_off_reserved_dates(league: &mut League, reserved_dates: &[String]) {
-    if reserved_dates.is_empty() {
-        return;
-    }
-    let reserved: std::collections::HashSet<&str> =
-        reserved_dates.iter().map(|date| date.as_str()).collect();
-
-    for fixture in &mut league.fixtures {
-        let Some(mut date) = chrono::NaiveDate::parse_from_str(&fixture.date, "%Y-%m-%d").ok()
-        else {
-            continue;
-        };
-        while reserved.contains(date.format("%Y-%m-%d").to_string().as_str()) {
-            match date.succ_opt() {
-                Some(next) => date = next,
-                None => break,
-            }
-        }
-        fixture.date = date.format("%Y-%m-%d").to_string();
     }
 }
 
@@ -571,42 +567,286 @@ pub fn append_fixtures(league: &mut League, mut additional_fixtures: Vec<Fixture
 
 #[cfg(test)]
 mod tests {
+    /// Given distinct entrant lists whose comma-joined text is identical,
+    /// When leagues are generated for the same name, season and date,
+    /// Then their competition ids and fixture ids remain distinct.
+    #[test]
+    fn leagues_preserve_entrant_boundaries_inside_ids() {
+        let first = ["a,b", "c", "d", "e"].map(String::from);
+        let second = ["a", "b,c", "d", "e"].map(String::from);
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let first = generate_league("Test League", 2026, &first, start);
+        let second = generate_league("Test League", 2026, &second, start);
+
+        assert_ne!(first.id, second.id);
+        assert!(
+            first
+                .fixtures
+                .iter()
+                .all(|fixture| second.fixtures.iter().all(|other| fixture.id != other.id))
+        );
+    }
+
+    /// Given distinct entrant lists whose comma-joined text is identical,
+    /// When knockout cups are generated with a common d/e tie,
+    /// Then neither the competition nor that tie shares an id.
+    #[test]
+    fn knockout_cups_preserve_entrant_boundaries_inside_ids() {
+        let first = ["a,b", "c", "d", "e"].map(String::from);
+        let second = ["a", "b,c", "d", "e"].map(String::from);
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let cup = |teams: &[String]| {
+            generate_knockout_cup(
+                "Test Cup",
+                2026,
+                teams,
+                start,
+                CompetitionType::Cup,
+                CompetitionScope::Domestic,
+            )
+        };
+        let first = cup(&first);
+        let second = cup(&second);
+        let tie = |cup: &League| {
+            cup.fixtures
+                .iter()
+                .find(|f| f.home_team_id == "d" && f.away_team_id == "e")
+                .unwrap()
+                .id
+                .clone()
+        };
+
+        assert_ne!(tie(&first), tie(&second));
+        assert_ne!(first.id, second.id);
+    }
+
+    /// Given a knockout cup that is renewed for the next season,
+    /// When its ties are drawn again between the same clubs,
+    /// Then no tie shares an id with last season's — match statistics and inbox items are keyed
+    ///      by fixture id, so a repeated id is a primary-key clash on the second season's save.
+    #[test]
+    fn a_renewed_cups_ties_do_not_reuse_last_seasons_ids() {
+        let teams: Vec<String> = (1..=8).map(|n| format!("team_{n}")).collect();
+        let start = chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let mut cup = generate_knockout_cup(
+            "Test Cup",
+            2026,
+            &teams,
+            start,
+            CompetitionType::Cup,
+            CompetitionScope::Domestic,
+        );
+        let last_season: std::collections::BTreeSet<String> =
+            cup.fixtures.iter().map(|f| f.id.clone()).collect();
+        assert!(!last_season.is_empty());
+
+        regenerate_knockout_for_season(
+            &mut cup,
+            2027,
+            chrono::Utc.with_ymd_and_hms(2027, 8, 1, 0, 0, 0).unwrap(),
+        );
+
+        assert!(cup.fixtures.iter().all(|f| !last_season.contains(&f.id)));
+    }
+
+    /// Given the same teams, dates and names,
+    /// When a schedule is generated twice,
+    /// Then every competition and fixture has the same id both times — so what orders a day's
+    ///      fixtures by id, and what keys off them, replays.
+    #[test]
+    fn the_same_schedule_has_the_same_ids() {
+        let teams: Vec<String> = (1..=6).map(|n| format!("team_{n}")).collect();
+        let start = chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let ids = |league: &League| -> Vec<String> {
+            std::iter::once(league.id.clone())
+                .chain(league.fixtures.iter().map(|fixture| fixture.id.clone()))
+                .collect()
+        };
+
+        let first = generate_league("Test League", 2026, &teams, start);
+        let second = generate_league("Test League", 2026, &teams, start);
+        let cup = generate_knockout_cup(
+            "Test Cup",
+            2026,
+            &teams,
+            start,
+            CompetitionType::Cup,
+            CompetitionScope::Domestic,
+        );
+        let cup_again = generate_knockout_cup(
+            "Test Cup",
+            2026,
+            &teams,
+            start,
+            CompetitionType::Cup,
+            CompetitionScope::Domestic,
+        );
+
+        assert_eq!(ids(&first), ids(&second));
+        assert_eq!(ids(&cup), ids(&cup_again));
+        let distinct: std::collections::BTreeSet<_> = ids(&first).into_iter().collect();
+        assert_eq!(
+            distinct.len(),
+            ids(&first).len(),
+            "no two fixtures share an id"
+        );
+    }
+
     use super::*;
     use chrono::TimeZone;
 
     #[test]
-    fn shift_fixtures_off_reserved_dates_moves_clashing_matches_forward() {
-        let teams: Vec<String> = (0..2).map(|i| format!("team_{i}")).collect();
-        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
-        let mut league = generate_league("Test League", 2026, &teams, start);
+    fn preseason_opening_partway_keeps_today_and_future_dates() {
+        let start = Utc.with_ymd_and_hms(2035, 2, 1, 0, 0, 0).unwrap();
+        let teams: Vec<String> = (0..4).map(|i| format!("team-{i}")).collect();
+        for region in ["south-america", "europe"] {
+            for (day, expected) in [(11, 6), (12, 4)] {
+                let now = Utc.with_ymd_and_hms(2035, 1, day, 12, 0, 0).unwrap();
+                let mut division = generate_league(region, 2035, &teams, start);
+                division.region_id = Some(region.into());
+                division.scope = CompetitionScope::Domestic;
+                let mut competitions = vec![division];
 
-        // Force a clash, then reserve that exact day.
-        league.fixtures[0].date = "2026-09-09".to_string();
-        let reserved = vec!["2026-09-09".to_string()];
+                append_preseason_friendlies(&mut competitions, now);
 
-        shift_fixtures_off_reserved_dates(&mut league, &reserved);
-
-        assert!(
-            league.fixtures.iter().all(|f| f.date != "2026-09-09"),
-            "no fixture should remain on a reserved date"
-        );
-        assert_eq!(
-            league.fixtures[0].date, "2026-09-10",
-            "clashing fixture should move to the next free day"
-        );
+                let friendlies: Vec<_> = competitions[0]
+                    .fixtures
+                    .iter()
+                    .filter(|f| f.competition == FixtureCompetition::Friendly)
+                    .collect();
+                assert!(
+                    friendlies.iter().all(|f| {
+                        date_str_to_utc(&f.date).unwrap().date_naive() >= now.date_naive()
+                    }),
+                    "{region} must not create friendlies before {now}"
+                );
+                assert_eq!(
+                    friendlies.len(),
+                    expected,
+                    "{region} keeps every available preseason date, including today"
+                );
+            }
+        }
     }
 
     #[test]
-    fn shift_fixtures_off_reserved_dates_is_noop_without_reservations() {
+    fn preseason_reserved_dates_are_never_booked() {
+        let now = Utc.with_ymd_and_hms(2035, 7, 1, 12, 0, 0).unwrap();
+        let start = Utc.with_ymd_and_hms(2035, 8, 1, 0, 0, 0).unwrap();
+        let mut competitions: Vec<_> = ["south-america", "europe"]
+            .into_iter()
+            .map(|region| {
+                let teams: Vec<String> = (0..8).map(|i| format!("{region}-{i}")).collect();
+                let mut division = generate_league(region, 2035, &teams, start);
+                division.region_id = Some(region.into());
+                division.scope = CompetitionScope::Domestic;
+                division
+            })
+            .collect();
+        let reserved = ["2035-07-18".to_string()];
+
+        append_preseason_friendlies(&mut competitions, now);
+        crate::calendar_reconcile::settle_generated_calendar(
+            &mut competitions,
+            &std::collections::BTreeSet::from([
+                chrono::NaiveDate::from_ymd_opt(2035, 7, 18).unwrap()
+            ]),
+            now.date_naive(),
+        );
+
+        let mut occupied = std::collections::HashSet::new();
+        for (division, expected) in competitions.iter().zip([8, 12]) {
+            let friendlies: Vec<_> = division
+                .fixtures
+                .iter()
+                .filter(|f| f.competition == FixtureCompetition::Friendly)
+                .collect();
+            assert_eq!(friendlies.len(), expected);
+            for fixture in friendlies {
+                assert!(!reserved.contains(&fixture.date));
+                for club in [&fixture.home_team_id, &fixture.away_team_id] {
+                    assert!(
+                        occupied.insert((club, &fixture.date)),
+                        "a club is booked twice"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Given a league match forced onto an international window, when the generated calendar is
+    /// settled, then it moves to the next free day and nothing is recorded as postponed.
+    #[test]
+    fn a_league_round_on_a_window_is_placed_off_it_at_generation() {
         let teams: Vec<String> = (0..2).map(|i| format!("team_{i}")).collect();
         let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
         let mut league = generate_league("Test League", 2026, &teams, start);
-        let before: Vec<String> = league.fixtures.iter().map(|f| f.date.clone()).collect();
+        league.fixtures[0].date = "2026-09-09".to_string();
+        let blackout = std::collections::BTreeSet::from([chrono::NaiveDate::from_ymd_opt(
+            2026, 9, 9,
+        )
+        .unwrap()]);
+        let mut world = vec![league];
 
-        shift_fixtures_off_reserved_dates(&mut league, &[]);
+        crate::calendar_reconcile::settle_generated_calendar(
+            &mut world,
+            &blackout,
+            start.date_naive(),
+        );
 
-        let after: Vec<String> = league.fixtures.iter().map(|f| f.date.clone()).collect();
-        assert_eq!(before, after);
+        assert_eq!(world[0].fixtures[0].date, "2026-09-10");
+        assert!(world[0].fixtures.iter().all(|f| f.postponement.is_none()));
+    }
+
+    /// Given a calendar without clashes, when it is settled, then not one date changes.
+    #[test]
+    fn a_world_without_clashes_is_unchanged_byte_for_byte() {
+        let teams: Vec<String> = (0..6).map(|i| format!("team_{i}")).collect();
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let mut world = vec![generate_league("Test League", 2026, &teams, start)];
+        let before = serde_json::to_string(&world).unwrap();
+
+        crate::calendar_reconcile::settle_generated_calendar(
+            &mut world,
+            &Default::default(),
+            start.date_naive(),
+        );
+
+        assert_eq!(serde_json::to_string(&world).unwrap(), before);
+    }
+
+    /// Given two rounds of one league dated on consecutive days that both fall inside an
+    /// international window, when the generated calendar is settled, then the rounds land on
+    /// different days, at least the minimum rest apart (shifting each past the window one day at a
+    /// time put both on the first free day).
+    #[test]
+    fn two_rounds_in_one_blackout_land_on_different_days() {
+        let teams: Vec<String> = (0..2).map(|i| format!("team_{i}")).collect();
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let mut league = generate_league("Test League", 2026, &teams, start);
+        league.fixtures[0].date = "2026-09-09".to_string();
+        league.fixtures[1].date = "2026-09-10".to_string();
+        let blackout = std::collections::BTreeSet::from([
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 9).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(),
+        ]);
+        let mut world = vec![league];
+
+        crate::calendar_reconcile::settle_generated_calendar(
+            &mut world,
+            &blackout,
+            start.date_naive(),
+        );
+
+        let first =
+            chrono::NaiveDate::parse_from_str(&world[0].fixtures[0].date, "%Y-%m-%d").unwrap();
+        let second =
+            chrono::NaiveDate::parse_from_str(&world[0].fixtures[1].date, "%Y-%m-%d").unwrap();
+        assert!(!blackout.contains(&first) && !blackout.contains(&second));
+        assert!(
+            (second - first).num_days().abs() >= crate::calendar_booking::MIN_GAP_DAYS,
+            "{first} and {second} are closer than the minimum rest"
+        );
     }
 
     fn resolve_scheduled_fixtures(cup: &mut League) {
@@ -949,6 +1189,7 @@ mod tests {
             ..Default::default()
         };
         cup.fixtures.push(Fixture {
+            postponement: None,
             id: Uuid::new_v4().to_string(),
             competition_id: "regional-cup".to_string(),
             matchday: 1,
@@ -961,7 +1202,13 @@ mod tests {
         });
 
         let mut competitions = vec![league, cup];
-        append_south_american_preseason_friendlies(&mut competitions, &[]);
+        let now = Utc.with_ymd_and_hms(2025, 12, 15, 0, 0, 0).unwrap();
+        append_preseason_friendlies(&mut competitions, now);
+        crate::calendar_reconcile::settle_generated_calendar(
+            &mut competitions,
+            &Default::default(),
+            now.date_naive(),
+        );
 
         let friendly_dates: std::collections::HashSet<&str> = competitions[0]
             .fixtures
@@ -1038,6 +1285,38 @@ mod tests {
         assert!(
             max_md1 < min_md2,
             "matchday 1 should end before matchday 2 starts"
+        );
+    }
+
+    /// Given a four-team group playing each other once, two matches a matchday, one match a day
+    /// When its fixtures are spread from 1 June
+    /// Then each matchday takes two days and the next starts after a free day: 1–2, 4–5 and
+    ///      7–8 June, so no side plays on consecutive days
+    #[test]
+    fn spread_fixture_dates_leaves_a_rest_day_between_matchdays() {
+        let start = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let teams: Vec<String> = (0..4).map(|i| format!("t{i}")).collect();
+        let mut fixtures =
+            build_round_robin_fixtures_with("c", &teams, start, FixtureCompetition::Cup, 1, 2);
+
+        spread_fixture_dates(&mut fixtures, start, 1);
+
+        let dates_of = |matchday: u32| -> Vec<String> {
+            let mut dates: Vec<String> = fixtures
+                .iter()
+                .filter(|fixture| fixture.matchday == matchday)
+                .map(|fixture| fixture.date.clone())
+                .collect();
+            dates.sort();
+            dates
+        };
+        assert_eq!(
+            [dates_of(1), dates_of(2), dates_of(3)],
+            [
+                ["2026-06-01", "2026-06-02"].map(String::from).to_vec(),
+                ["2026-06-04", "2026-06-05"].map(String::from).to_vec(),
+                ["2026-06-07", "2026-06-08"].map(String::from).to_vec(),
+            ]
         );
     }
 

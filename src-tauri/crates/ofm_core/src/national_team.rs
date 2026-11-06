@@ -19,8 +19,9 @@ use crate::game::Game;
 /// Synthetic competition id used to tag national-team friendly fixtures.
 pub const INTERNATIONAL_FRIENDLY_COMPETITION_ID: &str = "international-friendlies";
 
-/// Number of players that feature (and therefore wear) per national-team match.
-const MATCH_SQUAD_SIZE: usize = 11;
+/// Shape a national XI is picked against. National teams carry no tactics of their own,
+/// so they line up in the same default a new club does (`Team::new`).
+const NATIONAL_TEAM_FORMATION: &str = "4-4-2";
 
 /// International break dates for a season. FIFA-style: autumn windows in
 /// September, October and November, then spring windows in March and June of
@@ -67,6 +68,59 @@ pub fn international_window_span_dates(window_dates: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Every date club football must keep clear of in the season starting at `season_start`: the
+/// international windows, expanded to their whole multi-day block when national-team qualifying
+/// is (or is about to be) played on them. The one definition, shared by world creation and the
+/// season rollover.
+pub fn international_blackout_dates(
+    season_start: DateTime<Utc>,
+    qualifying_in_progress: bool,
+) -> std::collections::BTreeSet<chrono::NaiveDate> {
+    let window_dates = international_window_dates(season_start);
+    let blocks = qualifying_in_progress
+        || crate::world_cup::season_leads_into_world_cup(season_start)
+        || crate::world_cup::season_starts_world_cup_qualifying(season_start);
+    let dates = if blocks {
+        international_window_span_dates(&window_dates)
+    } else {
+        window_dates
+    };
+    dates
+        .iter()
+        .filter_map(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        .collect()
+}
+
+/// Dates club football keeps clear of from the season before `today` to the season of the last
+/// fixture any competition holds: a calendar already generated for next season, or the one after,
+/// has its windows kept clear as much as this season's. National-team qualifying widens each
+/// window to its whole block.
+pub fn international_blackout_around(
+    competitions: &[domain::league::League],
+    today: chrono::NaiveDate,
+) -> std::collections::BTreeSet<chrono::NaiveDate> {
+    let qualifying = competitions
+        .iter()
+        .any(crate::world_cup::is_world_cup_qualifying);
+    let last_fixture_year = competitions
+        .iter()
+        .flat_map(|competition| &competition.fixtures)
+        .filter_map(|fixture| fixture.date.get(..4)?.parse::<i32>().ok())
+        .max()
+        .unwrap_or(today.year())
+        .max(today.year());
+    (today.year() - 1..=last_fixture_year)
+        .filter_map(|year| chrono::NaiveDate::from_ymd_opt(year, 7, 1))
+        .filter_map(|start| start.and_hms_opt(0, 0, 0))
+        .flat_map(|start| {
+            international_blackout_dates(
+                DateTime::from_naive_utc_and_offset(start, Utc),
+                qualifying,
+            )
+        })
+        .collect()
+}
+
 /// Schedule one friendly per international window for every national team that
 /// can field a squad. Fixtures are stored on the **home** team only so each
 /// match is simulated exactly once during day processing.
@@ -84,6 +138,9 @@ pub fn schedule_national_team_friendlies(
     if eligible.len() < 2 {
         return;
     }
+    // In id order, not vector order: a save reloads national teams by name, so the order they
+    // are held in is not the order they were made in, and the shuffle below must not depend on it.
+    eligible.sort_by(|a, b| national_teams[*a].id.cmp(&national_teams[*b].id));
 
     for (window_index, date) in window_dates.iter().enumerate() {
         shuffle(&mut eligible, rng);
@@ -94,6 +151,7 @@ pub fn schedule_national_team_friendlies(
             let home_id = national_teams[*home_idx].id.clone();
             let away_id = national_teams[*away_idx].id.clone();
             let fixture = Fixture {
+                postponement: None,
                 id: format!("ntf-{window_index}-{home_id}-{away_id}"),
                 competition_id: INTERNATIONAL_FRIENDLY_COMPETITION_ID.to_string(),
                 matchday: window_index as u32 + 1,
@@ -111,11 +169,7 @@ pub fn schedule_national_team_friendlies(
 
 /// Simulate every national-team fixture due on `today`, applying full carry-back
 /// to the called-up club players. Returns the number of fixtures simulated.
-pub fn process_national_team_fixtures_due(
-    game: &mut Game,
-    today: &str,
-    rng: &mut impl Rng,
-) -> usize {
+pub fn process_national_team_fixtures_due(game: &mut Game, today: &str) -> usize {
     let due: Vec<(usize, usize)> = game
         .national_teams
         .iter()
@@ -138,8 +192,12 @@ pub fn process_national_team_fixtures_due(
             (fixture.home_team_id.clone(), fixture.away_team_id.clone())
         };
 
+        // A stream per fixture, told apart by the two nations: a stream shared by the day would
+        // hand each fixture whatever the ones before it left, and the order they come in is the
+        // order of `game.national_teams`, which a save reloads by name.
+        let mut rng = game.rng_for(&format!("national-match/{home_id}/{away_id}"), today);
         let (home_goals, away_goals, home_scorers, away_scorers) =
-            play_national_match(game, &home_id, &away_id, rng);
+            play_national_match(game, &home_id, &away_id, &mut rng);
 
         let fixture = &mut game.national_teams[team_index].fixtures[fixture_index];
         fixture.status = FixtureStatus::Completed;
@@ -173,17 +231,19 @@ pub fn play_national_match(
     away_national_team_id: &str,
     rng: &mut impl Rng,
 ) -> (u8, u8, Vec<GoalEvent>, Vec<GoalEvent>) {
-    let home_squad = squad_ids_for(game, home_national_team_id);
-    let away_squad = squad_ids_for(game, away_national_team_id);
-    let home_strength = squad_strength(&home_squad, &game.players);
-    let away_strength = squad_strength(&away_squad, &game.players);
+    let (home_squad, away_squad) =
+        squad_positions_of(game, home_national_team_id, away_national_team_id);
+    let home_xi = match_day_xi(&game.players, &home_squad);
+    let away_xi = match_day_xi(&game.players, &away_squad);
+    let home_strength = squad_strength(&game.players, &home_xi);
+    let away_strength = squad_strength(&game.players, &away_xi);
     let (home_goals, away_goals) = simulate_scoreline(home_strength, away_strength, rng);
 
-    let home_scorers = simulate_goal_scorers(&home_squad, &game.players, home_goals, rng);
-    let away_scorers = simulate_goal_scorers(&away_squad, &game.players, away_goals, rng);
+    let home_scorers = simulate_goal_scorers(&game.players, &home_squad, home_goals, rng);
+    let away_scorers = simulate_goal_scorers(&game.players, &away_squad, away_goals, rng);
 
-    apply_carry_back(game, &home_squad, home_goals, away_goals, rng);
-    apply_carry_back(game, &away_squad, away_goals, home_goals, rng);
+    apply_carry_back(&mut game.players, &home_xi, home_goals, away_goals, rng);
+    apply_carry_back(&mut game.players, &away_xi, away_goals, home_goals, rng);
     (home_goals, away_goals, home_scorers, away_scorers)
 }
 
@@ -195,35 +255,52 @@ pub(crate) fn squad_ids_for(game: &Game, national_team_id: &str) -> Vec<String> 
         .unwrap_or_default()
 }
 
-/// The best XI ids from a squad, strongest first.
-fn match_day_xi(squad_player_ids: &[String], players: &[Player]) -> Vec<String> {
-    let mut rated: Vec<(String, u8)> = squad_player_ids
+/// Where each of the two nations' squad players sits in `game.players`, in squad order. One
+/// id-to-index map serves both squads, so a match finds its players with a single pass over the
+/// world instead of one scan per player; ids with no player are skipped.
+fn squad_positions_of(
+    game: &Game,
+    home_national_team_id: &str,
+    away_national_team_id: &str,
+) -> (Vec<usize>, Vec<usize>) {
+    let position_of: HashMap<&str, usize> = game
+        .players
         .iter()
-        .filter_map(|pid| {
-            players
-                .iter()
-                .find(|p| &p.id == pid)
-                .map(|p| (p.id.clone(), p.ovr))
-        })
+        .enumerate()
+        .map(|(position, player)| (player.id.as_str(), position))
         .collect();
-    rated.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-    rated
+    let positions_in = |national_team_id: &str| -> Vec<usize> {
+        squad_ids_for(game, national_team_id)
+            .iter()
+            .filter_map(|id| position_of.get(id.as_str()).copied())
+            .collect()
+    };
+    (
+        positions_in(home_national_team_id),
+        positions_in(away_national_team_id),
+    )
+}
+
+/// The best XI of a squad, one per formation slot, as positions in `players`: a flat `ovr`
+/// ranking could field three goalkeepers and no defender. Picked the way club first-choice XIs are.
+fn match_day_xi(players: &[Player], squad_positions: &[usize]) -> Vec<usize> {
+    let squad: Vec<&Player> = squad_positions.iter().map(|&p| &players[p]).collect();
+    let position_of: HashMap<&str, usize> = squad_positions
+        .iter()
+        .map(|&p| (players[p].id.as_str(), p))
+        .collect();
+    crate::turn::squad::first_choice_eleven(&squad, NATIONAL_TEAM_FORMATION)
         .into_iter()
-        .take(MATCH_SQUAD_SIZE)
-        .map(|(id, _)| id)
+        .filter_map(|player| position_of.get(player.id.as_str()).copied())
         .collect()
 }
 
-/// Average OVR of a squad's best XI; used as match strength.
-fn squad_strength(squad_player_ids: &[String], players: &[Player]) -> f64 {
-    let xi = match_day_xi(squad_player_ids, players);
+/// Average OVR of a squad's best XI (positions in `players`); used as match strength.
+fn squad_strength(players: &[Player], xi: &[usize]) -> f64 {
     if xi.is_empty() {
         return 50.0;
     }
-    let total: u32 = xi
-        .iter()
-        .filter_map(|pid| players.iter().find(|p| &p.id == pid).map(|p| p.ovr as u32))
-        .sum();
+    let total: u32 = xi.iter().map(|&p| players[p].ovr as u32).sum();
     total as f64 / xi.len() as f64
 }
 
@@ -304,10 +381,12 @@ pub fn play_national_knockout_match(
     Option<u8>,
     Option<u8>,
 ) {
-    let home_squad = squad_ids_for(game, home_national_team_id);
-    let away_squad = squad_ids_for(game, away_national_team_id);
-    let home_strength = squad_strength(&home_squad, &game.players);
-    let away_strength = squad_strength(&away_squad, &game.players);
+    let (home_squad, away_squad) =
+        squad_positions_of(game, home_national_team_id, away_national_team_id);
+    let home_xi = match_day_xi(&game.players, &home_squad);
+    let away_xi = match_day_xi(&game.players, &away_squad);
+    let home_strength = squad_strength(&game.players, &home_xi);
+    let away_strength = squad_strength(&game.players, &away_xi);
 
     let (mut home_goals, mut away_goals) = simulate_scoreline(home_strength, away_strength, rng);
     if home_goals == away_goals {
@@ -322,11 +401,11 @@ pub fn play_national_knockout_match(
         (None, None)
     };
 
-    let home_scorers = simulate_goal_scorers(&home_squad, &game.players, home_goals, rng);
-    let away_scorers = simulate_goal_scorers(&away_squad, &game.players, away_goals, rng);
+    let home_scorers = simulate_goal_scorers(&game.players, &home_squad, home_goals, rng);
+    let away_scorers = simulate_goal_scorers(&game.players, &away_squad, away_goals, rng);
 
-    apply_carry_back(game, &home_squad, home_goals, away_goals, rng);
-    apply_carry_back(game, &away_squad, away_goals, home_goals, rng);
+    apply_carry_back(&mut game.players, &home_xi, home_goals, away_goals, rng);
+    apply_carry_back(&mut game.players, &away_xi, away_goals, home_goals, rng);
     (
         home_goals,
         away_goals,
@@ -338,31 +417,23 @@ pub fn play_national_knockout_match(
 }
 
 /// Distribute `goal_count` goals among squad players, weighted by OVR.
-/// Returns sorted `GoalEvent` entries (ascending minute).
+/// Returns sorted `GoalEvent` entries (ascending minute). `squad_positions` are positions in
+/// `players` (every squad member is a candidate, not only the XI), so each must be a valid index.
 pub fn simulate_goal_scorers(
-    squad_player_ids: &[String],
     players: &[Player],
+    squad_positions: &[usize],
     goal_count: u8,
     rng: &mut impl Rng,
 ) -> Vec<GoalEvent> {
-    if goal_count == 0 || squad_player_ids.is_empty() {
+    if goal_count == 0 || squad_positions.is_empty() {
         return Vec::new();
     }
-    let player_ovr: HashMap<&str, u8> = players.iter().map(|p| (p.id.as_str(), p.ovr)).collect();
     // Clamp OVR to at least 1 so zero-rated players still get a uniform chance
     // rather than being silently collapsed to candidates[0].
-    let candidates: Vec<(&String, u8)> = squad_player_ids
+    let candidates: Vec<(&String, u8)> = squad_positions
         .iter()
-        .filter_map(|pid| {
-            player_ovr
-                .get(pid.as_str())
-                .copied()
-                .map(|ovr| (pid, ovr.max(1)))
-        })
+        .map(|&p| (&players[p].id, players[p].ovr.max(1)))
         .collect();
-    if candidates.is_empty() {
-        return Vec::new();
-    }
     let total_weight: u32 = candidates.iter().map(|(_, ovr)| *ovr as u32).sum();
     let mut scorers = Vec::with_capacity(goal_count as usize);
     for _ in 0..goal_count {
@@ -404,8 +475,8 @@ fn sample_goals(mean: f64, rng: &mut impl Rng) -> u8 {
 /// Apply fatigue, fitness, injury risk, and a small morale nudge to a national
 /// team's match-day side. `goals_for`/`goals_against` drive the morale change.
 fn apply_carry_back(
-    game: &mut Game,
-    squad_player_ids: &[String],
+    players: &mut [Player],
+    xi: &[usize],
     goals_for: u8,
     goals_against: u8,
     rng: &mut impl Rng,
@@ -416,14 +487,12 @@ fn apply_carry_back(
         std::cmp::Ordering::Less => -1,
     };
 
-    let xi = match_day_xi(squad_player_ids, &game.players);
-    for pid in xi {
-        if let Some(player) = game.players.iter_mut().find(|p| p.id == pid) {
-            crate::player_wear::apply_match_wear(player, 90, rng);
-            crate::player_wear::roll_match_injury(player, rng);
-            if morale_delta != 0 {
-                player.morale = (player.morale as i16 + morale_delta).clamp(10, 100) as u8;
-            }
+    for &position in xi {
+        let player = &mut players[position];
+        crate::player_wear::apply_match_wear(player, 90, rng);
+        crate::player_wear::roll_match_injury(player, rng);
+        if morale_delta != 0 {
+            player.morale = crate::morale::apply_morale_change(player.morale, morale_delta);
         }
     }
 }
@@ -517,6 +586,73 @@ mod tests {
         Game::new(clock, manager, vec![], vec![], vec![], vec![])
     }
 
+    fn make_positioned_player(id: &str, position: Position, ovr: u8) -> Player {
+        let mut player = make_player(id, ovr);
+        player.position = position.clone();
+        player.natural_position = position;
+        player
+    }
+
+    #[test]
+    fn match_day_xi_fields_one_goalkeeper_even_when_keepers_rate_highest() {
+        let mut keepers = Vec::new();
+        for (id, handling) in [("gk-best", 92), ("gk-2", 88), ("gk-3", 86)] {
+            let mut keeper = make_positioned_player(id, Position::Goalkeeper, 90);
+            keeper.attributes.handling = handling;
+            keeper.attributes.reflexes = handling;
+            keepers.push(keeper);
+        }
+        let outfield = [
+            Position::Defender,
+            Position::Defender,
+            Position::Defender,
+            Position::Defender,
+            Position::Midfielder,
+            Position::Midfielder,
+            Position::Midfielder,
+            Position::Midfielder,
+            Position::Forward,
+            Position::Forward,
+            Position::Forward,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, position)| make_positioned_player(&format!("out-{index}"), position, 70));
+        let players: Vec<Player> = keepers.into_iter().chain(outfield).collect();
+        let squad: Vec<usize> = (0..players.len()).collect();
+
+        let xi = match_day_xi(&players, &squad);
+
+        let keepers_in_xi: Vec<&str> = xi
+            .iter()
+            .map(|&position| players[position].id.as_str())
+            .filter(|id| id.starts_with("gk-"))
+            .collect();
+        assert_eq!(xi.len(), 11);
+        assert_eq!(keepers_in_xi, vec!["gk-best"]);
+    }
+
+    /// Given two nations whose squads list players out of world order and name one player who is
+    /// not in the world, When their positions are resolved, Then each squad keeps its own order
+    /// and the unknown id is skipped.
+    #[test]
+    fn squad_positions_follow_squad_order_and_skip_unknown_players() {
+        let mut game = empty_game();
+        game.players = ["a", "b", "c", "d"]
+            .iter()
+            .map(|id| make_player(id, 70))
+            .collect();
+        game.national_teams = vec![
+            make_national_team("nt-home", "ENG", &["d", "ghost", "a"]),
+            make_national_team("nt-away", "FRA", &["c", "b"]),
+        ];
+
+        let (home, away) = squad_positions_of(&game, "nt-home", "nt-away");
+
+        assert_eq!(home, vec![3, 0]);
+        assert_eq!(away, vec![2, 1]);
+    }
+
     #[test]
     fn international_window_dates_are_five_in_season_order() {
         let season_start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
@@ -572,6 +708,38 @@ mod tests {
         }));
     }
 
+    /// Given the same national teams held in two different orders — a save reloads them by name,
+    ///       a new game has them in the order they were made —
+    /// When the friendlies are scheduled from the same stream,
+    /// Then the same pairings are drawn on the same dates.
+    #[test]
+    fn friendlies_do_not_depend_on_the_order_the_teams_are_held_in() {
+        let teams = |ids: &[&str]| -> Vec<NationalTeam> {
+            ids.iter()
+                .map(|id| make_national_team(id, &id.to_uppercase(), &["p1"]))
+                .collect()
+        };
+        let ids = [
+            "nt-a", "nt-b", "nt-c", "nt-d", "nt-e", "nt-f", "nt-g", "nt-h",
+        ];
+        let mut reversed = ids;
+        reversed.reverse();
+        let windows: Vec<String> = (1..=5).map(|n| format!("2026-09-{:02}", n)).collect();
+        let pairings = |mut held: Vec<NationalTeam>| {
+            let mut rng = StdRng::seed_from_u64(9);
+            schedule_national_team_friendlies(&mut held, &windows, &mut rng);
+            let mut out: Vec<String> = held
+                .iter()
+                .flat_map(|team| team.fixtures.iter())
+                .map(|f| format!("{} {}-{}", f.date, f.home_team_id, f.away_team_id))
+                .collect();
+            out.sort();
+            out
+        };
+
+        assert_eq!(pairings(teams(&ids)), pairings(teams(&reversed)));
+    }
+
     #[test]
     fn schedule_skips_teams_without_a_squad() {
         let mut teams = vec![
@@ -592,6 +760,7 @@ mod tests {
         game.players = vec![make_player("p1", 80), make_player("p2", 60)];
         let mut home = make_national_team("nt-eng", "ENG", &["p1"]);
         home.fixtures.push(Fixture {
+            postponement: None,
             id: "ntf-0".to_string(),
             competition_id: INTERNATIONAL_FRIENDLY_COMPETITION_ID.to_string(),
             matchday: 1,
@@ -605,8 +774,7 @@ mod tests {
         let away = make_national_team("nt-bra", "BRA", &["p2"]);
         game.national_teams = vec![home, away];
 
-        let mut rng = StdRng::seed_from_u64(42);
-        let simulated = process_national_team_fixtures_due(&mut game, "2026-09-09", &mut rng);
+        let simulated = process_national_team_fixtures_due(&mut game, "2026-09-09");
 
         assert_eq!(simulated, 1);
         let fixture = &game.national_teams[0].fixtures[0];
@@ -622,6 +790,7 @@ mod tests {
         game.players = vec![make_player("p1", 80), make_player("p2", 70)];
         let mut home = make_national_team("nt-eng", "ENG", &["p1"]);
         home.fixtures.push(Fixture {
+            postponement: None,
             id: "ntf-0".to_string(),
             competition_id: INTERNATIONAL_FRIENDLY_COMPETITION_ID.to_string(),
             matchday: 1,
@@ -634,8 +803,7 @@ mod tests {
         });
         game.national_teams = vec![home, make_national_team("nt-bra", "BRA", &["p2"])];
 
-        let mut rng = StdRng::seed_from_u64(3);
-        let simulated = process_national_team_fixtures_due(&mut game, "2026-09-09", &mut rng);
+        let simulated = process_national_team_fixtures_due(&mut game, "2026-09-09");
 
         assert_eq!(simulated, 0);
         assert_eq!(
@@ -659,5 +827,23 @@ mod tests {
             home_total > away_total,
             "a much stronger home side should outscore the weaker one (home {home_total} vs away {away_total})"
         );
+    }
+
+    /// Given two internationals at morale 3, below the floor of 10 that bad news stops at
+    /// When one plays in a defeat and the other in a win
+    /// Then the defeat leaves the first at 3, and the win lifts the second by its 2 to 5: neither
+    ///      is lifted to 10
+    #[test]
+    fn an_international_result_moves_a_very_unhappy_player_by_what_it_is_worth() {
+        let mut players = vec![make_player("lost", 70), make_player("won", 70)];
+        for player in &mut players {
+            player.morale = 3;
+        }
+        let mut rng = StdRng::seed_from_u64(3);
+
+        apply_carry_back(&mut players, &[0], 0, 1, &mut rng);
+        apply_carry_back(&mut players, &[1], 1, 0, &mut rng);
+
+        assert_eq!((players[0].morale, players[1].morale), (3, 5));
     }
 }

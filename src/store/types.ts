@@ -1,14 +1,24 @@
+/** Attribute keys a training focus can improve, by natural position group. */
+export interface TrainingFocusAttributesData {
+  focus: string;
+  outfield: string[];
+  goalkeeper: string[];
+}
+
+/** One training group as the backend stores it. */
+export interface TrainingGroupData {
+  id: string;
+  name: string;
+  focus: string;
+  player_ids: string[];
+}
+
 export interface TeamColors {
   primary: string;
   secondary: string;
 }
 
-export type KitPattern =
-  | "Solid"
-  | "Stripes"
-  | "Hoops"
-  | "HalfAndHalf"
-  | "Diagonal";
+export type KitPattern = "Solid" | "Stripes" | "Hoops" | "HalfAndHalf" | "Diagonal";
 
 export interface FacilitiesData {
   training: number;
@@ -45,6 +55,15 @@ export interface TeamSeasonRecord {
   lost: number;
   goals_for: number;
   goals_against: number;
+  /** The league the table was in; blank on a record saved before it was kept. */
+  competition_id: string;
+}
+
+/** A league title in the world's past, as the backend names it. */
+export interface PastChampionData {
+  season: number;
+  team_id: string;
+  record: TeamSeasonRecord;
 }
 
 export type PlayerRole =
@@ -125,6 +144,7 @@ export interface TeamData {
   name: string;
   short_name: string;
   country: string;
+  football_nation?: string;
   city: string;
   stadium_name: string;
   stadium_capacity: number;
@@ -141,6 +161,12 @@ export interface TeamData {
   training_focus: string;
   training_intensity: string;
   training_schedule: string;
+  /**
+   * Optional because a team saved before migration v002 has none. The backend has persisted this
+   * since that migration; the frontend type simply never declared it, so every read went through
+   * `as any` and TypeScript could not have noticed a rename or a shape change on either side.
+   */
+  training_groups?: TrainingGroupData[];
   founded_year: number;
   colors: TeamColors;
   kit_pattern?: KitPattern;
@@ -163,6 +189,7 @@ export interface PlayerSeasonStats {
   yellow_cards: number;
   red_cards: number;
   avg_rating: number;
+  rated_appearances?: number;
   minutes_played: number;
   shots?: number;
   shots_on_target?: number;
@@ -171,6 +198,20 @@ export interface PlayerSeasonStats {
   tackles_won?: number;
   interceptions?: number;
   fouls_committed?: number;
+}
+
+export interface HallOfFameLegendData {
+  player_id: string;
+  full_name: string;
+  nationality: string;
+  football_nation: string;
+  position: string;
+  appearances: number;
+  goals: number;
+  assists: number;
+  titles: number;
+  last_club_name: string | null;
+  final_season: number | null;
 }
 
 export interface CareerEntry {
@@ -188,7 +229,25 @@ export type PlayerMovementKind =
   | "loan_return"
   | "loan_to_buy"
   | "free_agent_signing"
-  | "released";
+  | "released"
+  | "renewal"
+  | "retired"
+  | "initial_contract";
+
+/** How a contract came to exist. Mirrors `ContractSource` in the domain crate. */
+export type ContractSource = "initial" | "legacy_migrated" | "renewal" | "free_agent" | "transfer";
+
+export type ReleaseReason = "expired" | "terminated";
+
+/** The terms of one agreement, carried by a ledger entry that makes a contract. */
+export interface ContractRecord {
+  /** `null` is an honest unknown (a save from before starts were recorded). */
+  start?: string | null;
+  end?: string | null;
+  /** Per week. */
+  weekly_wage: number;
+  source: ContractSource;
+}
 
 export interface PlayerMovementEntry {
   date: string;
@@ -199,6 +258,8 @@ export interface PlayerMovementEntry {
   to_team_name?: string | null;
   fee?: number | null;
   loan_end_date?: string | null;
+  contract?: ContractRecord | null;
+  release_reason?: ReleaseReason | null;
 }
 
 export interface ContractExitIntentData {
@@ -224,6 +285,13 @@ export interface ContractRenewalStateData {
 export interface PlayerMoraleCoreData {
   manager_trust: number;
   renewal_state?: ContractRenewalStateData | null;
+  /** A promise the manager made the player, kept or broken over the matches remaining. */
+  pending_promise?: { kind: "PlayingTime"; matches_remaining: number } | null;
+  /** The date until which the player won't take another talk. */
+  talk_cooldown_until?: string | null;
+  /** Sent by the backend; the frontend doesn't read them from the game state. */
+  unresolved_issue?: unknown;
+  recent_treatment?: unknown;
 }
 
 export type PlayerSquadRole = "Senior" | "Youth";
@@ -234,7 +302,27 @@ export interface PlayerMediaData {
   face?: string;
 }
 
+/** A step on the backend's one good-to-bad scale; each names a `tone-*` colour token. */
+export type RatedTone = "top" | "good" | "fair" | "low" | "bad";
+
+/** The band a player's condition is in, by the backend's one rule (fresh 75+, tiring 40 to 74,
+ * exhausted 25 to 39, critical below 25). */
+export type ConditionBand = "Fresh" | "Tiring" | "Exhausted" | "Critical";
+
+/** A condition as the backend says to show it: its band, the word for it and its tone. */
+export interface ConditionStatus {
+  band: ConditionBand;
+  label_key: string;
+  tone: RatedTone;
+}
+
 export interface PlayerData {
+  /** Computed by the backend squad projection; never stored in a save. */
+  match_day_eligible?: boolean;
+  /** Computed by the backend squad projection; never stored in a save. */
+  condition_status?: ConditionStatus;
+  birth_country?: string | null;
+  fitness?: number;
   id: string;
   match_name: string;
   full_name: string;
@@ -275,6 +363,11 @@ export interface PlayerData {
   team_id: string | null;
   retired: boolean;
   squad_role?: PlayerSquadRole;
+  /**
+   * When the current contract began. Absent or null means unknown, not expired:
+   * a save from before the field existed knows only when the deal ends.
+   */
+  contract_start?: string | null;
   contract_end: string | null;
   wage: number;
   market_value: number;
@@ -304,14 +397,11 @@ export interface TransferOfferData {
   last_manager_fee: number | null;
   negotiation_round: number;
   suggested_counter_fee: number | null;
-  status:
-    | "Pending"
-    | "PendingRegistration"
-    | "Accepted"
-    | "Rejected"
-    | "Withdrawn";
+  status: "Pending" | "PendingRegistration" | "Accepted" | "Rejected" | "Withdrawn";
   date: string;
   registration_date?: string | null;
+  /** Why an agreed transfer was voided at registration; absent for ordinary withdrawn talks. */
+  registration_failure_reason?: string | null;
   /**
    * When talks ended, for offers that were rejected or withdrawn. Distinct from `date`, which
    * is when the offer arrived and is rewritten whenever a club re-opens talks.
@@ -334,12 +424,7 @@ export interface LoanOfferData {
   suggested_wage_contribution_pct?: number | null;
   suggested_end_date?: string | null;
   suggested_buy_option_fee?: number | null;
-  status:
-    | "Pending"
-    | "PendingRegistration"
-    | "Accepted"
-    | "Rejected"
-    | "Withdrawn";
+  status: "Pending" | "PendingRegistration" | "Accepted" | "Rejected" | "Withdrawn";
   date: string;
   /** See {@link TransferOfferData.closed_on}. */
   closed_on?: string | null;
@@ -362,9 +447,13 @@ export interface StaffData {
   id: string;
   first_name: string;
   last_name: string;
+  /** The name to show: the known-as name, or the full name. The backend chooses; never rebuild it. */
+  display_name: string;
   date_of_birth: string;
   nationality: string;
   football_nation?: string;
+  birth_country?: string | null;
+  known_as?: string | null;
   role: "AssistantManager" | "Coach" | "Scout" | "Physio";
   attributes: {
     coaching: number;
@@ -506,6 +595,10 @@ export interface ManagerData {
   id: string;
   first_name: string;
   last_name: string;
+  /** What they are called when it differs from their name; shown via `display_name`. */
+  known_as?: string | null;
+  /** The name to show: decided in Rust (known-as, else first and last name). Render as is. */
+  display_name: string;
   date_of_birth: string;
   nationality: string;
   football_nation?: string;
@@ -515,9 +608,22 @@ export interface ManagerData {
   fan_approval: number;
   team_id: string | null;
   warning_stage?: number;
+  /** Holding the job until a permanent appointment arrives. */
+  interim?: boolean;
   career_stats: ManagerCareerStats;
   career_history: ManagerCareerEntry[];
 }
+
+/** Mirrors the backend's `FixtureCompetition` enum. */
+export type FixtureCompetition =
+  | "League"
+  | "Cup"
+  | "ContinentalClub"
+  | "InternationalClub"
+  | "InternationalNation"
+  | "Friendly"
+  | "FriendlyCup"
+  | "PreseasonTournament";
 
 export interface FixtureData {
   id: string;
@@ -526,16 +632,20 @@ export interface FixtureData {
   date: string;
   home_team_id: string;
   away_team_id: string;
-  competition:
-    | "League"
-    | "Cup"
-    | "ContinentalClub"
-    | "InternationalClub"
-    | "InternationalNation"
-    | "Friendly"
-    | "FriendlyCup"
-    | "PreseasonTournament";
+  competition: FixtureCompetition;
+  /** Whether the match is played for something: not a friendly, friendly cup or preseason
+   *  tournament. Computed by the backend (`Fixture::is_competitive`), never stored. */
+  competitive: boolean;
+  /** The side a knockout tie sends on once there is a result (goals, then the shootout); null
+   *  before one. Computed by the backend (`Fixture::advancing_team_id`), never stored; read it for
+   *  knockout fixtures only. */
+  advancing_team_id: string | null;
   status: "Scheduled" | "InProgress" | "Completed";
+  /** Set when the match was moved off a date the player had already been shown. */
+  postponement?: {
+    original_date: string;
+    reason: "InternationalWindow" | "CupTie" | "ContinentalTie" | "LeagueClash";
+  } | null;
   result: null | {
     home_goals: number;
     away_goals: number;
@@ -601,7 +711,27 @@ export interface TransferRumourData {
   team_name: string;
 }
 
+/** The authored season specification shared by package definitions and runtime calendars. */
+export interface CompetitionCalendarData {
+  division?: { familyId: string; tier: number; phase: "annual" | "opening" | "closing" } | null;
+  windowEnd?: { month: number; day: number } | null;
+}
+
 export interface LeagueData {
+  season_start_month?: number;
+  season_start_day?: number;
+  /** Where finishing places lead (a continental cup, promotion); read by the backend only. */
+  berths?: unknown[];
+  calendar?: {
+    definition_id: string;
+    edition_basis:
+      | { kind: "calendarYear" }
+      | { kind: "legacyOrdinal"; season_at_opener: number; opener_year: number }
+      | { kind: "unresolved" };
+    league_legs: number | null;
+    matchday_gap_days: number | null;
+    season: CompetitionCalendarData;
+  } | null;
   id: string;
   name: string;
   kind?: string;
@@ -614,6 +744,13 @@ export interface LeagueData {
   rules?: {
     format: "LeagueTable" | "Knockout" | "GroupAndKnockout";
     counts_in_season_flow: boolean;
+    group_size?: number;
+    group_best_third_qualifiers?: number;
+    group_qualifiers_per_group?: number;
+    group_stage_legs?: number;
+    group_matchday_gap_days?: number;
+    knockout_matches_per_day?: number;
+    knockout_round_gap_days?: number;
   };
   fixtures: FixtureData[];
   standings: StandingData[];
@@ -678,6 +815,9 @@ export interface SeasonContextData {
   season_end: string | null;
   days_until_season_start: number | null;
   transfer_window: TransferWindowContextData;
+  /** Whether the rollover to next season is available now. Decided by the
+   *  backend, which is also what `advance_to_next_season` enforces. */
+  season_complete: boolean;
 }
 
 export interface NewsMatchScore {
@@ -746,6 +886,17 @@ export interface ScoutingAssignment {
   days_remaining: number;
 }
 
+export interface ScoutedPlayer {
+  player_id: string;
+  scouted_on: string;
+  attributes: PlayerData["attributes"];
+}
+
+/** The backend's verdict on a report: out of date once the season it was scouted in is over. */
+export interface ScoutedPlayerView extends ScoutedPlayer {
+  out_of_date: boolean;
+}
+
 export interface YouthScoutingAssignment {
   id: string;
   scout_id: string;
@@ -756,6 +907,26 @@ export interface YouthScoutingAssignment {
 }
 
 export interface GameStateData {
+  /** Names the career this game was installed as; commands that write on the screen's behalf hand it back. */
+  career_token?: number;
+  manager_id?: string;
+  /** The seed the day's dice come from. A u64 in Rust: past 2^53 a JS number rounds it, so never compute with it. */
+  seed?: number;
+  days_since_last_job_offer?: number | null;
+  /** Days each club has been without a manager, by club id. */
+  vacant_team_days?: Record<string, number>;
+  /** Keys of one-off events already announced, so none is announced twice. */
+  emitted_events?: string[];
+  legacy_tactics_imported?: boolean;
+  legacy_world_cup_draw?: boolean;
+  /** The first date a completed home fixture is paid a gate for (`YYYY-MM-DD`); null until then. */
+  gate_settled_from?: string | null;
+  /** The day the last season ended (`YYYY-MM-DD`): a scout's report from before it is out of date.
+   *  Null until the career's first season end. */
+  last_season_rollover_on?: string | null;
+  /** Sent by the backend; the frontend reads these through their own commands. */
+  custom_tactics?: unknown[];
+  scouted_players?: unknown[];
   clock: {
     current_date: string;
     start_date: string;
@@ -771,18 +942,19 @@ export interface GameStateData {
   national_teams?: NationalTeamData[];
   world_history?: {
     world_cup_champions?: WorldCupChampionData[];
+    national_team_ranking?: { nation_code: string; points: number }[];
+    world_cup_hosts?: { year: number; nation_code: string; nation_name: string }[];
+    /** Sent by the backend; the frontend reads awards through get_season_awards instead. */
+    rivalries?: unknown[];
+    season_awards?: unknown[];
   };
-  // Authored competition definitions (resolved at game creation; present on
-  // imported worlds that ship their own competitions).
-  competitionDefinitions?: unknown;
   active_region_ids?: string[];
   active_competition_ids?: string[];
-  regions?: WorldRegionData[];
   league: LeagueData | null;
   scouting_assignments: ScoutingAssignment[];
   youth_scouting_assignments?: YouthScoutingAssignment[];
   board_objectives: BoardObjective[];
-  season_context?: SeasonContextData;
+  season_context: SeasonContextData;
   available_staff_market_last_activity_date?: string | null;
   extra_translations?: Record<string, Record<string, unknown>>;
   package_lockfile?: Array<{ id: string; version: string; hash: string }>;

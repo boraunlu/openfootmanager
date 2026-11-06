@@ -18,7 +18,11 @@ vi.mock("react-i18next", () => ({
 }));
 
 vi.mock("../ui", () => ({
-  Button: ({ children, iconRight: _iconRight, ...props }: ComponentPropsWithoutRef<"button"> & { iconRight?: unknown }) => (
+  Button: ({
+    children,
+    iconRight: _iconRight,
+    ...props
+  }: ComponentPropsWithoutRef<"button"> & { iconRight?: unknown }) => (
     <button {...props}>{children}</button>
   ),
 }));
@@ -104,5 +108,20 @@ describe("PackageBuildStep package card", () => {
     expect(card).not.toHaveTextContent("worldSelect.namePools");
     expect(card).not.toHaveTextContent("worldSelect.countries");
     expect(card).not.toHaveTextContent("worldSelect.confederations");
+  });
+});
+
+describe("PackageBuildStep close control", () => {
+  /**
+   * Given the career wizard's package step, whose close control is an icon alone
+   * When it is looked up by what a screen reader announces
+   * Then it is named (the translated "Close") and shows a focus ring.
+   */
+  it("names its close control and gives it a focus ring", () => {
+    render(<PackageBuildStep {...baseProps} installedPackages={[namePack]} />);
+
+    expect(screen.getByRole("button", { name: "common.close" })).toHaveClass(
+      "focus-visible:ring-focus",
+    );
   });
 });

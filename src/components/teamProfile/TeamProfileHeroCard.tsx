@@ -1,5 +1,6 @@
 import { Calendar, Users } from "lucide-react";
 
+import { visibleRatingText } from "../../lib/playerKnowledge";
 import { Card, TeamLocation, TeamLogo } from "../ui";
 import type { TeamProfileTranslate } from "./TeamProfile.types";
 import { QuickStat } from "./TeamProfile.primitives";
@@ -9,6 +10,8 @@ import type { TeamData } from "../../store/gameStore";
 interface TeamProfileHeroCardProps {
   team: TeamData;
   viewModel: TeamProfileViewModel;
+  /** The squad's average rating as the backend gives it; null when the club may not see it. */
+  averageRating: number | null;
   locale: string;
   t: TeamProfileTranslate;
 }
@@ -16,6 +19,7 @@ interface TeamProfileHeroCardProps {
 export default function TeamProfileHeroCard({
   team,
   viewModel,
+  averageRating,
   locale,
   t,
 }: TeamProfileHeroCardProps) {
@@ -51,13 +55,14 @@ export default function TeamProfileHeroCard({
             </div>
             {viewModel.manager && (
               <p className="text-white/70 text-sm mt-1 flex items-center gap-1.5">
-                <Users className="w-4 h-4" /> {t("teamProfile.managerLabel")} {viewModel.manager.first_name} {viewModel.manager.last_name}
+                <Users className="w-4 h-4" /> {t("teamProfile.managerLabel")}{" "}
+                {viewModel.manager.display_name}
               </p>
             )}
           </div>
 
           <div className="hidden md:grid grid-cols-2 gap-3">
-            <QuickHeroStat label={t("teams.avgOvr")} value={String(viewModel.avgOvr)} />
+            <QuickHeroStat label={t("teams.avgOvr")} value={visibleRatingText(averageRating)} />
             <QuickHeroStat
               label={t("manager.reputation")}
               value={String(team.reputation)}
@@ -67,10 +72,7 @@ export default function TeamProfileHeroCard({
               label={t("teamProfile.leaguePos")}
               value={viewModel.leaguePos > 0 ? `#${viewModel.leaguePos}` : "—"}
             />
-            <QuickHeroStat
-              label={t("teams.squad")}
-              value={String(viewModel.roster.length)}
-            />
+            <QuickHeroStat label={t("teams.squad")} value={String(viewModel.roster.length)} />
           </div>
         </div>
       </div>
@@ -78,14 +80,10 @@ export default function TeamProfileHeroCard({
       <div className="grid grid-cols-4 gap-px bg-gray-200 dark:bg-navy-600 md:hidden">
         <QuickStat
           label={t("teams.avgOvr")}
-          value={String(viewModel.avgOvr)}
+          value={visibleRatingText(averageRating)}
           color="text-primary-500"
         />
-        <QuickStat
-          label={t("teams.rep")}
-          value={String(team.reputation)}
-          color="text-accent-500"
-        />
+        <QuickStat label={t("teams.rep")} value={String(team.reputation)} color="text-accent-500" />
         <QuickStat
           label={t("common.position")}
           value={viewModel.leaguePos > 0 ? `#${viewModel.leaguePos}` : "—"}
@@ -112,12 +110,8 @@ function QuickHeroStat({
 }) {
   return (
     <div className="bg-black/20 backdrop-blur rounded-xl px-5 py-3 text-center min-w-[100px]">
-      <p className="text-xs text-white/60 font-heading uppercase tracking-wider">
-        {label}
-      </p>
-      <p className={`font-heading font-bold text-2xl mt-0.5 ${valueClassName}`}>
-        {value}
-      </p>
+      <p className="text-xs text-white/60 font-heading uppercase tracking-wider">{label}</p>
+      <p className={`font-heading font-bold text-2xl mt-0.5 ${valueClassName}`}>{value}</p>
     </div>
   );
 }

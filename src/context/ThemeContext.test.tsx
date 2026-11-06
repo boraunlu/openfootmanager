@@ -9,7 +9,9 @@ function ThemeConsumer() {
     <div>
       <span data-testid="theme">{theme}</span>
       <span data-testid="isDark">{String(isDark)}</span>
-      <button onClick={toggleTheme}>Toggle</button>
+      <button type="button" onClick={toggleTheme}>
+        Toggle
+      </button>
     </div>
   );
 }
@@ -39,7 +41,7 @@ describe("ThemeProvider", () => {
     render(
       <ThemeProvider>
         <ThemeConsumer />
-      </ThemeProvider>
+      </ThemeProvider>,
     );
     expect(screen.getByTestId("theme").textContent).toBe("dark");
     expect(screen.getByTestId("isDark").textContent).toBe("true");
@@ -49,7 +51,7 @@ describe("ThemeProvider", () => {
     render(
       <ThemeProvider>
         <ThemeConsumer />
-      </ThemeProvider>
+      </ThemeProvider>,
     );
     expect(document.documentElement.classList.contains("dark")).toBe(true);
   });
@@ -58,7 +60,7 @@ describe("ThemeProvider", () => {
     render(
       <ThemeProvider>
         <ThemeConsumer />
-      </ThemeProvider>
+      </ThemeProvider>,
     );
     fireEvent.click(screen.getByText("Toggle"));
     expect(screen.getByTestId("theme").textContent).toBe("light");
@@ -70,7 +72,7 @@ describe("ThemeProvider", () => {
     render(
       <ThemeProvider>
         <ThemeConsumer />
-      </ThemeProvider>
+      </ThemeProvider>,
     );
     fireEvent.click(screen.getByText("Toggle")); // dark -> light
     fireEvent.click(screen.getByText("Toggle")); // light -> dark
@@ -82,7 +84,7 @@ describe("ThemeProvider", () => {
     render(
       <ThemeProvider>
         <ThemeConsumer />
-      </ThemeProvider>
+      </ThemeProvider>,
     );
     expect(localStorage.getItem("ofm-theme")).toBe("dark");
     fireEvent.click(screen.getByText("Toggle"));
@@ -94,9 +96,30 @@ describe("ThemeProvider", () => {
     render(
       <ThemeProvider>
         <ThemeConsumer />
-      </ThemeProvider>
+      </ThemeProvider>,
     );
     expect(screen.getByTestId("theme").textContent).toBe("light");
+  });
+
+  /**
+   * Given a provider with its own storage key (the dev style guide's) and an app theme stored,
+   * when it reads, toggles and writes,
+   * then it uses only its own key and the app's stored theme is untouched.
+   */
+  it("keeps to its own storage key when given one", () => {
+    localStorage.setItem("ofm-theme", "dark");
+    localStorage.setItem("ofm-style-guide-theme", "light");
+    render(
+      <ThemeProvider storageKey="ofm-style-guide-theme">
+        <ThemeConsumer />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId("theme").textContent).toBe("light");
+    fireEvent.click(screen.getByText("Toggle"));
+    expect(localStorage.getItem("ofm-style-guide-theme")).toBe("dark");
+    fireEvent.click(screen.getByText("Toggle"));
+    expect(localStorage.getItem("ofm-style-guide-theme")).toBe("light");
+    expect(localStorage.getItem("ofm-theme")).toBe("dark");
   });
 });
 

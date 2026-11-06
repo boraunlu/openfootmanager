@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { GameStateData, SeasonAwardsData } from "../store/gameStore";
 import EndOfSeasonScreen from "./EndOfSeasonScreen";
+import { createSeasonContext } from "../test-utils/factories";
 
 const setShowFiredModal = vi.fn();
 
@@ -49,7 +50,12 @@ vi.mock("../store/gameStore", async () => {
   const actual = await vi.importActual<typeof import("../store/gameStore")>("../store/gameStore");
   return {
     ...actual,
-    useGameStore: (selector: (state: { setShowFiredModal: typeof setShowFiredModal }) => unknown) => selector({ setShowFiredModal }),
+    useGameStore: Object.assign(
+      (selector: (state: { setShowFiredModal: typeof setShowFiredModal }) => unknown) =>
+        selector({ setShowFiredModal }),
+      // The service layer reads the career token from the store's current game.
+      { getState: () => ({ gameState: null }) },
+    ),
   };
 });
 
@@ -92,11 +98,13 @@ function createAwards(): SeasonAwardsData {
 
 function createGameState(): GameStateData {
   return {
+    season_context: createSeasonContext(),
     clock: {
       current_date: "2026-05-20T00:00:00Z",
       start_date: "2025-07-01T00:00:00Z",
     },
     manager: {
+      display_name: "Jane Doe",
       id: "manager-1",
       first_name: "Jane",
       last_name: "Doe",
@@ -237,9 +245,7 @@ describe("EndOfSeasonScreen", () => {
 
     const onGameUpdate = vi.fn();
 
-    render(
-      <EndOfSeasonScreen gameState={createGameState()} onGameUpdate={onGameUpdate} />,
-    );
+    render(<EndOfSeasonScreen gameState={createGameState()} onGameUpdate={onGameUpdate} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Start next season" }));
 

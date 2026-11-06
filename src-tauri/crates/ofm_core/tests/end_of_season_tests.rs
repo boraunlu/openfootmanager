@@ -1,15 +1,18 @@
+#[path = "end_of_season_tests/season_story.rs"]
+mod season_story;
+
 use chrono::{TimeZone, Utc};
 use domain::league::{
-    Berth, BerthRule, CompetitionScope, CompetitionType, Fixture, FixtureCompetition,
-    FixtureStatus, KnockoutRoundState, League, MatchResult, StandingEntry,
+    Berth, BerthRule, CompetitionFormat, CompetitionScope, CompetitionType, Fixture,
+    FixtureCompetition, FixtureStatus, KnockoutRoundState, League, MatchResult, StandingEntry,
 };
 use domain::manager::Manager;
 use domain::player::{Player, PlayerAttributes, PlayerSeasonStats, Position};
 use domain::team::{FinancialTransactionKind, Team};
 use ofm_core::clock::GameClock;
 use ofm_core::end_of_season::{
-    berth_qualified_entrants, continental_qualified_entrants, expected_fixture_count,
-    is_season_complete, process_end_of_season, resolve_continental_fields,
+    advance_to_next_season, berth_qualified_entrants, continental_qualified_entrants,
+    expected_fixture_count, is_season_complete, process_end_of_season, resolve_continental_fields,
 };
 use ofm_core::game::{BoardObjective, Game, ObjectiveType};
 
@@ -132,6 +135,7 @@ fn make_completed_season_game() -> Game {
         assists: 10,
         clean_sheets: 0,
         avg_rating: 7.5,
+        rated_appearances: 30,
         minutes_played: 2700,
         yellow_cards: 3,
         red_cards: 0,
@@ -145,6 +149,7 @@ fn make_completed_season_game() -> Game {
         assists: 8,
         clean_sheets: 0,
         avg_rating: 7.0,
+        rated_appearances: 28,
         minutes_played: 2500,
         yellow_cards: 1,
         red_cards: 0,
@@ -403,6 +408,240 @@ fn default_berths_reproduce_the_inferred_continental_field() {
         continental_qualified_entrants(&game, europe),
         "default berths must reproduce the inferred field"
     );
+}
+
+/// A cup that has already been renewed for its next edition: unplayed, one season on, with the
+/// edition it just finished frozen in the archive under `winner`.
+fn renewed_cup_with_archived_winner(game: &mut Game, cup: &mut League, winner: &str) {
+    game.edition_archive
+        .push(domain::edition_archive::CompletedEdition {
+            competition_id: cup.id.clone(),
+            season: cup.season,
+            completed_on: "2026-05-10".to_string(),
+            champion_id: winner.to_string(),
+            participant_ids: vec![],
+            standings: vec![],
+            groups: vec![],
+            knockout_rounds: vec![],
+            fixtures: vec![],
+        });
+    cup.season += 1;
+    for fixture in &mut cup.fixtures {
+        fixture.status = FixtureStatus::Scheduled;
+        fixture.result = None;
+    }
+    for round in &mut cup.knockout_rounds {
+        round.completed = false;
+    }
+}
+
+fn europe_game_with_a_renewed_cup(berth: bool) -> Game {
+    let teams = ["es-a", "es-b", "es-c", "es-d", "es-e", "es-f"]
+        .iter()
+        .enumerate()
+        .map(|(rank, id)| make_club(id, "ES", 900 - rank as u32 * 50))
+        .collect();
+    let clock = GameClock::new(Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap());
+    let mut manager = Manager::new(
+        "mgr".to_string(),
+        "Test".to_string(),
+        "Manager".to_string(),
+        "1980-01-01".to_string(),
+        "England".to_string(),
+    );
+    manager.hire("es-a".to_string());
+    let mut game = Game::new(clock, manager, teams, vec![], vec![], vec![]);
+    let mut cup = domestic_cup("es-cup", "ES", "europe", "es-f", "es-e");
+    if berth {
+        cup.berths = vec![Berth {
+            target: "europe-cup".to_string(),
+            rule: BerthRule::CupWinner,
+            fallback_to: None,
+        }];
+    }
+    renewed_cup_with_archived_winner(&mut game, &mut cup, "es-f");
+    game.competitions = vec![
+        first_division(
+            "es-1",
+            "ES",
+            "europe",
+            &["es-a", "es-b", "es-c", "es-d", "es-e", "es-f"],
+        ),
+        cup,
+        continental_cup("europe-cup", "europe", 5),
+    ];
+    game
+}
+
+/// Given a domestic cup that was archived and renewed before the rollover, so its live bracket is
+/// the next edition and unplayed,
+/// When the continental field is worked out,
+/// Then the winner of the edition that finished still qualifies: the archive holds it.
+#[test]
+fn a_cup_renewed_before_the_rollover_still_sends_its_winner_to_continental_qualification() {
+    let game = europe_game_with_a_renewed_cup(false);
+    let europe = game
+        .competitions
+        .iter()
+        .find(|c| c.id == "europe-cup")
+        .unwrap();
+
+    let field = continental_qualified_entrants(&game, europe);
+
+    assert!(
+        field.contains(&"es-f".to_string()),
+        "the cup winner is missing: {field:?}"
+    );
+}
+
+/// As above, for a data-defined `CupWinner` berth.
+#[test]
+fn a_renewed_cups_cup_winner_berth_reads_the_archived_champion() {
+    let game = europe_game_with_a_renewed_cup(true);
+    let europe = game
+        .competitions
+        .iter()
+        .find(|c| c.id == "europe-cup")
+        .unwrap();
+
+    let field = berth_qualified_entrants(&game, europe);
+
+    assert!(
+        field.contains(&"es-f".to_string()),
+        "the cup winner is missing: {field:?}"
+    );
+}
+
+/// Given a cup the rollover keeps because its final was postponed past the league's last round, so
+/// its edition is the one being settled, unfinished, and last season's champion is in the archive,
+/// When the continental field is worked out,
+/// Then last season's champion is not credited again: the cup contributes nobody this season.
+#[test]
+fn a_kept_cup_with_an_undecided_final_does_not_credit_last_seasons_champion_again() {
+    for berth in [false, true] {
+        let mut game = europe_game_with_a_renewed_cup(berth);
+        // The edition being settled: same season as the league, its final still to be played.
+        let league_season = game.competitions[0].season;
+        game.competitions[1].season = league_season;
+        game.edition_archive[0].season = league_season - 1;
+        let europe = game
+            .competitions
+            .iter()
+            .find(|c| c.id == "europe-cup")
+            .unwrap();
+
+        let field = if berth {
+            berth_qualified_entrants(&game, europe)
+        } else {
+            continental_qualified_entrants(&game, europe)
+        };
+
+        // es-f is the weakest club in the league, so only the cup could have qualified it.
+        assert!(
+            !field.contains(&"es-f".to_string()),
+            "last season's champion qualified again (berth: {berth}): {field:?}"
+        );
+    }
+}
+
+/// A game like `europe_game_with_a_renewed_cup`, with the league and the cup's seasons moved to
+/// `league_season`, a foreign first division in front of the league by rank, and its own season.
+fn europe_game_in_season(league_season: u32, berth: bool) -> Game {
+    let mut game = europe_game_with_a_renewed_cup(berth);
+    game.competitions[0].season = league_season;
+    // The league ranks below the cup by priority, so a lookup that lets the cup (or any
+    // competition of another kind) stand in for the league finds the wrong season.
+    game.competitions[0].priority = 1;
+    game.competitions[1].season = league_season + 1;
+    game.edition_archive[0].season = league_season;
+    let mut foreign = first_division("br-1", "BR", "south-america", &["br-a", "br-b"]);
+    foreign.season = league_season + 5;
+    foreign.priority = 0; // outranks the Spanish league by priority
+    game.competitions.push(foreign);
+    game
+}
+
+/// Given a cup renewed past its league's season, in a world whose other country's first division
+/// is on a much later season,
+/// When the continental field is worked out,
+/// Then the cup is compared with its own country's league, not another's: its winner qualifies.
+#[test]
+fn a_renewed_cup_is_compared_with_its_own_countrys_league() {
+    for berth in [false, true] {
+        let game = europe_game_in_season(7, berth);
+        let europe = game
+            .competitions
+            .iter()
+            .find(|c| c.id == "europe-cup")
+            .unwrap();
+
+        let field = if berth {
+            berth_qualified_entrants(&game, europe)
+        } else {
+            continental_qualified_entrants(&game, europe)
+        };
+
+        assert!(
+            field.contains(&"es-f".to_string()),
+            "berth {berth}: {field:?}"
+        );
+    }
+}
+
+/// Given a cup kept at the rollover in a late season (not season 1), When the field is worked
+/// out, Then last season's champion is still not credited.
+#[test]
+fn a_kept_cup_in_a_late_season_does_not_credit_the_archive() {
+    for berth in [false, true] {
+        let mut game = europe_game_in_season(7, berth);
+        game.competitions[1].season = 7; // not renewed: the edition being settled
+        game.edition_archive[0].season = 6;
+        let europe = game
+            .competitions
+            .iter()
+            .find(|c| c.id == "europe-cup")
+            .unwrap();
+
+        let field = if berth {
+            berth_qualified_entrants(&game, europe)
+        } else {
+            continental_qualified_entrants(&game, europe)
+        };
+
+        assert!(
+            !field.contains(&"es-f".to_string()),
+            "berth {berth}: {field:?}"
+        );
+    }
+}
+
+/// Given an unplayed cup that was never archived (a first edition), When the field is worked out,
+/// Then it has no winner to send: nothing is invented.
+#[test]
+fn a_cup_with_no_archived_edition_and_no_winner_sends_nobody() {
+    let mut game = europe_game_with_a_renewed_cup(false);
+    game.edition_archive.clear();
+    let europe = game
+        .competitions
+        .iter()
+        .find(|c| c.id == "europe-cup")
+        .unwrap();
+
+    let field = continental_qualified_entrants(&game, europe);
+
+    // es-f finished last in a six-club league and is the weakest club, so only the cup could
+    // have qualified it.
+    assert!(!field.contains(&"es-f".to_string()), "{field:?}");
+    // The data-defined path agrees: with no live winner and no archived edition, a CupWinner
+    // berth awards nobody either.
+    let mut with_berth = europe_game_with_a_renewed_cup(true);
+    with_berth.edition_archive.clear();
+    let europe = with_berth
+        .competitions
+        .iter()
+        .find(|c| c.id == "europe-cup")
+        .unwrap();
+    assert!(!berth_qualified_entrants(&with_berth, europe).contains(&"es-f".to_string()));
 }
 
 /// Multi-tier qualification: a club lands in only its most prestigious target,
@@ -664,6 +903,7 @@ fn process_end_of_season_reschedules_national_team_windows() {
     let mut nt_a = NationalTeam::new("nt-a".into(), "A".into(), "AAA".into(), None);
     nt_a.squad_player_ids = vec!["p1".into()];
     nt_a.fixtures.push(Fixture {
+        postponement: None,
         id: "old-friendly".into(),
         competition_id: "international-friendlies".into(),
         matchday: 1,
@@ -767,6 +1007,9 @@ fn process_end_of_season_records_history_and_prizes_for_every_division() {
         .expect("second-division history recorded");
     assert_eq!(team3_record.league_position, 1);
     assert_eq!(team3_record.season, 1);
+    // Each record names the division it was won in, so a second-division win is not a title.
+    assert_eq!(team3_record.competition_id, "eng-2");
+    assert_eq!(team1.history.last().unwrap().competition_id, "eng-1");
 
     // The second-division champion earns half the top-flight champion's prize.
     assert!(prize_money_total(team1) > 0);
@@ -826,10 +1069,14 @@ fn relegated_user_receives_a_relegation_message() {
 
     process_end_of_season(&mut game);
 
+    // Named by the edition the user's new division was renewed to, not by last season plus one.
+    let renewed_season = ofm_core::end_of_season::user_division(&game, "team2")
+        .expect("the user still has a division")
+        .season;
     let msg = game
         .messages
         .iter()
-        .find(|m| m.id == "relegation_2")
+        .find(|m| m.id == format!("relegation_{renewed_season}"))
         .expect("relegated user must be told");
     assert_eq!(
         msg.subject_key.as_deref(),
@@ -841,7 +1088,7 @@ fn relegated_user_receives_a_relegation_message() {
         Some(&"ENG Second Division".to_string())
     );
     assert!(
-        !game.messages.iter().any(|m| m.id == "promotion_2"),
+        !game.messages.iter().any(|m| m.id.starts_with("promotion_")),
         "a relegated user must not also be congratulated"
     );
 }
@@ -852,16 +1099,105 @@ fn promoted_user_receives_a_promotion_message() {
 
     process_end_of_season(&mut game);
 
+    let renewed_season = ofm_core::end_of_season::user_division(&game, "team3")
+        .expect("the user still has a division")
+        .season;
     let msg = game
         .messages
         .iter()
-        .find(|m| m.id == "promotion_2")
+        .find(|m| m.id == format!("promotion_{renewed_season}"))
         .expect("promoted user must be told");
     assert_eq!(msg.subject_key.as_deref(), Some("be.msg.promotion.subject"));
     assert_eq!(
         msg.i18n_params.get("division"),
         Some(&"ENG First Division".to_string())
     );
+}
+
+/// The season preview article the rollover published, and the clubs it names.
+fn season_preview(game: &Game) -> (String, Vec<String>, String, String) {
+    let preview = game
+        .news
+        .iter()
+        .find(|article| article.category == domain::news::NewsCategory::SeasonPreview)
+        .expect("the rollover publishes a season preview");
+    let param = |name: &str| preview.i18n_params.get(name).cloned().unwrap_or_default();
+    let mut listed: Vec<String> = param("teamList").split(", ").map(str::to_string).collect();
+    listed.sort();
+    (
+        param("teamCount"),
+        listed,
+        param("favourite"),
+        param("darkHorse"),
+    )
+}
+
+/// Given a two-division world where the user's club stays in the first division and the second
+/// division's winner comes up; when the season rolls over; then the preview covers the user's
+/// division as it will be next season, not every club in the world (#1179).
+#[test]
+fn the_season_preview_covers_the_users_division_only() {
+    let mut game = make_two_division_game("team1");
+
+    process_end_of_season(&mut game);
+
+    let (count, listed, favourite, dark_horse) = season_preview(&game);
+    assert_eq!(count, "2");
+    assert_eq!(listed, ["Test FC", "Third FC"]);
+    assert!(
+        listed.contains(&favourite),
+        "favourite {favourite} is not in the division"
+    );
+    assert!(
+        listed.contains(&dark_horse),
+        "dark horse {dark_horse} is not in the division"
+    );
+}
+
+/// Given the user's club relegated to the second division; when the season rolls over; then the
+/// preview covers the division the club now plays in.
+#[test]
+fn a_relegated_users_season_preview_covers_the_division_they_drop_into() {
+    let mut game = make_two_division_game("team2");
+
+    process_end_of_season(&mut game);
+
+    let (count, listed, _, _) = season_preview(&game);
+    assert_eq!(count, "2");
+    assert_eq!(listed, ["Fourth FC", "Rival FC"]);
+}
+
+/// Given a world whose user's club plays in no league table, and no legacy league to fall back
+/// on; when the season rolls over; then no preview is published: the rollover has no division to
+/// summarise and stops before it, so there is never one of "0 teams".
+#[test]
+fn a_user_with_no_division_gets_no_season_preview() {
+    let mut game = make_two_division_game("team1");
+    game.teams.push(make_team("team9", "Tableless FC"));
+    game.manager.team_id = Some("team9".to_string());
+    game.league = None;
+
+    process_end_of_season(&mut game);
+
+    assert!(
+        game.news
+            .iter()
+            .all(|article| article.category != domain::news::NewsCategory::SeasonPreview)
+    );
+}
+
+/// Given an unemployed manager; when the season rolls over; then the preview covers the league
+/// the legacy `game.league` mirror holds, the division the game falls back to.
+#[test]
+fn an_unemployed_managers_season_preview_covers_the_mirrored_league() {
+    let mut game = make_two_division_game("team1");
+    game.manager.team_id = None;
+
+    process_end_of_season(&mut game);
+
+    let (count, listed, _, _) = season_preview(&game);
+    assert_eq!(count, "2");
+    assert_eq!(listed, ["Test FC", "Third FC"]);
 }
 
 #[test]
@@ -873,6 +1209,7 @@ fn season_awards_are_scoped_to_the_users_division() {
         appearances: 20,
         goals: 30,
         avg_rating: 8.0,
+        rated_appearances: 20,
         minutes_played: 1800,
         ..PlayerSeasonStats::default()
     };
@@ -971,6 +1308,22 @@ fn rollover_stages_a_world_cup_in_cup_years_and_retires_it_afterwards() {
 
     // The next rollover (summer 2027 — not a cup year) retires the tournament
     // instead of regenerating it, and stages no new one.
+    // Finish the intervening club season: an unfinished division is retained,
+    // and its old opener must not receive a second, now-past preseason.
+    for competition in game
+        .competitions
+        .iter_mut()
+        .filter(|c| c.kind == CompetitionType::League && c.scope == CompetitionScope::Domestic)
+    {
+        for fixture in &mut competition.fixtures {
+            fixture.status = FixtureStatus::Completed;
+            fixture.result = Some(MatchResult {
+                home_goals: 1,
+                away_goals: 0,
+                ..Default::default()
+            });
+        }
+    }
     game.clock = GameClock::new(Utc.with_ymd_and_hms(2027, 5, 20, 12, 0, 0).unwrap());
     process_end_of_season(&mut game);
     assert!(
@@ -1015,12 +1368,11 @@ fn a_two_season_qualifying_campaign_survives_the_rollover_and_feeds_the_cup() {
 
     // Play the first season's share of the campaign only up to the club
     // season's end in May: the rollover outruns the June 2025 window.
-    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(3);
     for date in first_season_days
         .iter()
         .filter(|date| date.as_str() < "2025-06-01")
     {
-        ofm_core::world_cup::process_world_cup_fixtures_due(&mut game, date, &mut rng);
+        ofm_core::world_cup::process_world_cup_fixtures_due(&mut game, date);
     }
     let played_midway = game
         .competitions
@@ -1078,7 +1430,7 @@ fn a_two_season_qualifying_campaign_survives_the_rollover_and_feeds_the_cup() {
         .iter()
         .filter(|date| date.as_str() < "2026-06-01")
     {
-        ofm_core::world_cup::process_world_cup_fixtures_due(&mut game, date, &mut rng);
+        ofm_core::world_cup::process_world_cup_fixtures_due(&mut game, date);
     }
     assert!(
         game.competitions
@@ -1112,6 +1464,43 @@ fn a_two_season_qualifying_campaign_survives_the_rollover_and_feeds_the_cup() {
     );
 }
 
+/// A manager with no club of their own — between jobs, or managing only a
+/// national side — has no division to gate on, so every league table must
+/// finish before the season can roll over. This is the path the test below
+/// used to take by accident, because its primary league listed no participants.
+#[test]
+fn season_waits_for_every_league_when_the_user_has_no_division() {
+    let mut game = make_completed_season_game();
+    game.teams.push(make_team("team3", "Third FC"));
+    game.teams.push(make_team("team4", "Fourth FC"));
+
+    let finished = game.league.clone().expect("a primary league");
+    let mut other = League {
+        id: "far-1".to_string(),
+        name: "Far Away League".to_string(),
+        country_id: Some("BR".to_string()),
+        priority: 0,
+        season: 1,
+        participant_ids: vec!["team3".to_string(), "team4".to_string()],
+        fixtures: vec![make_completed_fixture("ff1", "team3", "team4", 3, 0)],
+        standings: vec![
+            make_standing("team3", 1, 0, 0, 3, 0),
+            make_standing("team4", 0, 0, 1, 0, 3),
+        ],
+        ..Default::default()
+    };
+    other.fixtures[0].status = FixtureStatus::Scheduled;
+    other.fixtures[0].result = None;
+    // No club: the manager is unemployed.
+    game.manager.team_id = None;
+    game.competitions = vec![finished, other];
+
+    assert!(
+        !is_season_complete(&game),
+        "with no division of their own, every league must finish first"
+    );
+}
+
 #[test]
 fn season_not_complete_while_another_division_is_unfinished() {
     let mut game = make_completed_season_game();
@@ -1119,7 +1508,13 @@ fn season_not_complete_while_another_division_is_unfinished() {
     game.teams.push(make_team("team4", "Fourth FC"));
 
     // div1 (the primary) is fully played; div2 still has a scheduled fixture.
-    let div1 = game.league.clone().unwrap();
+    //
+    // div1 must name its participants and its country, or the user is not found
+    // in any league and this exercises the unknown-user fallback below instead
+    // of the gate it claims to test.
+    let mut div1 = game.league.clone().unwrap();
+    div1.participant_ids = vec!["team1".to_string(), "team2".to_string()];
+    div1.country_id = Some("ENG".to_string());
     let mut div2 = League {
         id: "eng-2".to_string(),
         name: "ENG Second Division".to_string(),
@@ -1139,6 +1534,10 @@ fn season_not_complete_while_another_division_is_unfinished() {
     };
     div2.fixtures[1].status = FixtureStatus::Scheduled;
     div2.fixtures[1].result = None;
+    // Dated ahead of the clock, so the day loop can still reach it. A fixture
+    // the clock has already passed is stale, not pending, and deliberately does
+    // not hold the season open.
+    div2.fixtures[1].date = "2026-06-10".to_string();
     game.competitions = vec![div1, div2];
 
     assert!(
@@ -1284,6 +1683,82 @@ fn process_end_of_season_promotes_and_relegates_between_divisions() {
             .fixtures
             .iter()
             .any(|f| f.status == FixtureStatus::Scheduled)
+    );
+}
+
+/// Every first division berths its top finishers into the same continental cup,
+/// which is what `create_game` builds. Those leagues qualify *for* the cup; they
+/// do not feed clubs *into* it, so a shared continental target must not take
+/// them out of their own domestic ladder the way sibling regional groups are
+/// taken out of it. Two countries, because one feeder is never a sibling and so
+/// a single-country world hides the bug entirely.
+#[test]
+fn a_shared_continental_berth_does_not_detach_first_divisions_from_their_ladder() {
+    let mut game = make_completed_season_game();
+    for id in [
+        "eng1", "eng2", "eng3", "eng4", "esp1", "esp2", "esp3", "esp4",
+    ] {
+        game.teams.push(make_club(id, &id[..3].to_uppercase(), 100));
+    }
+
+    let continental_berth = || Berth {
+        target: "ccc".to_string(),
+        rule: BerthRule::PositionRange { from: 1, to: 2 },
+        fallback_to: None,
+    };
+    let tier = |id: &str, country: &str, priority: u32, clubs: [&str; 2]| {
+        let mut division = first_division(id, country, "europe", &clubs);
+        division.priority = priority;
+        division.fixtures = vec![make_completed_fixture(
+            &format!("{id}-f1"),
+            clubs[0],
+            clubs[1],
+            2,
+            0,
+        )];
+        division
+    };
+
+    let mut eng_d1 = tier("eng-d1", "ENG", 0, ["eng1", "eng2"]);
+    eng_d1.berths = vec![continental_berth()];
+    let eng_d2 = tier("eng-d2", "ENG", 1, ["eng3", "eng4"]);
+    let mut esp_d1 = tier("esp-d1", "ES", 2, ["esp1", "esp2"]);
+    esp_d1.berths = vec![continental_berth()];
+    let esp_d2 = tier("esp-d2", "ES", 3, ["esp3", "esp4"]);
+
+    // Group-and-knockout, as `create_game` builds it: the cup is not a league
+    // table, so it can never be a promotion destination.
+    let mut cup = continental_cup("ccc", "europe", 4);
+    cup.rules.format = CompetitionFormat::GroupAndKnockout;
+
+    game.league = Some(eng_d1.clone());
+    game.competitions = vec![eng_d1, eng_d2, esp_d1, esp_d2, cup];
+
+    process_end_of_season(&mut game);
+
+    let by_id = |id: &str| game.competitions.iter().find(|c| c.id == id).expect(id);
+    // Both countries, so the fix cannot be a one-off that happens to spare
+    // whichever league sorts first.
+    for prefix in ["eng", "esp"] {
+        let d1 = &by_id(&format!("{prefix}-d1")).participant_ids;
+        let d2 = &by_id(&format!("{prefix}-d2")).participant_ids;
+        assert!(
+            d2.contains(&format!("{prefix}2")),
+            "{prefix}2 finished bottom of the top flight and should be relegated: \
+             d1={d1:?} d2={d2:?}"
+        );
+        assert!(
+            d1.contains(&format!("{prefix}3")),
+            "{prefix}3 won the second division and should be promoted: d1={d1:?} d2={d2:?}"
+        );
+    }
+
+    // Qualification still resolves in the same rollover — narrowing the sibling
+    // rule must not cost the cup its field.
+    let field = &by_id("ccc").participant_ids;
+    assert!(
+        field.contains(&"eng1".to_string()) && field.contains(&"esp1".to_string()),
+        "both champions should have qualified for the continental cup: {field:?}"
     );
 }
 
@@ -1791,21 +2266,22 @@ fn season_end_ages_players_and_retires_out_of_contract_veterans() {
         .find(|player| player.id == "p1")
         .unwrap();
     veteran.date_of_birth = "1988-01-01".to_string();
-    veteran.contract_end = Some("2026-05-01".to_string());
+    veteran.stage_contract_end(Some("2026-05-01".to_string()));
     veteran.attributes.pace = 16;
     veteran.attributes.passing = 70;
 
     process_end_of_season(&mut game);
 
-    let veteran = game
-        .players
-        .iter()
-        .find(|player| player.id == "p1")
-        .unwrap();
     assert!(
-        veteran.retired,
-        "older out-of-contract veterans should retire"
+        game.players.iter().all(|player| player.id != "p1"),
+        "a retired veteran leaves the roster"
     );
+    let veteran = game
+        .retired_players
+        .iter()
+        .find(|record| record.id == "p1")
+        .expect("older out-of-contract veterans should retire into the archive")
+        .to_player();
     assert_eq!(
         veteran.team_id, None,
         "retired players should leave their club"
@@ -1815,8 +2291,8 @@ fn season_end_ages_players_and_retires_out_of_contract_veterans() {
         "seasonal aging should reduce veteran pace"
     );
     assert!(
-        veteran.attributes.passing >= 70,
-        "technical attributes should not decline before the post-32 flat phase"
+        veteran.attributes.passing < 70,
+        "technique declines too, more slowly than pace, at thirty-eight"
     );
 }
 
@@ -1851,11 +2327,88 @@ fn manager_career_stats_updated() {
     assert_eq!(game.manager.career_stats.losses, 0);
 }
 
+/// Given a finished season in which Rival FC (team2), managed by another manager, lost both matches
+/// When the season ends
+/// Then his record has that season too, not only the user's: two matches, two defeats, last place
+#[test]
+fn another_clubs_manager_has_his_season_on_his_record() {
+    let mut game = make_completed_season_game();
+    let mut rival_boss = Manager::new(
+        "mgr2".to_string(),
+        "Rival".to_string(),
+        "Boss".to_string(),
+        "1978-01-01".to_string(),
+        "England".to_string(),
+    );
+    rival_boss.hire("team2".to_string());
+    game.managers.push(rival_boss);
+    // A generated world's league, which the rollover can archive: its clubs, and a calendar that
+    // says it is a double round robin.
+    let league = game.league.as_mut().unwrap();
+    league.participant_ids = vec!["team1".to_string(), "team2".to_string()];
+    league.calendar = Some(domain::competition_calendar::CalendarMetadata {
+        league_legs: Some(2),
+        ..Default::default()
+    });
+    for fixture in &mut league.fixtures {
+        fixture.competition_id = league.id.clone();
+    }
+
+    process_end_of_season(&mut game);
+
+    let rival_boss = game.managers.iter().find(|m| m.id == "mgr2").unwrap();
+    assert_eq!(rival_boss.career_stats.matches_managed, 2);
+    assert_eq!(rival_boss.career_stats.losses, 2);
+    assert_eq!(rival_boss.career_stats.best_finish, Some(2));
+    assert_eq!(game.manager.career_stats.matches_managed, 2);
+}
+
 #[test]
 fn manager_trophy_awarded_for_first_place() {
     let mut game = make_completed_season_game();
     process_end_of_season(&mut game);
     assert_eq!(game.manager.career_stats.trophies, 1);
+}
+
+/// Given the user's manager also listed in `game.managers` (the managers list and a live match's
+///      AI profile read him there), in step with `game.manager`
+/// When his season is credited at the season's end
+/// Then the listed copy carries the same record and satisfaction, not last season's until the
+///      next day's sync
+#[test]
+fn the_users_listed_record_takes_his_season_too() {
+    let mut game = make_completed_season_game();
+    game.sync_user_manager_record();
+
+    process_end_of_season(&mut game);
+
+    // The record as the managers list shows it: totals, then each stint's club, end and matches.
+    let record = |manager: &Manager| {
+        let stats = &manager.career_stats;
+        (
+            (
+                stats.matches_managed,
+                stats.wins,
+                stats.draws,
+                stats.losses,
+                stats.trophies,
+                stats.best_finish,
+            ),
+            manager
+                .career_history
+                .iter()
+                .map(|stint| (stint.team_id.clone(), stint.end_date.clone(), stint.matches))
+                .collect::<Vec<_>>(),
+            manager.satisfaction,
+        )
+    };
+    let listed = game
+        .managers
+        .iter()
+        .find(|manager| manager.id == game.manager_id)
+        .expect("the user's manager is listed");
+    assert_eq!(record(listed), record(&game.manager));
+    assert_eq!(listed.career_stats.trophies, 1);
 }
 
 #[test]
@@ -1917,6 +2470,7 @@ fn manager_career_history_entry_updated_on_second_season() {
     let entry = &game.manager.career_history[0];
     assert_eq!(entry.matches, 12); // 10 + 2
     assert_eq!(entry.wins, 7); // 5 + 2
+    assert_eq!((entry.draws, entry.losses), (3, 2)); // a season without either adds none
     assert_eq!(entry.best_league_position, Some(1)); // improved from 3 to 1
 }
 
@@ -2089,6 +2643,555 @@ fn champion_receives_prize_money_and_ledger_entry() {
     assert_eq!(
         team1.financial_ledger[0].description,
         "be.msg.seasonPayout.ledgerDescription?season=1&position=1&suffix=st"
+    );
+}
+
+/// A continental competition still playing its own season keeps its roster.
+/// Handing it next season's qualifiers left a table scoring clubs that were no
+/// longer in it and fixtures between clubs it no longer listed.
+#[test]
+fn an_unfinished_continental_table_keeps_its_roster() {
+    let mut game = make_completed_season_game();
+    for id in ["team3", "team4"] {
+        if !game.teams.iter().any(|team| team.id == id) {
+            game.teams.push(make_team(id, &format!("{id} FC")));
+        }
+    }
+    for team in game.teams.iter_mut() {
+        team.football_nation = "ENG".to_string();
+    }
+
+    let domestic = first_division("eng-d1", "ENG", "europe", &["team1", "team2"]);
+    let mut domestic = domestic;
+    domestic.fixtures = vec![make_completed_fixture("d1f", "team1", "team2", 2, 0)];
+
+    // A continental competition scored as a table, one match still to play.
+    let mut continental = continental_cup("ccc", "europe", 2);
+    continental.participant_ids = vec!["team3".to_string(), "team4".to_string()];
+    let mut pending = make_completed_fixture("ccc-live", "team3", "team4", 0, 0);
+    pending.status = FixtureStatus::Scheduled;
+    pending.result = None;
+    continental.fixtures = vec![pending];
+    continental.standings = vec![make_standing("team3", 1, 0, 0, 2, 0)];
+
+    game.league = Some(domestic.clone());
+    game.competitions = vec![domestic, continental];
+
+    process_end_of_season(&mut game);
+
+    let cup = game
+        .competitions
+        .iter()
+        .find(|competition| competition.id == "ccc")
+        .expect("ccc");
+    // Exactly its own clubs — "still contains them" is not enough, because the
+    // qualifier pass appends rather than replaces and the roster simply grew.
+    assert_eq!(
+        cup.participant_ids,
+        vec!["team3".to_string(), "team4".to_string()],
+        "a mid-season continental table keeps exactly the clubs its fixtures name"
+    );
+}
+
+/// A save whose clock and competition seasons disagree must not replay years.
+#[test]
+fn regeneration_never_rewinds_a_finished_season() {
+    let mut game = make_completed_season_game();
+    let mut league = first_division("eng-d1", "ENG", "europe", &["team1", "team2"]);
+    // Stamped far ahead of the clock, which sits in 2026.
+    league.season = 2030;
+    league.fixtures = vec![make_completed_fixture("f", "team1", "team2", 2, 0)];
+    game.league = Some(league.clone());
+    game.competitions = vec![league];
+
+    process_end_of_season(&mut game);
+
+    let rolled = game
+        .competitions
+        .iter()
+        .find(|competition| competition.id == "eng-d1")
+        .expect("eng-d1");
+    assert!(
+        rolled.season > 2030,
+        "a competition that finished season 2030 cannot roll back to {}",
+        rolled.season
+    );
+}
+
+/// Two divisions can share a rank — a berth moves clubs into its target, and
+/// nothing makes a target outrank its feeder. A champion promoted along a berth
+/// was told they had been relegated.
+#[test]
+fn a_berth_promotion_is_not_reported_as_a_relegation() {
+    let mut game = make_completed_season_game();
+    game.manager.hire("team3".to_string());
+    for id in ["team3", "team4"] {
+        if !game.teams.iter().any(|team| team.id == id) {
+            game.teams.push(make_team(id, &format!("{id} FC")));
+        }
+    }
+
+    let central = League {
+        id: "central".to_string(),
+        name: "Central League".to_string(),
+        country_id: Some("ENG".to_string()),
+        priority: 0,
+        season: 1,
+        participant_ids: vec!["team1".to_string(), "team2".to_string()],
+        fixtures: vec![make_completed_fixture("cf", "team1", "team2", 2, 0)],
+        standings: vec![
+            make_standing("team1", 1, 0, 0, 2, 0),
+            make_standing("team2", 0, 0, 1, 0, 2),
+        ],
+        ..Default::default()
+    };
+    let mut feeder = League {
+        id: "feeder".to_string(),
+        name: "Feeder League".to_string(),
+        country_id: Some("ENG".to_string()),
+        // Deliberately the SAME rank as its target.
+        priority: 0,
+        season: 1,
+        participant_ids: vec!["team3".to_string(), "team4".to_string()],
+        fixtures: vec![make_completed_fixture("ff", "team3", "team4", 3, 0)],
+        standings: vec![
+            make_standing("team3", 1, 0, 0, 3, 0),
+            make_standing("team4", 0, 0, 1, 0, 3),
+        ],
+        ..Default::default()
+    };
+    feeder.berths = vec![Berth {
+        target: "central".to_string(),
+        rule: BerthRule::PositionRange { from: 1, to: 1 },
+        fallback_to: None,
+    }];
+
+    game.league = Some(feeder.clone());
+    game.competitions = vec![central, feeder];
+
+    process_end_of_season(&mut game);
+
+    let central_now = game
+        .competitions
+        .iter()
+        .find(|competition| competition.id == "central")
+        .expect("central");
+    assert!(
+        central_now.participant_ids.contains(&"team3".to_string()),
+        "precondition: the feeder's champion was promoted: {:?}",
+        central_now.participant_ids
+    );
+    assert!(
+        !game.messages.iter().any(|message| message
+            .subject_key
+            .as_deref()
+            .is_some_and(|key| key.contains("relegation"))),
+        "a promoted champion must not be told they were relegated: {:?}",
+        game.messages
+            .iter()
+            .filter_map(|message| message.subject_key.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Prize money halves for each tier below the top flight, and the tier is the
+/// division's rank in its own pyramid. Ranking only the *finished* divisions
+/// made a second division the top flight whenever the first was still playing,
+/// and its champion banked a top-flight cheque.
+#[test]
+fn an_unfinished_upper_tier_does_not_pay_top_flight_prize_money() {
+    let mut game = make_completed_season_game();
+    game.manager.hire("team3".to_string());
+    for id in ["team3", "team4"] {
+        if !game.teams.iter().any(|team| team.id == id) {
+            game.teams.push(make_team(id, &format!("{id} FC")));
+        }
+    }
+
+    // The first division is still playing: one fixture left to go.
+    let mut first = League {
+        id: "eng-1".to_string(),
+        name: "ENG First Division".to_string(),
+        country_id: Some("ENG".to_string()),
+        priority: 0,
+        season: 1,
+        participant_ids: vec!["team1".to_string(), "team2".to_string()],
+        standings: vec![
+            make_standing("team1", 1, 0, 0, 2, 0),
+            make_standing("team2", 0, 0, 1, 0, 2),
+        ],
+        ..Default::default()
+    };
+    let mut pending = make_completed_fixture("d1-live", "team1", "team2", 0, 0);
+    pending.status = FixtureStatus::Scheduled;
+    pending.result = None;
+    first.fixtures = vec![
+        make_completed_fixture("d1-done", "team1", "team2", 2, 0),
+        pending,
+    ];
+
+    let second = League {
+        id: "eng-2".to_string(),
+        name: "ENG Second Division".to_string(),
+        country_id: Some("ENG".to_string()),
+        priority: 1,
+        season: 1,
+        participant_ids: vec!["team3".to_string(), "team4".to_string()],
+        fixtures: vec![make_completed_fixture("d2f1", "team3", "team4", 3, 0)],
+        standings: vec![
+            make_standing("team3", 1, 0, 0, 3, 0),
+            make_standing("team4", 0, 0, 1, 0, 3),
+        ],
+        ..Default::default()
+    };
+
+    game.league = Some(second.clone());
+    game.competitions = vec![first, second];
+    let before = game
+        .teams
+        .iter()
+        .find(|team| team.id == "team3")
+        .expect("team3")
+        .finance;
+
+    process_end_of_season(&mut game);
+
+    let gained = game
+        .teams
+        .iter()
+        .find(|team| team.id == "team3")
+        .expect("team3")
+        .finance
+        - before;
+    assert_eq!(
+        gained, 2_500_000,
+        "the second division's champion earns half the top flight's 5,000,000, \
+         even while the first division is unfinished"
+    );
+}
+
+/// One division result must feed everything the player is told.
+///
+/// The payout is taken from the table a split-season country ends its year on,
+/// but the summary, the club's record, the manager's trophies and the payout
+/// message were all read from whichever table happened to come first. A club
+/// could be crowned champion on screen, have second place written into its
+/// history, be paid for second, and be told in the same breath that it earned
+/// the champion's cheque.
+#[test]
+fn a_split_season_tells_the_player_one_consistent_story() {
+    let mut game = make_completed_season_game();
+
+    // The user wins the opening half and finishes second in the closing one.
+    let mut apertura = first_division("ar-d1-apertura", "AR", "america", &["team1", "team2"]);
+    apertura.priority = 0;
+    apertura.fixtures = vec![make_completed_fixture("ap", "team1", "team2", 2, 0)];
+    let mut clausura = first_division("ar-d1-clausura", "AR", "america", &["team2", "team1"]);
+    clausura.priority = 1;
+    let mut closing = make_completed_fixture("cl", "team2", "team1", 2, 0);
+    closing.date = "2025-12-01".to_string();
+    clausura.fixtures = vec![closing];
+
+    game.league = Some(apertura.clone());
+    game.competitions = vec![apertura, clausura];
+    let before = game
+        .teams
+        .iter()
+        .find(|team| team.id == "team1")
+        .expect("team1")
+        .finance;
+
+    let summary = process_end_of_season(&mut game);
+
+    let team1 = game
+        .teams
+        .iter()
+        .find(|team| team.id == "team1")
+        .expect("team1");
+    let gained = team1.finance - before;
+    let payout = game
+        .messages
+        .iter()
+        .find(|message| message.id.starts_with("season_payout_"))
+        .expect("a payout message");
+
+    assert_eq!(
+        summary.user_position, 2,
+        "the closing table is the one the year ended on"
+    );
+    assert_eq!(team1.history[0].league_position, 2, "and the record agrees");
+    assert_eq!(gained, 3_000_000, "paid for second");
+    assert_eq!(
+        payout.i18n_params.get("amount"),
+        Some(&gained.to_string()),
+        "the message must describe the payment actually made"
+    );
+    assert_eq!(
+        game.manager.career_stats.trophies, 0,
+        "second place is not a trophy"
+    );
+}
+
+/// A tier that cannot make progress must not hold the career hostage.
+///
+/// The day loop plays a fixture on the day it is dated and never looks back, so
+/// a `Scheduled` fixture the clock has already passed is unreachable: its tier
+/// never "ends". Waiting on the user's whole country then meant the season could
+/// never complete — `advance_to_next_season` refuses forever and the
+/// end-of-season screen never appears. Two years of days did not clear it.
+#[test]
+fn a_tier_with_only_overdue_fixtures_does_not_block_the_season() {
+    let mut game = make_completed_season_game();
+    for id in ["team3", "team4"] {
+        if !game.teams.iter().any(|team| team.id == id) {
+            game.teams.push(make_team(id, &format!("{id} FC")));
+        }
+    }
+
+    let mut first = first_division("eng-d1", "ENG", "europe", &["team1", "team2"]);
+    first.fixtures = vec![
+        make_completed_fixture("d1f1", "team1", "team2", 2, 0),
+        make_completed_fixture("d1f2", "team2", "team1", 0, 1),
+    ];
+
+    // Started, but its one remaining fixture is dated long before the clock.
+    let mut second = first_division("eng-d2", "ENG", "europe", &["team3", "team4"]);
+    second.priority = 1;
+    let mut stranded = make_completed_fixture("d2-stale", "team3", "team4", 0, 0);
+    stranded.date = "2020-01-01".to_string();
+    stranded.status = FixtureStatus::Scheduled;
+    stranded.result = None;
+    second.fixtures = vec![
+        make_completed_fixture("d2-played", "team3", "team4", 1, 0),
+        stranded,
+    ];
+
+    game.league = Some(first.clone());
+    game.competitions = vec![first, second];
+
+    assert!(
+        is_season_complete(&game),
+        "a tier whose only remaining fixture is in the past is stale, not playing"
+    );
+}
+
+/// The counterpart: a tier that genuinely still has a match to come does block.
+#[test]
+fn a_tier_with_a_fixture_still_to_come_blocks_the_season() {
+    let mut game = make_completed_season_game();
+    for id in ["team3", "team4"] {
+        if !game.teams.iter().any(|team| team.id == id) {
+            game.teams.push(make_team(id, &format!("{id} FC")));
+        }
+    }
+
+    let mut first = first_division("eng-d1", "ENG", "europe", &["team1", "team2"]);
+    first.fixtures = vec![
+        make_completed_fixture("d1f1", "team1", "team2", 2, 0),
+        make_completed_fixture("d1f2", "team2", "team1", 0, 1),
+    ];
+
+    let mut second = first_division("eng-d2", "ENG", "europe", &["team3", "team4"]);
+    second.priority = 1;
+    let mut upcoming = make_completed_fixture("d2-upcoming", "team3", "team4", 0, 0);
+    upcoming.date = "2026-06-20".to_string(); // the clock sits in May 2026
+    upcoming.status = FixtureStatus::Scheduled;
+    upcoming.result = None;
+    second.fixtures = vec![
+        make_completed_fixture("d2-played", "team3", "team4", 1, 0),
+        upcoming,
+    ];
+
+    game.league = Some(first.clone());
+    game.competitions = vec![first, second];
+
+    assert!(
+        !is_season_complete(&game),
+        "the rest of the pyramid is still playing"
+    );
+}
+
+/// Only a country's own league tiers are divisions. A regional competition
+/// scored as a table was ranked as one, and because it shares a roster with the
+/// real division it could win the collapse and take its prize money and its
+/// place in the club's history.
+#[test]
+fn a_regional_table_is_not_a_division_for_prize_money() {
+    let mut game = make_completed_season_game();
+    let roster = ["team1", "team2"];
+
+    let mut league = first_division("eng-d1", "ENG", "europe", &["team1", "team2"]);
+    league.fixtures = vec![make_completed_fixture("d1f", "team1", "team2", 2, 0)];
+
+    // Same clubs, same country, scored as a table — but a regional side
+    // competition, not a rung of the pyramid. It finishes later, so if it were
+    // admitted it would win the collapse and crown team2 instead.
+    let mut regional = first_division("eng-regional", "ENG", "europe", &["team2", "team1"]);
+    regional.scope = CompetitionScope::Regional;
+    regional.priority = 1;
+    let mut later = make_completed_fixture("rf", "team2", "team1", 3, 0);
+    later.date = "2026-06-01".to_string();
+    regional.fixtures = vec![later];
+    let _ = roster;
+
+    game.league = Some(league.clone());
+    game.competitions = vec![league, regional];
+    let before = game
+        .teams
+        .iter()
+        .find(|team| team.id == "team1")
+        .expect("team1")
+        .finance;
+
+    process_end_of_season(&mut game);
+
+    let team1 = game
+        .teams
+        .iter()
+        .find(|team| team.id == "team1")
+        .expect("team1");
+    assert_eq!(
+        team1.finance - before,
+        5_000_000,
+        "team1 won its division and is paid as champion of it"
+    );
+    assert_eq!(
+        team1.history.len(),
+        1,
+        "one division, one history entry: {:?}",
+        team1.history
+    );
+    assert_eq!(
+        team1.history[0].league_position, 1,
+        "the division's table decides the record, not a regional side competition"
+    );
+}
+
+/// A split-season country plays the same clubs through an Apertura and a
+/// Clausura. Counted separately they were ranked as though the second were a
+/// tier below the first, so a club banked a top-flight prize for one half and a
+/// second-division prize for the other — 7,500,000 for one year — and gained
+/// two career-history entries every season.
+#[test]
+fn a_split_season_pays_and_records_one_division_once() {
+    let mut game = make_completed_season_game();
+    // Different champions in the two halves, on purpose: team2 wins the
+    // Apertura and team1 the Clausura. team1's payout is then 5,000,000 only if
+    // the closing table was the one retained — with the same champion in both,
+    // keeping either table would satisfy every assertion below.
+    let mut apertura = first_division("ar-d1-apertura", "AR", "america", &["team2", "team1"]);
+    apertura.priority = 0;
+    apertura.fixtures = vec![make_completed_fixture("ap", "team2", "team1", 2, 0)];
+    let mut clausura = first_division("ar-d1-clausura", "AR", "america", &["team1", "team2"]);
+    clausura.priority = 1;
+    let mut closing = make_completed_fixture("cl", "team1", "team2", 1, 0);
+    // The Clausura closes the year, so its table is the one that counts.
+    closing.date = "2025-12-01".to_string();
+    clausura.fixtures = vec![closing];
+
+    game.league = Some(apertura.clone());
+    game.competitions = vec![apertura, clausura];
+    let before = game
+        .teams
+        .iter()
+        .find(|team| team.id == "team1")
+        .expect("team1")
+        .finance;
+
+    process_end_of_season(&mut game);
+
+    let team1 = game
+        .teams
+        .iter()
+        .find(|team| team.id == "team1")
+        .expect("team1");
+    assert_eq!(
+        team1.history.len(),
+        1,
+        "one season, one history entry: {:?}",
+        team1.history
+    );
+    assert_eq!(
+        team1.finance - before,
+        5_000_000,
+        "the champion is paid once, at top-flight rate"
+    );
+    assert_eq!(
+        team1
+            .financial_ledger
+            .iter()
+            .filter(|row| matches!(row.kind, FinancialTransactionKind::PrizeMoney))
+            .count(),
+        1,
+        "one prize payment"
+    );
+}
+
+/// A league on another calendar finishes a different season from the user's.
+/// Every division's history used to be stamped with the user's season number,
+/// so a foreign league's season 1 was recorded as season 2.
+#[test]
+fn each_division_records_its_own_season() {
+    let mut game = make_completed_season_game();
+    for id in ["team3", "team4"] {
+        if !game.teams.iter().any(|team| team.id == id) {
+            game.teams.push(make_team(id, &format!("{id} FC")));
+        }
+    }
+
+    let home = League {
+        id: "eng-1".to_string(),
+        name: "ENG First Division".to_string(),
+        country_id: Some("ENG".to_string()),
+        priority: 0,
+        season: 2,
+        participant_ids: vec!["team1".to_string(), "team2".to_string()],
+        fixtures: vec![make_completed_fixture("hf1", "team1", "team2", 2, 0)],
+        standings: vec![
+            make_standing("team1", 1, 0, 0, 2, 0),
+            make_standing("team2", 0, 0, 1, 0, 2),
+        ],
+        ..Default::default()
+    };
+    let foreign = League {
+        id: "bra-1".to_string(),
+        name: "BRA First Division".to_string(),
+        country_id: Some("BR".to_string()),
+        priority: 0,
+        season: 1,
+        participant_ids: vec!["team3".to_string(), "team4".to_string()],
+        fixtures: vec![make_completed_fixture("ff1", "team3", "team4", 1, 0)],
+        standings: vec![
+            make_standing("team3", 1, 0, 0, 1, 0),
+            make_standing("team4", 0, 0, 1, 0, 1),
+        ],
+        ..Default::default()
+    };
+
+    game.league = Some(home.clone());
+    game.competitions = vec![home, foreign];
+
+    process_end_of_season(&mut game);
+
+    let seasons_for = |id: &str| -> Vec<u32> {
+        game.teams
+            .iter()
+            .find(|team| team.id == id)
+            .unwrap_or_else(|| panic!("{id}"))
+            .history
+            .iter()
+            .map(|record| record.season)
+            .collect()
+    };
+    assert_eq!(
+        seasons_for("team1"),
+        vec![2],
+        "the user's league is season 2"
+    );
+    assert_eq!(
+        seasons_for("team3"),
+        vec![1],
+        "the foreign league finished its own season 1, not the user's season 2"
     );
 }
 
@@ -2367,12 +3470,61 @@ fn no_league_returns_default_summary() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn satisfaction_adjusted_after_season() {
+fn satisfaction_unchanged_when_the_board_set_no_objectives() {
     let mut game = make_completed_season_game();
     let initial_sat = game.manager.satisfaction;
     process_end_of_season(&mut game);
-    // With no objectives, evaluate_objectives returns 0, so satisfaction unchanged
+    // Nothing was asked, so nothing is judged.
     assert_eq!(game.manager.satisfaction, initial_sat);
+}
+
+/// The test above only ever proved that zero objectives change nothing, which
+/// stays true however the evaluation is written — replacing the whole
+/// calculation with a constant zero left it green. These two do the judging.
+#[test]
+fn meeting_the_board_objective_raises_satisfaction() {
+    let mut game = make_completed_season_game();
+    // Objectives are marked met as the season runs; the rollover only counts
+    // them. team1 won its league, so this one came in.
+    game.board_objectives.push(BoardObjective {
+        id: "obj1".to_string(),
+        objective_type: ObjectiveType::LeaguePosition,
+        description: "Finish top 2".to_string(),
+        target: 2,
+        met: true,
+    });
+    let before = game.manager.satisfaction;
+
+    process_end_of_season(&mut game);
+
+    assert!(
+        game.manager.satisfaction > before,
+        "meeting the board's objective should please them: {before} -> {}",
+        game.manager.satisfaction
+    );
+}
+
+#[test]
+fn missing_the_board_objective_lowers_satisfaction() {
+    let mut game = make_completed_season_game();
+    // team2 finished bottom, so the title the board asked for was not won.
+    game.manager.hire("team2".to_string());
+    game.board_objectives.push(BoardObjective {
+        id: "obj1".to_string(),
+        objective_type: ObjectiveType::LeaguePosition,
+        description: "Win the league".to_string(),
+        target: 1,
+        met: false,
+    });
+    let before = game.manager.satisfaction;
+
+    process_end_of_season(&mut game);
+
+    assert!(
+        game.manager.satisfaction < before,
+        "team2 finished last and missed the objective: {before} -> {}",
+        game.manager.satisfaction
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2800,6 +3952,91 @@ fn retiree_conversion_is_idempotent() {
     );
 }
 
+/// Given one player who retired this season and one archived seasons ago, both with careers,
+/// When the season ends
+/// Then only this season's retiree becomes a manager and a scout candidate.
+#[test]
+fn only_this_seasons_retirees_become_candidates() {
+    let mut game = make_completed_season_game();
+    game.players.push(make_retired_player("recent"));
+    let long_ago = make_retired_player("longago");
+    game.retired_players
+        .push(domain::retired_player::RetiredPlayer::from_player(
+            &long_ago,
+            "2001-06-30",
+            2001,
+        ));
+
+    process_end_of_season(&mut game);
+
+    assert!(game.managers.iter().any(|m| m.id == "mgr_retired_recent"));
+    assert!(
+        game.staff
+            .iter()
+            .any(|s| s.id == "staff_retired_scout_recent")
+    );
+    assert!(game.managers.iter().all(|m| m.id != "mgr_retired_longago"));
+    assert!(
+        game.staff
+            .iter()
+            .all(|s| s.id != "staff_retired_scout_longago")
+    );
+}
+
+/// Given a retired player whose manager conversion has since retired into the archive
+/// When the season ends again
+/// Then the conversion does not create the manager a second time.
+#[test]
+fn an_archived_retiree_manager_is_not_converted_again() {
+    let mut game = make_completed_season_game();
+    game.players.push(make_retired_player("archived1"));
+    let mut archived = domain::manager::Manager::new(
+        "mgr_retired_archived1".to_string(),
+        "Old".to_string(),
+        "Boss".to_string(),
+        "1950-01-01".to_string(),
+        "England".to_string(),
+    );
+    archived.reputation = 500;
+    game.retired_managers.push(archived);
+
+    process_end_of_season(&mut game);
+
+    let records = game
+        .retired_managers
+        .iter()
+        .filter(|m| m.id == "mgr_retired_archived1")
+        .count();
+    assert_eq!(records, 1, "the retiree was converted a second time");
+    assert!(
+        game.managers
+            .iter()
+            .all(|m| m.id != "mgr_retired_archived1")
+    );
+}
+
+/// Given an unemployed manager past retirement age
+/// When the season ends
+/// Then he leaves the active pool for the archive, and the market is topped back up.
+#[test]
+fn an_unemployed_manager_past_retirement_age_leaves_the_pool_at_season_end() {
+    let mut game = make_completed_season_game();
+    let mut veteran = domain::manager::Manager::new(
+        "veteran".to_string(),
+        "Old".to_string(),
+        "Boss".to_string(),
+        "1900-01-01".to_string(),
+        "England".to_string(),
+    );
+    veteran.reputation = 900;
+    game.managers.push(veteran);
+
+    process_end_of_season(&mut game);
+
+    assert!(game.managers.iter().all(|m| m.id != "veteran"));
+    assert!(game.retired_managers.iter().any(|m| m.id == "veteran"));
+}
+
 #[test]
 fn retired_player_with_no_career_is_not_converted() {
     let mut game = make_completed_season_game();
@@ -2859,22 +4096,55 @@ fn scout_pool_is_topped_up_to_floor_after_season() {
     );
 }
 
+/// A player who retired this season, archived at `ovr` after thirteen seasons of thirty games:
+/// the career a generated world's history gives. Archived rather than pushed into `game.players`,
+/// because the season end re-derives a squad player's rating from his attributes before he retires.
+fn retired_this_season_after_thirteen_seasons(
+    game: &Game,
+    id: &str,
+    ovr: u8,
+) -> domain::retired_player::RetiredPlayer {
+    let mut player = make_retired_player(id);
+    player.ovr = ovr;
+    player.career = (1..=13)
+        .map(|season| domain::player::CareerEntry {
+            season,
+            team_id: "team1".to_string(),
+            team_name: "Test FC".to_string(),
+            appearances: 30,
+            goals: 0,
+            assists: 0,
+        })
+        .collect();
+    domain::retired_player::RetiredPlayer::from_player(
+        &player,
+        "2026-05-20",
+        game.league.as_ref().map_or(0, |league| league.season),
+    )
+}
+
+/// Given a star and a squad player who retired this season after thirteen seasons each, rated 85
+///      and 62
+/// When the season ends and they become manager candidates
+/// Then they start at 681 and 382, on the 200-700 scale every manager is created on and apart by
+///      their ability (#1160: both started at 900, above every manager the world opened with)
 #[test]
-fn retiree_manager_reputation_is_derived_from_ovr_and_career() {
+fn retirees_start_managing_on_the_created_scale_by_their_ability() {
     let mut game = make_completed_season_game();
-    game.players.push(make_retired_player("ovr_test"));
+    let star = retired_this_season_after_thirteen_seasons(&game, "star", 85);
+    let squad = retired_this_season_after_thirteen_seasons(&game, "squad", 62);
+    game.retired_players.extend([star, squad]);
 
     process_end_of_season(&mut game);
 
-    let mgr = game
-        .managers
-        .iter()
-        .find(|m| m.id == "mgr_retired_ovr_test")
-        .expect("manager should exist");
-    assert!(mgr.reputation >= 200, "reputation should be >= 200");
-    assert!(mgr.reputation <= 900, "reputation should be <= 900");
-    assert_eq!(mgr.satisfaction, 50);
-    assert_eq!(mgr.fan_approval, 50);
+    let reputation_of = |id: &str| {
+        game.managers
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| (m.reputation, m.satisfaction, m.fan_approval))
+    };
+    assert_eq!(reputation_of("mgr_retired_star"), Some((681, 50, 50)));
+    assert_eq!(reputation_of("mgr_retired_squad"), Some((382, 50, 50)));
 }
 
 #[test]
@@ -2889,10 +4159,30 @@ fn retiree_scout_judging_attributes_derived_from_player_attrs() {
         .iter()
         .find(|s| s.id == "staff_retired_scout_attr_test")
         .expect("scout should exist");
-    // vision=74, decisions=70 → judging_ability = (74+70)/2 = 72
-    assert_eq!(scout.attributes.judging_ability, 72);
-    // positioning=72, teamwork=68 → judging_potential = (72+68)/2 = 70
-    assert_eq!(scout.attributes.judging_potential, 70);
+    // The scout is built from the attributes the player retired with, which a last season of
+    // ageing has already moved, so the expectation is read off the archived player.
+    let retired = game
+        .retired_players
+        .iter()
+        .find(|record| record.id == "attr_test")
+        .expect("the player retired into the archive")
+        .to_player();
+    let (vision, decisions) = (
+        u16::from(retired.attributes.vision),
+        u16::from(retired.attributes.decisions),
+    );
+    let (positioning, teamwork) = (
+        u16::from(retired.attributes.positioning),
+        u16::from(retired.attributes.teamwork),
+    );
+    assert_eq!(
+        u16::from(scout.attributes.judging_ability),
+        (vision + decisions) / 2
+    );
+    assert_eq!(
+        u16::from(scout.attributes.judging_potential),
+        (positioning + teamwork) / 2
+    );
 }
 
 #[test]
@@ -2921,4 +4211,154 @@ fn process_end_of_season_refreshes_transfer_budget_from_finance() {
     assert_eq!(team2.transfer_budget, (team2.finance as f64 * 0.15) as i64);
     // Team1 went in with an empty envelope; the refill must have run.
     assert!(team1.transfer_budget > 0);
+}
+
+// ---------------------------------------------------------------------------
+// advance_to_next_season: the one rollover sequence
+// ---------------------------------------------------------------------------
+
+/// The command a player triggers and the season harness both roll a season over
+/// with this function, so the order they get is the same order by construction.
+/// It used to be inline in the Tauri command, which left the harness to copy it.
+#[test]
+fn advancing_refuses_a_season_that_is_not_complete_and_touches_nothing() {
+    let mut game = make_completed_season_game();
+    let league = game.league.as_mut().unwrap();
+    league.fixtures[1].status = FixtureStatus::Scheduled;
+    league.fixtures[1].result = None;
+    assert!(
+        !is_season_complete(&game),
+        "the precondition: an unplayed fixture holds the season open"
+    );
+    let satisfaction = game.manager.satisfaction;
+
+    let refusal = advance_to_next_season(&mut game).expect_err("an unfinished season must refuse");
+
+    assert_eq!(refusal, "be.error.seasonNotComplete");
+    assert!(
+        game.competitions.is_empty(),
+        "a refused rollover must not promote the legacy league into competitions"
+    );
+    assert_eq!(game.league.as_ref().unwrap().season, 1);
+    assert_eq!(game.manager.satisfaction, satisfaction);
+}
+
+#[test]
+fn advancing_a_complete_season_rolls_it_over_and_returns_the_summary() {
+    let mut game = make_completed_season_game();
+    assert!(is_season_complete(&game));
+
+    let summary = advance_to_next_season(&mut game).expect("a finished season advances");
+
+    assert_eq!(
+        summary.season, 1,
+        "the summary describes the season just ended"
+    );
+    assert_eq!(summary.champion_id, "team1");
+    let regenerated = game
+        .competitions
+        .first()
+        .expect("the legacy league is promoted into competitions by the rollover");
+    assert!(
+        regenerated.season > summary.season,
+        "the competition moves past the season that just ended, got {}",
+        regenerated.season
+    );
+    assert!(
+        regenerated.standings.iter().all(|row| row.played == 0),
+        "and starts the new season on a fresh table"
+    );
+    assert!(
+        game.manager.team_id.is_some(),
+        "a manager with a healthy board keeps the job"
+    );
+}
+
+/// Given a finished season (on the 20th, not the 1st, so the monthly sweep cannot be the cause)
+///       with read mail from over a year ago, read mail from last week, and unread old mail
+/// When the season is rolled over
+/// Then the rollover itself archives the old read mail, and leaves the rest in the inbox.
+#[test]
+fn rolling_a_season_over_archives_old_read_mail() {
+    let mut game = make_completed_season_game();
+    let mail = |id: &str, date: &str, read: bool| {
+        let mut message = domain::message::InboxMessage::new(
+            id.to_string(),
+            "Subject".to_string(),
+            "Body".to_string(),
+            "Board".to_string(),
+            date.to_string(),
+        );
+        message.read = read;
+        message
+    };
+    game.messages = vec![
+        mail("old-read", "2025-01-01", true),
+        mail("old-unread", "2025-01-01", false),
+        mail("recent-read", "2026-05-13", true),
+    ];
+
+    advance_to_next_season(&mut game).expect("a finished season advances");
+
+    let archived: Vec<&str> = game
+        .archived_messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect();
+    assert_eq!(archived, ["old-read"]);
+    for kept in ["old-unread", "recent-read"] {
+        assert!(
+            game.messages.iter().any(|message| message.id == kept),
+            "{kept}"
+        );
+    }
+}
+
+/// Given a finished season rolled over once, when advancing is asked for again,
+/// then it is refused and no second youth intake is taken. The intake keeps no
+/// marker of its own — like aging, it runs inside the one rollover, and the
+/// rollover's completeness check is what makes it once a season.
+#[test]
+fn a_season_takes_one_youth_intake_however_often_advancing_is_asked_for() {
+    let mut game = make_completed_season_game();
+    let before = game.players.len();
+
+    advance_to_next_season(&mut game).expect("a finished season advances");
+    let after_one = game.players.len();
+    assert!(
+        after_one > before,
+        "the rollover takes the season's youth intake"
+    );
+
+    assert!(advance_to_next_season(&mut game).is_err());
+    assert_eq!(
+        game.players.len(),
+        after_one,
+        "a second advance took a second intake"
+    );
+}
+
+/// The rollover itself is what sacks this manager: they are safe at satisfaction
+/// 20 going in, and the board's failed objective takes 15 off on the way out,
+/// leaving 5 on a standing warning. Checking *before* the rollover would keep
+/// them, so this fails if the two steps are ever run in the other order.
+#[test]
+fn advancing_runs_the_firing_check_after_the_rollover() {
+    let mut game = make_completed_season_game();
+    game.manager.satisfaction = 20;
+    game.manager.warning_stage = 1;
+    game.board_objectives.push(BoardObjective {
+        id: "obj1".to_string(),
+        objective_type: ObjectiveType::LeaguePosition,
+        description: "Finish top 1".to_string(),
+        target: 1,
+        met: false,
+    });
+
+    advance_to_next_season(&mut game).expect("a finished season advances");
+
+    assert!(
+        game.manager.team_id.is_none(),
+        "a manager the rollover pushes past the threshold is sacked by it, not a day later"
+    );
 }

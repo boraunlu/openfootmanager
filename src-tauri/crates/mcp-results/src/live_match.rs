@@ -1,0 +1,368 @@
+//! Results of the live match and press conference tools.
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+use crate::tool_results;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveMatchStarted {
+    /// "<competition>/<fixture>" for an exact fixture, otherwise "Index <n>".
+    pub fixture: String,
+    pub mode: String,
+    pub minute: u8,
+    pub home_score: u8,
+    pub away_score: u8,
+}
+
+impl fmt::Display for LiveMatchStarted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "## Live Match Started\n\n**Fixture**: {}\n**Mode**: {}\n**Minute**: {}\n**Score**: {} - {}\n\nUse `match_step` to advance, `match_command` to issue tactical commands, and `match_finish` to end.",
+            self.fixture, self.mode, self.minute, self.home_score, self.away_score
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchEventLine {
+    pub minute: u8,
+    /// "Home" or "Away".
+    pub side: String,
+    pub event: String,
+    pub player_id: Option<String>,
+}
+
+impl fmt::Display for MatchEventLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}': {} {} ({})",
+            self.minute,
+            self.side,
+            self.event,
+            self.player_id.as_deref().unwrap_or("?")
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchAdvanced {
+    pub minute: u8,
+    pub phase: String,
+    pub home_score: u8,
+    pub away_score: u8,
+    pub events: Vec<MatchEventLine>,
+}
+
+impl fmt::Display for MatchAdvanced {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "## Match Advanced\n\n**Minute**: {}\n**Phase**: {}\n**Score**: {} - {}\n\n### Events\n",
+            self.minute, self.phase, self.home_score, self.away_score
+        )?;
+        if self.events.is_empty() {
+            return write!(f, "No events occurred.");
+        }
+        let lines: Vec<String> = self.events.iter().map(ToString::to_string).collect();
+        write!(f, "{}", lines.join("\n"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandApplied {
+    pub minute: u8,
+    pub home_score: u8,
+    pub away_score: u8,
+}
+
+impl fmt::Display for CommandApplied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "## Command Applied\n\n**Minute**: {}\n**Score**: {} - {}",
+            self.minute, self.home_score, self.away_score
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchSnapshot {
+    pub minute: u8,
+    pub home_score: u8,
+    pub away_score: u8,
+    pub phase: String,
+    /// Shares of possession, 0.0 to 1.0.
+    pub home_possession: f64,
+    pub away_possession: f64,
+    /// The agent's own side's order during a shootout. The opponent's is never shown.
+    #[serde(default)]
+    pub shootout_order: Option<ShootoutOrder>,
+}
+
+impl fmt::Display for MatchSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "## Match Snapshot\n\n**Minute**: {}\n**Score**: {} - {}\n**Phase**: {}\n**Possession**: Home {:.0}% / Away {:.0}%",
+            self.minute,
+            self.home_score,
+            self.away_score,
+            self.phase,
+            self.home_possession * 100.0,
+            self.away_possession * 100.0,
+        )?;
+        match &self.shootout_order {
+            Some(order) => write!(f, "\n\n{order}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A side's shootout order: everyone eligible, in the order they kick. Only the first `kickers`
+/// kick; the rest sit out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShootoutOrder {
+    pub players: Vec<ShootoutKicker>,
+    pub kickers: u8,
+    /// Whether the order can still be changed: no kick has been taken yet.
+    #[serde(default)]
+    pub changeable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShootoutKicker {
+    pub player_id: String,
+    pub name: String,
+}
+
+impl fmt::Display for ShootoutOrder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "### Your Shootout Order")?;
+        for (place, kicker) in self.players.iter().enumerate() {
+            let sits_out = if place >= usize::from(self.kickers) {
+                " (sits out)"
+            } else {
+                ""
+            };
+            writeln!(
+                f,
+                "{}. {} [{}]{sits_out}",
+                place + 1,
+                kicker.name,
+                kicker.player_id
+            )?;
+        }
+        if self.changeable {
+            write!(
+                f,
+                "Change it with match_set_shootout_order before the first kick."
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundScore {
+    pub home_team: String,
+    pub home_goals: u8,
+    pub away_goals: u8,
+    pub away_team: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchFinished {
+    pub date: String,
+    /// The rest of the round's results, when the round was summarised.
+    pub round_results: Option<Vec<RoundScore>>,
+}
+
+impl fmt::Display for MatchFinished {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "## Match Finished\n\n**Date**: {}", self.date)?;
+        if let Some(results) = &self.round_results {
+            let lines: Vec<String> = results
+                .iter()
+                .map(|r| {
+                    format!(
+                        "- {} {} - {} {}",
+                        r.home_team, r.home_goals, r.away_goals, r.away_team
+                    )
+                })
+                .collect();
+            write!(f, "\n\n### Round Results\n{}", lines.join("\n"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoraleChange {
+    pub player_id: String,
+    pub delta: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamTalkApplied {
+    pub tone: String,
+    pub context: String,
+    pub reactions: Vec<MoraleChange>,
+}
+
+impl fmt::Display for TeamTalkApplied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "## Team Talk Applied\n\n**Tone**: {}\n**Context**: {}\n\n### Player Reactions\n",
+            self.tone, self.context
+        )?;
+        if self.reactions.is_empty() {
+            return write!(f, "No morale changes.");
+        }
+        let lines: Vec<String> = self
+            .reactions
+            .iter()
+            .map(|r| {
+                let emoji = match r.delta {
+                    d if d > 0 => "📈",
+                    d if d < 0 => "📉",
+                    _ => "➡️",
+                };
+                format!("- {} {}: morale {:+}", emoji, r.player_id, r.delta)
+            })
+            .collect();
+        write!(f, "{}", lines.join("\n"))
+    }
+}
+
+/// What a press conference did, once applied: the squad morale it moved and the match it was about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PressConferenceComplete {
+    pub squad_morale_delta: i16,
+    /// How many of the user's players actually ended the conference on a different morale, and
+    /// how many there were. Both effects clamp, so the delta alone says nothing about movement.
+    pub squad_players_moved: usize,
+    pub squad_size: usize,
+    pub home_team_name: String,
+    pub away_team_name: String,
+    pub home_score: u8,
+    pub away_score: u8,
+}
+
+/// The movement count is not decoration: a squad already on 100 absorbs a "+3" entirely, and a
+/// `deflect` on a player question moves one player while leaving the squad delta at zero.
+impl fmt::Display for PressConferenceComplete {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let emoji = match (self.squad_players_moved, self.squad_morale_delta) {
+            (0, _) => "➡️",
+            (_, delta) if delta > 0 => "📈",
+            (_, delta) if delta < 0 => "📉",
+            _ => "➡️",
+        };
+        write!(
+            f,
+            "## Press Conference Complete\n\n{} Squad morale {:+}: {} of {} players moved\n**Match**: {} {} - {} {}",
+            emoji,
+            self.squad_morale_delta,
+            self.squad_players_moved,
+            self.squad_size,
+            self.home_team_name,
+            self.home_score,
+            self.away_score,
+            self.away_team_name
+        )
+    }
+}
+
+tool_results!(
+    LiveMatchStarted,
+    MatchAdvanced,
+    CommandApplied,
+    MatchSnapshot,
+    MatchFinished,
+    TeamTalkApplied,
+    PressConferenceComplete,
+);
+
+#[cfg(test)]
+mod shootout_order_tests {
+    use super::{MatchSnapshot, ShootoutKicker, ShootoutOrder};
+
+    fn snapshot(shootout_order: Option<ShootoutOrder>) -> MatchSnapshot {
+        MatchSnapshot {
+            minute: 120,
+            home_score: 1,
+            away_score: 1,
+            phase: "PenaltyShootout".to_string(),
+            home_possession: 0.5,
+            away_possession: 0.5,
+            shootout_order,
+        }
+    }
+
+    /// Given a match snapshot during a shootout and one outside it,
+    /// When an agent reads each,
+    /// Then the first shows the score and the agent's order, and the second shows the score
+    /// with no order section.
+    #[test]
+    fn a_snapshot_shows_the_shootout_order_only_when_there_is_one() {
+        let order = ShootoutOrder {
+            players: vec![kicker("p1", "Ana")],
+            kickers: 1,
+            changeable: true,
+        };
+        let during = snapshot(Some(order)).to_string();
+        assert!(during.contains("**Score**: 1 - 1"), "{during}");
+        assert!(
+            during.contains("### Your Shootout Order\n1. Ana [p1]\n"),
+            "{during}"
+        );
+        let outside = snapshot(None).to_string();
+        assert!(outside.contains("**Score**: 1 - 1"), "{outside}");
+        assert!(!outside.contains("Shootout Order"), "{outside}");
+    }
+
+    fn kicker(player_id: &str, name: &str) -> ShootoutKicker {
+        ShootoutKicker {
+            player_id: player_id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Given an order of three players of whom two kick,
+    /// When an agent reads it,
+    /// Then the first two are listed to kick and the third is shown sitting out.
+    #[test]
+    fn the_players_past_the_kicker_count_are_shown_sitting_out() {
+        let order = ShootoutOrder {
+            players: vec![kicker("p1", "Ana"), kicker("p2", "Bo"), kicker("p3", "Cy")],
+            kickers: 2,
+            changeable: true,
+        };
+        let text = order.to_string();
+        assert!(text.contains("1. Ana [p1]\n"), "{text}");
+        assert!(text.contains("2. Bo [p2]\n"), "{text}");
+        assert!(text.contains("3. Cy [p3] (sits out)\n"), "{text}");
+    }
+
+    /// Given an agent's order before the first kick and after it,
+    /// When the agent reads each,
+    /// Then only the first says it can be changed, since the engine refuses a change once a kick
+    /// has been taken.
+    #[test]
+    fn the_order_says_it_can_be_changed_only_before_the_first_kick() {
+        let order = |changeable| ShootoutOrder {
+            players: vec![kicker("p1", "Ana")],
+            kickers: 1,
+            changeable,
+        };
+        assert!(order(true).to_string().contains("match_set_shootout_order"));
+        let after = order(false).to_string();
+        assert!(!after.contains("match_set_shootout_order"), "{after}");
+        assert!(after.contains("1. Ana [p1]"), "{after}");
+    }
+}

@@ -1,3 +1,5 @@
+import { routeForActiveCareer } from "../services/careerService";
+import { useManagerDobError } from "../hooks/useManagerDobError";
 import { Suspense, lazy, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -6,32 +8,20 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { useGameStore, GameStateData } from "../store/gameStore";
+import { useGameStore, type GameStateData } from "../store/gameStore";
 import { ThemeToggle } from "../components/ui/ThemeToggle";
-import type {
-  CareerStartPhase,
-  CreateManagerFormData,
-} from "../components/menu/CreateManagerForm";
-import type {
-  PackageInfo,
-  PackageIssue,
-} from "../components/menu/WorldSelect";
+import type { CareerStartPhase, CreateManagerFormData } from "../components/menu/CreateManagerForm";
+import type { PackageInfo, PackageIssue } from "../components/menu/WorldSelect";
 import type { ManagerProfile } from "../components/menu/types";
 import { applyExtraTranslations } from "../lib/extraTranslations";
 import { formatAppVersion } from "../lib/appVersion";
 import { resolveBackendError } from "../utils/backendI18n";
 import { prewarmManagerSquadPortraits } from "../services/portraitService";
-import {
-  FolderOpen,
-  Settings,
-  PlusCircle,
-  ChevronRight,
-  Power,
-  Package,
-} from "lucide-react";
-
-const DISCORD_INVITE_URL = "https://discord.gg/2CXaesaukT";
-const GITHUB_REPO_URL = "https://github.com/openfootmanager/openfootmanager";
+import { FolderOpen, Settings, PlusCircle, ChevronRight, Power, Package, Bug } from "lucide-react";
+import { DISCORD_INVITE_URL, GITHUB_REPO_URL } from "../lib/communityLinks";
+import { ReportBugModal } from "../components/diagnostics/ReportBugModal";
+import { CrashReportPrompt } from "../components/diagnostics/CrashReportPrompt";
+import { showError } from "../lib/errorDialog";
 
 function DiscordIcon({ className }: { className?: string }) {
   return (
@@ -49,12 +39,8 @@ function GithubIcon({ className }: { className?: string }) {
   );
 }
 
-const CreateManagerForm = lazy(
-  () => import("../components/menu/CreateManagerForm"),
-);
-const ProfileSaveConfirm = lazy(
-  () => import("../components/menu/ProfileSaveConfirm"),
-);
+const CreateManagerForm = lazy(() => import("../components/menu/CreateManagerForm"));
+const ProfileSaveConfirm = lazy(() => import("../components/menu/ProfileSaveConfirm"));
 const SavesList = lazy(() => import("../components/menu/SavesList"));
 const PackageBuildStep = lazy(() => import("../components/menu/PackageBuildStep"));
 const GenerationStep = lazy(() => import("../components/menu/WorldSelect"));
@@ -71,10 +57,6 @@ interface SaveEntry {
 }
 
 /**
- * Minimum manager age (years) on create.
- */
-const MANAGER_MINIMUM_AGE = 30;
-/**
  * Earliest year a career may start. Historical world packages recreate eras
  * decades before the modern game, so the floor only keeps the clock inside a
  * sane calendar range. Must match `MIN_START_YEAR` in `commands/game.rs`.
@@ -89,8 +71,6 @@ type StartupOptionsPayload = {
   startPhase: CareerStartPhase;
   historyDepthYears: number;
 };
-
-
 
 function defaultCareerStartYear(): string {
   return String(new Date().getFullYear());
@@ -120,18 +100,13 @@ function initialHistoryDepthYears(): number {
     return DEFAULT_GENERATED_HISTORY_DEPTH_YEARS;
   }
 
-  const storedValue = window.localStorage.getItem(
-    GENERATED_HISTORY_DEPTH_STORAGE_KEY,
-  );
+  const storedValue = window.localStorage.getItem(GENERATED_HISTORY_DEPTH_STORAGE_KEY);
   if (storedValue === null) {
     return DEFAULT_GENERATED_HISTORY_DEPTH_YEARS;
   }
 
   const parsedValue = Number(storedValue);
-  return (
-    normalizeHistoryDepthYears(parsedValue) ??
-    DEFAULT_GENERATED_HISTORY_DEPTH_YEARS
-  );
+  return normalizeHistoryDepthYears(parsedValue) ?? DEFAULT_GENERATED_HISTORY_DEPTH_YEARS;
 }
 
 function buildStartupOptions(
@@ -145,9 +120,7 @@ function buildStartupOptions(
   if (!isCareerStartPhase(formData.startPhase)) {
     return null;
   }
-  const normalizedHistoryDepthYears = normalizeHistoryDepthYears(
-    historyDepthYears,
-  );
+  const normalizedHistoryDepthYears = normalizeHistoryDepthYears(historyDepthYears);
   if (normalizedHistoryDepthYears === null) {
     return null;
   }
@@ -157,91 +130,6 @@ function buildStartupOptions(
     startPhase: formData.startPhase,
     historyDepthYears: normalizedHistoryDepthYears,
   };
-}
-
-type IsoDateParts = {
-  year: number;
-  month: number;
-  day: number;
-};
-
-function parseIsoDateParts(isoDob: string): IsoDateParts | null {
-  if (!isoDob) return null;
-
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDob);
-  if (!match) return null;
-
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const birthDate = new Date(Date.UTC(year, month - 1, day));
-
-  if (
-    Number.isNaN(birthDate.getTime()) ||
-    birthDate.getUTCFullYear() !== year ||
-    birthDate.getUTCMonth() !== month - 1 ||
-    birthDate.getUTCDate() !== day
-  ) {
-    return null;
-  }
-
-  return { year, month, day };
-}
-
-function careerStartReferenceDate(
-  startYear: number,
-  startPhase: CareerStartPhase,
-): Date {
-  const referenceDate = new Date(Date.UTC(startYear, 6, 1));
-  if (startPhase === "midSeason") {
-    referenceDate.setUTCDate(referenceDate.getUTCDate() + 120);
-  }
-  return referenceDate;
-}
-
-function flooredAgeFromIsoDate(
-  isoDob: string,
-  referenceDate: Date,
-): number | null {
-  const parts = parseIsoDateParts(isoDob);
-  if (!parts) return null;
-
-  let age = referenceDate.getUTCFullYear() - parts.year;
-  const hasHadBirthdayThisYear =
-    referenceDate.getUTCMonth() > parts.month - 1 ||
-    (referenceDate.getUTCMonth() === parts.month - 1 &&
-      referenceDate.getUTCDate() >= parts.day);
-
-  if (!hasHadBirthdayThisYear) {
-    age -= 1;
-  }
-  return Number.isNaN(age) ? null : age;
-}
-
-function dobValidationMessage(
-  formData: CreateManagerFormData,
-  historyDepthYears: number,
-  t: (key: string, options?: Record<string, unknown>) => string,
-): string | null {
-  if (!formData.dob) return null;
-
-  if (parseIsoDateParts(formData.dob) === null) {
-    return t("validation.invalidDate");
-  }
-
-  const startupOptions = buildStartupOptions(formData, historyDepthYears);
-  if (!startupOptions) return null;
-
-  const age = flooredAgeFromIsoDate(
-    formData.dob,
-    careerStartReferenceDate(startupOptions.startYear, startupOptions.startPhase),
-  );
-  if (age === null) return t("validation.invalidDate");
-  if (age < MANAGER_MINIMUM_AGE) {
-    return t("validation.minAge", { min: MANAGER_MINIMUM_AGE });
-  }
-  if (age > 99) return t("validation.invalidDob");
-  return null;
 }
 
 const CREATE_MANAGER_FIELD_ORDER = [
@@ -294,13 +182,16 @@ export default function MainMenu() {
   const setGameState = useGameStore((state) => state.setGameState);
   const { t } = useTranslation();
 
-  const [menuState, setMenuState] = useState<"main" | "create" | "packages" | "generation" | "load">("main");
+  const [menuState, setMenuState] = useState<
+    "main" | "create" | "packages" | "generation" | "load"
+  >("main");
   const [showProfileConfirm, setShowProfileConfirm] = useState(false);
   const [saves, setSaves] = useState<SaveEntry[]>([]);
   const [isLoadingSaves, setIsLoadingSaves] = useState(false);
   const [loadingSaveId, setLoadingSaveId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
+  const [reportingBug, setReportingBug] = useState(false);
 
   const [profiles, setProfiles] = useState<ManagerProfile[]>([]);
   const [loadedProfile, setLoadedProfile] = useState<ManagerProfile | null>(null);
@@ -322,15 +213,10 @@ export default function MainMenu() {
   const [activePackageIds, setActivePackageIds] = useState<string[]>([]);
   const [isInstallingPackage, setIsInstallingPackage] = useState(false);
   const [packageStackErrors, setPackageStackErrors] = useState<PackageIssue[]>([]);
-  const [historyDepthYears, setHistoryDepthYears] = useState(
-    initialHistoryDepthYears,
-  );
+  const [historyDepthYears, setHistoryDepthYears] = useState(initialHistoryDepthYears);
 
   useEffect(() => {
-    window.localStorage.setItem(
-      GENERATED_HISTORY_DEPTH_STORAGE_KEY,
-      String(historyDepthYears),
-    );
+    window.localStorage.setItem(GENERATED_HISTORY_DEPTH_STORAGE_KEY, String(historyDepthYears));
   }, [historyDepthYears]);
 
   useEffect(() => {
@@ -343,11 +229,11 @@ export default function MainMenu() {
   useEffect(() => {
     invoke<GameStateData>("get_active_game")
       .then((state) => {
-        const mgrName = `${state.manager.first_name} ${state.manager.last_name}`;
+        const mgrName = state.manager.display_name;
         applyExtraTranslations(state.extra_translations);
         setGameState(state);
         setGameActive(true, mgrName);
-        navigate("/dashboard");
+        return routeForActiveCareer().then(navigate);
       })
       .catch(() => {
         // No active game — stay on menu
@@ -359,11 +245,11 @@ export default function MainMenu() {
     const unlisten = listen("game-state-changed", async () => {
       try {
         const state = await invoke<GameStateData>("get_active_game");
-        const mgrName = `${state.manager.first_name} ${state.manager.last_name}`;
+        const mgrName = state.manager.display_name;
         applyExtraTranslations(state.extra_translations);
         setGameState(state);
         setGameActive(true, mgrName);
-        navigate("/dashboard");
+        navigate(await routeForActiveCareer());
       } catch {
         // Game not actually active — ignore
       }
@@ -373,8 +259,14 @@ export default function MainMenu() {
     };
   }, [setGameState, setGameActive, navigate]);
 
-  /** Same messages as `validateForm` for DOB, so the age rule surfaces as the user edits. */
-  const dobLiveRuleMessage = dobValidationMessage(formData, historyDepthYears, t);
+  /** The backend's answer about the date of birth, shown as the user edits and again on submit. */
+  const dobStartup = buildStartupOptions(formData, historyDepthYears);
+  const dobRuleKey = useManagerDobError(
+    formData.dob,
+    dobStartup?.startYear ?? null,
+    dobStartup?.startPhase ?? null,
+  );
+  const dobLiveRuleMessage = dobRuleKey ? resolveBackendError(dobRuleKey) : null;
   const dobDisplayedError = formErrors.dob || dobLiveRuleMessage;
 
   const updateFormField = (field: keyof CreateManagerFormData, value: string) => {
@@ -421,9 +313,8 @@ export default function MainMenu() {
     if (!formData.dob) {
       errors.dob = t("validation.required", { field: t("createManager.dob") });
     } else {
-      const dobError = dobValidationMessage(formData, historyDepthYears, t);
-      if (dobError) {
-        errors.dob = dobError;
+      if (dobLiveRuleMessage) {
+        errors.dob = dobLiveRuleMessage;
       }
     }
     if (!formData.startYear.trim()) {
@@ -469,7 +360,6 @@ export default function MainMenu() {
     proceedToPackages();
   };
 
-
   const loadInstalledPackages = async () => {
     try {
       const pkgs = await invoke<PackageInfo[]>("list_installed_packages");
@@ -500,7 +390,7 @@ export default function MainMenu() {
       await loadInstalledPackages();
     } catch (err) {
       console.error("Failed to install package:", err);
-      alert(resolveBackendError(err));
+      await showError(t("errors.title"), resolveBackendError(err));
     } finally {
       setIsInstallingPackage(false);
     }
@@ -514,7 +404,7 @@ export default function MainMenu() {
       setPackageStackErrors([]);
     } catch (err) {
       console.error("Failed to uninstall package:", err);
-      alert(resolveBackendError(err));
+      await showError(t("errors.title"), resolveBackendError(err));
     }
   };
 
@@ -529,10 +419,16 @@ export default function MainMenu() {
     const startupOptions = buildStartupOptions(formData, historyDepthYears);
     if (!startupOptions) {
       const validation = validateForm();
+      if (validation.ok) {
+        // The two disagreed: `buildStartupOptions` rejected something `validateForm` does not
+        // check. Today that is only the generated-history depth, which lives on the world screen
+        // and has no field on this form — so bouncing to the create step would put the player in
+        // front of a form with no errors on it and no way to tell what was wrong. Say so instead.
+        await showError(t("errors.title"), t("menu.startupOptionsRejected"));
+        return;
+      }
       setMenuState("create");
-      deferFocusToNextPaint(() =>
-        focusFirstCreateManagerError(validation.errors),
-      );
+      deferFocusToNextPaint(() => focusFirstCreateManagerError(validation.errors));
       return;
     }
 
@@ -551,10 +447,9 @@ export default function MainMenu() {
       navigate("/select-team");
     } catch (error) {
       console.error("Failed to start game:", error);
-      alert(
-        t("menu.failedStartGame", {
-          error: resolveBackendError(error),
-        }),
+      await showError(
+        t("errors.title"),
+        t("menu.failedStartGame", { error: resolveBackendError(error) }),
       );
     } finally {
       setIsStarting(false);
@@ -586,11 +481,14 @@ export default function MainMenu() {
       }
       setGameState(activeGame);
       setGameActive(true, managerName);
-      navigate("/dashboard");
+      navigate(await routeForActiveCareer());
     } catch (error) {
       console.error("Failed to load game:", error);
       setLoadingSaveId(null);
-      alert(t("menu.loadGameFailed", { error: resolveBackendError(error) }));
+      await showError(
+        t("errors.title"),
+        t("menu.loadGameFailed", { error: resolveBackendError(error) }),
+      );
     }
   };
 
@@ -676,9 +574,7 @@ export default function MainMenu() {
       setProfiles((prev) => {
         const exists = prev.some((p) => p.id === saved.id);
         const next =
-          !forceNew && exists
-            ? prev.map((p) => (p.id === saved.id ? saved : p))
-            : [...prev, saved];
+          !forceNew && exists ? prev.map((p) => (p.id === saved.id ? saved : p)) : [...prev, saved];
         return next.sort((a, b) => {
           const aDate = a.last_used_at ?? a.created_at;
           const bDate = b.last_used_at ?? b.created_at;
@@ -731,6 +627,7 @@ export default function MainMenu() {
           {menuState === "main" && (
             <div className="flex flex-col gap-3">
               <button
+                type="button"
                 onClick={() => setMenuState("create")}
                 className="group flex items-center justify-between w-full p-4 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 text-white rounded-xl transition-all duration-300 shadow-md hover:shadow-lg hover:shadow-primary-500/20"
               >
@@ -744,6 +641,7 @@ export default function MainMenu() {
               </button>
 
               <button
+                type="button"
                 onClick={handleOpenLoadMenu}
                 className="group flex items-center justify-between w-full p-4 bg-white dark:bg-navy-700 hover:bg-gray-50 dark:hover:bg-navy-600 text-gray-800 dark:text-gray-200 rounded-xl transition-all duration-300 border border-gray-200 dark:border-navy-600 hover:border-accent-400 dark:hover:border-accent-400 shadow-sm"
               >
@@ -757,6 +655,7 @@ export default function MainMenu() {
               </button>
 
               <button
+                type="button"
                 onClick={() => navigate("/world-editor")}
                 className="group flex items-center justify-between w-full p-4 bg-white dark:bg-navy-700 hover:bg-gray-50 dark:hover:bg-navy-600 text-gray-800 dark:text-gray-200 rounded-xl transition-all duration-300 border border-gray-200 dark:border-navy-600 hover:border-accent-400 dark:hover:border-accent-400 shadow-sm"
               >
@@ -770,6 +669,7 @@ export default function MainMenu() {
               </button>
 
               <button
+                type="button"
                 onClick={() => navigate("/settings", { state: { from: "/" } })}
                 className="group flex items-center justify-between w-full p-4 bg-white dark:bg-navy-700 hover:bg-gray-50 dark:hover:bg-navy-600 text-gray-800 dark:text-gray-200 rounded-xl transition-all duration-300 border border-gray-200 dark:border-navy-600 hover:border-gray-300 dark:hover:border-navy-600 shadow-sm"
               >
@@ -783,6 +683,7 @@ export default function MainMenu() {
               </button>
 
               <button
+                type="button"
                 onClick={() => {
                   void handleExitApp();
                 }}
@@ -826,8 +727,12 @@ export default function MainMenu() {
             <Suspense fallback={null}>
               <ProfileSaveConfirm
                 loadedProfile={loadedProfile}
-                onUpdate={() => { void handleUpdateProfile(); }}
-                onSaveNew={() => { void handleSaveAsNewProfile(); }}
+                onUpdate={() => {
+                  void handleUpdateProfile();
+                }}
+                onSaveNew={() => {
+                  void handleSaveAsNewProfile();
+                }}
                 onSkip={proceedToPackages}
                 onClose={() => setShowProfileConfirm(false)}
               />
@@ -886,7 +791,6 @@ export default function MainMenu() {
           )}
 
           {/* Package Editor */}
-
         </div>
       </div>
 
@@ -896,7 +800,9 @@ export default function MainMenu() {
           type="button"
           aria-label={t("menu.openDiscord")}
           title={t("menu.openDiscord")}
-          onClick={() => { void openUrl(DISCORD_INVITE_URL); }}
+          onClick={() => {
+            void openUrl(DISCORD_INVITE_URL);
+          }}
           className="p-1.5 rounded-lg text-gray-400 dark:text-gray-600 hover:text-[#5865F2] dark:hover:text-[#7289DA] hover:bg-gray-100 dark:hover:bg-navy-700 transition-colors"
         >
           <DiscordIcon className="w-5 h-5" />
@@ -905,10 +811,21 @@ export default function MainMenu() {
           type="button"
           aria-label={t("menu.openGithub")}
           title={t("menu.openGithub")}
-          onClick={() => { void openUrl(GITHUB_REPO_URL); }}
+          onClick={() => {
+            void openUrl(GITHUB_REPO_URL);
+          }}
           className="p-1.5 rounded-lg text-gray-400 dark:text-gray-600 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-navy-700 transition-colors"
         >
           <GithubIcon className="w-5 h-5" />
+        </button>
+        <button
+          type="button"
+          aria-label={t("menu.reportBug")}
+          title={t("menu.reportBug")}
+          onClick={() => setReportingBug(true)}
+          className="p-1.5 rounded-lg text-gray-400 dark:text-gray-600 hover:text-primary-600 dark:hover:text-primary-400 hover:bg-gray-100 dark:hover:bg-navy-700 transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 dark:focus:ring-offset-navy-900"
+        >
+          <Bug className="w-5 h-5" />
         </button>
       </div>
 
@@ -916,6 +833,9 @@ export default function MainMenu() {
       <div className="absolute bottom-4 right-4 text-gray-400 dark:text-gray-600 text-xs font-heading uppercase tracking-widest transition-colors">
         {formatAppVersion()}
       </div>
+
+      <CrashReportPrompt onReport={() => setReportingBug(true)} />
+      {reportingBug && <ReportBugModal onClose={() => setReportingBug(false)} />}
     </div>
   );
 }

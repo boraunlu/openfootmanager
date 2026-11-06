@@ -1,12 +1,7 @@
 import { Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import type {
-  PlayerData,
-  ScoutingAssignment,
-  StaffData,
-  TeamData,
-} from "../../store/gameStore";
+import type { PlayerData, ScoutingAssignment, StaffData, TeamData } from "../../store/gameStore";
 import { getTeamName } from "../../lib/helpers";
 import ContextMenu from "../ContextMenu";
 import {
@@ -15,6 +10,7 @@ import {
 } from "../playerActions/playerContextMenuItems";
 import { translatePositionLabel } from "../squad/SquadTab.helpers";
 import { Card, CardBody, CardHeader } from "../ui";
+import { naturalPositionOf } from "../../lib/positions";
 
 interface ScoutingAssignmentsListProps {
   assignments: ScoutingAssignment[];
@@ -58,15 +54,11 @@ export default function ScoutingAssignmentsList({
             const contextItems = [];
 
             if (onSelectPlayer) {
-              contextItems.push(
-                buildViewProfileMenuItem(t, () => onSelectPlayer(player.id)),
-              );
+              contextItems.push(buildViewProfileMenuItem(t, () => onSelectPlayer(player.id)));
             }
 
             if (player.team_id && onSelectTeam) {
-              contextItems.push(
-                buildViewTeamMenuItem(t, () => onSelectTeam(player.team_id!)),
-              );
+              contextItems.push(buildViewTeamMenuItem(t, () => onSelectTeam(player.team_id!)));
             }
 
             const row = (
@@ -77,19 +69,20 @@ export default function ScoutingAssignmentsList({
               >
                 <div className="flex-1 min-w-0">
                   <button
+                    type="button"
                     onClick={() => onSelectPlayer?.(player.id)}
                     className="font-heading font-bold text-sm text-gray-800 dark:text-gray-100 hover:text-primary-500 transition-colors truncate block"
                   >
                     {player.full_name}
                   </button>
                   <p className="text-xs text-gray-500 dark:text-gray-400">
-                    {translatePositionLabel(t, player.natural_position || player.position)} · {team}
+                    {translatePositionLabel(t, naturalPositionOf(player))} · {team}
                   </p>
                 </div>
                 <div className="text-right">
                   <p className="text-xs text-gray-500 dark:text-gray-400">
                     {t("scouting.scoutLabel", {
-                      name: `${scout.first_name} ${scout.last_name}`,
+                      name: scout.display_name,
                     })}
                   </p>
                   <div className="flex items-center gap-1.5 justify-end mt-0.5">

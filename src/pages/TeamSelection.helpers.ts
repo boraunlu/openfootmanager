@@ -1,35 +1,28 @@
 import type { TFunction } from "i18next";
 
-import {
-  GameStateData,
-  LeagueData,
-  PlayerData,
-  WorldRegionData,
-} from "../store/gameStore";
-import { getPlayerOvr } from "../lib/helpers";
-import { buildRegionLabel, inferRegionId } from "../lib/teamRegions";
+import type { GameStateData, LeagueData, PlayerData, WorldRegionData } from "../store/gameStore";
+import type { ClubSquadRatings } from "../services/teamsService";
+import { buildRegionLabel } from "../lib/teamRegions";
 
-export function competitionScopeLabel(
-  t: TFunction,
-  scope?: string,
-): string | null {
+export function competitionScopeLabel(t: TFunction, scope?: string): string | null {
   if (!scope) {
     return null;
   }
   return t(`teamSelect.scopes.${scope}`, { defaultValue: scope });
 }
 
-export function competitionKindLabel(
-  t: TFunction,
-  kind?: string,
-): string | null {
+export function competitionKindLabel(t: TFunction, kind?: string): string | null {
   if (!kind) {
     return null;
   }
   return t(`teamSelect.kinds.${kind}`, { defaultValue: kind });
 }
 
-export function buildFallbackRegions(
+/**
+ * The regions a new career can be scoped to: each region a competition declares for a club's
+ * country, with the countries it covers. The game itself carries no region list.
+ */
+export function regionsFromCompetitions(
   t: TFunction,
   gameState: GameStateData,
   competitions: LeagueData[],
@@ -37,9 +30,11 @@ export function buildFallbackRegions(
   const byRegion = new Map<string, Set<string>>();
 
   for (const team of gameState.teams) {
-    const regionId =
-      competitions.find((competition) => competition.country_id === team.country)?.region_id ??
-      inferRegionId(team.country);
+    // Only a region an authored competition declares: guessing one from the country code filed
+    // every club the guess did not know under Europe.
+    const regionId = competitions.find(
+      (competition) => competition.country_id === team.country,
+    )?.region_id;
     if (!regionId) {
       continue;
     }
@@ -69,10 +64,7 @@ export function competitionRequiredRegions(competition: LeagueData): string[] {
   return Array.from(regionIds).sort();
 }
 
-export function teamCompetitions(
-  teamId: string,
-  competitions: LeagueData[],
-): LeagueData[] {
+export function teamCompetitions(teamId: string, competitions: LeagueData[]): LeagueData[] {
   return competitions.filter(
     (competition) =>
       competition.participant_ids?.includes(teamId) ??
@@ -82,17 +74,26 @@ export function teamCompetitions(
   );
 }
 
-export function likelyXi(players: PlayerData[]): PlayerData[] {
-  return [...players]
-    .sort((left, right) => getPlayerOvr(right) - getPlayerOvr(left))
+/**
+ * A club's likely starting eleven: its best-rated players, in the order the backend rated them
+ * (`get_team_selection_ratings`). A player the game state no longer lists is left out.
+ */
+export function likelyXi(
+  club: ClubSquadRatings | undefined,
+  playersById: Map<string, PlayerData>,
+): PlayerData[] {
+  return (club?.players ?? [])
+    .flatMap((rated) => {
+      const player = playersById.get(rated.player_id);
+      return player ? [player] : [];
+    })
     .slice(0, 11);
 }
 
 export function sortCompetitions(competitions: LeagueData[]): LeagueData[] {
   return [...competitions].sort(
     (left, right) =>
-      (left.priority ?? Number.MAX_SAFE_INTEGER) -
-        (right.priority ?? Number.MAX_SAFE_INTEGER) ||
+      (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER) ||
       left.name.localeCompare(right.name),
   );
 }

@@ -1,13 +1,13 @@
 import type { DragEvent, JSX } from "react";
-import {
-  Star,
-} from "lucide-react";
+import { Star } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { getPlayerOvr } from "../../lib/helpers";
+import type { PositionTable } from "../../lib/positionTable";
+import { usePositionTable } from "../../hooks/usePositionGroups";
 import type { PlayerData, TeamMatchRolesData } from "../../store/gameStore";
 import ContextMenu from "../ContextMenu";
-import { Badge, Card, PitchToken, Select } from "../ui";
+import { Badge, Card, PitchToken, Select, usePitchTokenFocus } from "../ui";
 import {
   isPlayerExactForSlot,
   isPlayerOutOfPosition,
@@ -31,10 +31,7 @@ interface TacticsPitchProps {
   comparePlayerId: string | null;
   hoveredSlot: number | null;
   onAssignBestFit?: (playerId: string) => void;
-  onAssignMatchRole?: (
-    role: keyof TeamMatchRolesData,
-    playerId: string,
-  ) => void;
+  onAssignMatchRole?: (role: keyof TeamMatchRolesData, playerId: string) => void;
   onClearSelection: () => void;
   onDemoteStarter?: (playerId: string) => void;
   onDragStart: (
@@ -64,7 +61,11 @@ interface RoleMarker {
   toneClassName: string;
 }
 
-function getFitTone(player: PlayerData | null, slotPosition: string): FitTone {
+function getFitTone(
+  player: PlayerData | null,
+  slotPosition: string,
+  positionTable: PositionTable,
+): FitTone {
   if (!player) {
     return "empty";
   }
@@ -73,7 +74,7 @@ function getFitTone(player: PlayerData | null, slotPosition: string): FitTone {
     return "exact";
   }
 
-  if (isPlayerOutOfPosition(player, slotPosition)) {
+  if (isPlayerOutOfPosition(player, slotPosition, positionTable)) {
     return "out";
   }
 
@@ -141,14 +142,7 @@ function getPitchMarkerClassName(options: {
   selectedPlayerId: string | null;
   slot: TacticsPitchSlot;
 }): string {
-  const {
-    comparePlayerId,
-    draggedPlayerId,
-    hoveredSlot,
-    player,
-    selectedPlayerId,
-    slot,
-  } = options;
+  const { comparePlayerId, draggedPlayerId, hoveredSlot, player, selectedPlayerId, slot } = options;
   const isDragged = draggedPlayerId === player.id;
   const isSelected = selectedPlayerId === player.id;
   const isComparing = comparePlayerId === player.id;
@@ -176,7 +170,6 @@ function getPitchMarkerClassName(options: {
   return `${base} hover:-translate-y-[54%]`;
 }
 
-
 function getSlotTargetClassName(isHovered: boolean, hasPlayer: boolean): string {
   if (isHovered) {
     return "absolute z-10 h-[4.5rem] w-[4.5rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-primary-300 bg-primary-500/10";
@@ -197,27 +190,37 @@ function getPitchDisplayName(player: PlayerData): string {
 // Team attacks upward (toward y=4). Defensive line sits in the lower half.
 function getDefensiveLineY(line: TacticsPhaseSettings["defensive_line"]): number {
   switch (line) {
-    case "High": return 77;
-    case "Low": return 105;
-    case "VeryLow": return 118;
-    default: return 91; // Medium
+    case "High":
+      return 77;
+    case "Low":
+      return 105;
+    case "VeryLow":
+      return 118;
+    default:
+      return 91; // Medium
   }
 }
 
 function getPressingZoneOpacity(intensity: TacticsPhaseSettings["pressing_intensity"]): number {
   switch (intensity) {
-    case "Aggressive": return 0.13;
-    case "Passive": return 0;
-    default: return 0.07; // Medium
+    case "Aggressive":
+      return 0.13;
+    case "Passive":
+      return 0;
+    default:
+      return 0.07; // Medium
   }
 }
 
 function getPressingZoneTop(intensity: TacticsPhaseSettings["pressing_intensity"]): number {
   // Aggressive: press from opponent's half; Medium: press from 35m line; Passive: no zone
   switch (intensity) {
-    case "Aggressive": return 4;
-    case "Passive": return 70;
-    default: return 35;
+    case "Aggressive":
+      return 4;
+    case "Passive":
+      return 70;
+    default:
+      return 35;
   }
 }
 
@@ -251,7 +254,6 @@ function TacticalOverlays({ phase }: { phase: TacticsPhaseSettings }): JSX.Eleme
         strokeDasharray="3,2"
         pointerEvents="none"
       />
-
     </>
   );
 }
@@ -283,6 +285,8 @@ export default function TacticsPitch({
   selectedPlayerId,
 }: TacticsPitchProps): JSX.Element {
   const { t } = useTranslation();
+  const positionTable = usePositionTable();
+  const { focusedPlayerId, focusToken, blurToken, getDescriptionId } = usePitchTokenFocus();
   const draggedPlayerId = dragState?.playerId ?? null;
 
   return (
@@ -293,15 +297,10 @@ export default function TacticsPitch({
             <Star className="h-4 w-4 fill-current text-accent-400" />
             {t("preMatch.startingXI")} - {formation}
           </h3>
-          <p className="mt-0.5 text-xs text-gray-400">
-            {t("tactics.pitchInteractionHint")}
-          </p>
+          <p className="mt-0.5 text-xs text-gray-400">{t("tactics.pitchInteractionHint")}</p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <Badge
-            variant={outOfPositionCount > 0 ? "danger" : "success"}
-            size="sm"
-          >
+          <Badge variant={outOfPositionCount > 0 ? "danger" : "success"} size="sm">
             {outOfPositionCount} {t("squad.outOfPosition")}
           </Badge>
           <span className="rounded-full bg-success-500/15 px-2.5 py-1 text-[10px] font-heading font-bold uppercase tracking-widest text-success-300">
@@ -432,7 +431,7 @@ export default function TacticsPitch({
 
             {pitchSlots.map((slot) => {
               const player = slot.player;
-              const fitTone = getFitTone(player, slot.position);
+              const fitTone = getFitTone(player, slot.position, positionTable);
               const isHovered = hoveredSlot === slot.index;
 
               return (
@@ -480,6 +479,9 @@ export default function TacticsPitch({
                           <div
                             role="button"
                             tabIndex={0}
+                            aria-describedby={getDescriptionId(player.id)}
+                            onFocus={() => focusToken(player.id)}
+                            onBlur={blurToken}
                             draggable
                             data-testid={`pitch-player-${player.id}`}
                             onClick={() => onLineupPlayerClick(player.id, "xi")}
@@ -492,9 +494,7 @@ export default function TacticsPitch({
                             onDragOver={(event) => onSlotDragOver(event, slot.index)}
                             onDragLeave={() => onSlotDragLeave(slot.index)}
                             onDrop={(event) => onSlotDrop(event, slot.index)}
-                            onDragStart={(event) =>
-                              onDragStart(event, player.id, "xi", slot.index)
-                            }
+                            onDragStart={(event) => onDragStart(event, player.id, "xi", slot.index)}
                             onDragEnd={onDragEnd}
                             className={getPitchMarkerClassName({
                               comparePlayerId,
@@ -506,6 +506,8 @@ export default function TacticsPitch({
                             })}
                           >
                             <PitchToken
+                              descriptionId={getDescriptionId(player.id)}
+                              focused={focusedPlayerId === player.id}
                               name={getPitchDisplayName(player)}
                               positionAbbr={translatePositionAbbreviation(t, slot.position)}
                               position={slot.position}
@@ -568,7 +570,6 @@ export default function TacticsPitch({
             })}
           </div>
         </div>
-
       </div>
     </Card>
   );

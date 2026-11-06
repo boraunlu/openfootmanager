@@ -14,6 +14,8 @@ import {
   resolveMessageAction,
 } from "../../services/inboxService";
 import { resolveBackendText, resolveMessage } from "../../utils/backendI18n";
+import { gameKnowledgeRevision } from "../../lib/playerKnowledge";
+import ArchivedMessages from "./ArchivedMessages";
 import InboxDeleteConfirmModal from "./InboxDeleteConfirmModal";
 import InboxMessageDetailPane from "./InboxMessageDetailPane";
 import InboxMessageListPane from "./InboxMessageListPane";
@@ -25,6 +27,7 @@ import {
   isNavigateAction,
   type MessageSortOrder,
   sortInboxMessages,
+  toggleVisibleSelection,
 } from "./inboxHelpers";
 
 const EMPTY_MESSAGES: MessageData[] = [];
@@ -50,6 +53,7 @@ export default function InboxTab({
   const clockDate = sessionState?.clock.current_date ?? gameState?.clock.current_date ?? null;
   const currentTeamId = sessionState?.manager?.team_id ?? gameState?.manager?.team_id ?? null;
   const currentTeamName = sessionState?.team?.name ?? null;
+  const knowledgeRevision = gameState ? gameKnowledgeRevision(gameState) : "no-game";
 
   useEffect(() => {
     let cancelled = false;
@@ -58,7 +62,9 @@ export default function InboxTab({
         if (!cancelled && Array.isArray(msgs)) setFetchedMessages(msgs);
       })
       .catch(() => {});
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [clockDate]);
 
   const messages = fetchedMessages ?? gameState?.messages ?? EMPTY_MESSAGES;
@@ -70,8 +76,7 @@ export default function InboxTab({
   const [sortOrder, setSortOrder] = useState<MessageSortOrder>("newest");
   const [bulkSelectionEnabled, setBulkSelectionEnabled] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
-  const [deleteModalState, setDeleteModalState] =
-    useState<DeleteModalState>(null);
+  const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
   const [effectFeedback, setEffectFeedback] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const inboxSeqRef = useRef(0);
@@ -87,17 +92,10 @@ export default function InboxTab({
     return counts;
   }, [allMessages]);
 
-  const categories = useMemo(
-    () => Array.from(categoryCounts.keys()),
-    [categoryCounts],
-  );
+  const categories = useMemo(() => Array.from(categoryCounts.keys()), [categoryCounts]);
 
   const filteredMessages = useMemo(
-    () =>
-      sortInboxMessages(
-        getFilteredMessages(allMessages, categoryFilter),
-        sortOrder,
-      ),
+    () => sortInboxMessages(getFilteredMessages(allMessages, categoryFilter), sortOrder),
     [allMessages, categoryFilter, sortOrder],
   );
 
@@ -107,19 +105,19 @@ export default function InboxTab({
   );
 
   const selectedMessage = useMemo(
-    () =>
-      allMessages.find((message) => message.id === selectedMessageId) ?? null,
+    () => allMessages.find((message) => message.id === selectedMessageId) ?? null,
     [allMessages, selectedMessageId],
   );
 
-  useEffect(() => {
-    const availableMessageIds = new Set(
-      allMessages.map((message) => message.id),
-    );
+  // Only what is on screen counts as selected: a message can leave the view without the filter
+  // changing (reading one in the Unread view), and Delete must never remove it unseen.
+  const visibleSelectedMessageIds = useMemo(() => {
+    const visibleMessageIds = new Set(filteredMessages.map((message) => message.id));
+    return selectedMessageIds.filter((messageId) => visibleMessageIds.has(messageId));
+  }, [filteredMessages, selectedMessageIds]);
 
-    setSelectedMessageIds((currentIds) =>
-      currentIds.filter((messageId) => availableMessageIds.has(messageId)),
-    );
+  useEffect(() => {
+    const availableMessageIds = new Set(allMessages.map((message) => message.id));
 
     if (selectedMessageId && !availableMessageIds.has(selectedMessageId)) {
       setSelectedMessageId(null);
@@ -134,9 +132,7 @@ export default function InboxTab({
 
   async function handleSelectMessage(messageId: string): Promise<void> {
     setSelectedMessageId(messageId);
-    const message = allMessages.find(
-      (currentMessage) => currentMessage.id === messageId,
-    );
+    const message = allMessages.find((currentMessage) => currentMessage.id === messageId);
 
     if (message && !message.read) {
       const seq = ++inboxSeqRef.current;
@@ -145,7 +141,7 @@ export default function InboxTab({
         if (seq !== inboxSeqRef.current) return;
         setFetchedMessages(updated);
         useGameStore.getState().setMessages(updated);
-      } catch { }
+      } catch {}
     }
   }
 
@@ -154,17 +150,11 @@ export default function InboxTab({
     actionId: string,
     optionId?: string,
   ): Promise<void> {
-    const message = allMessages.find(
-      (currentMessage) => currentMessage.id === messageId,
-    );
-    const action = message?.actions.find(
-      (currentAction) => currentAction.id === actionId,
-    );
+    const message = allMessages.find((currentMessage) => currentMessage.id === messageId);
+    const action = message?.actions.find((currentAction) => currentAction.id === actionId);
 
     if (action && isNavigateAction(action.action_type)) {
-      const navigationTarget = getNavigationTarget(
-        action.action_type.NavigateTo.route,
-      );
+      const navigationTarget = getNavigationTarget(action.action_type.NavigateTo.route);
       onNavigate?.(navigationTarget.tab, navigationTarget.context);
 
       if (!navigationTarget.shouldResolveAction) {
@@ -181,11 +171,8 @@ export default function InboxTab({
       if (result.effect || result.effect_i18n_key) {
         const effectParams = result.effect_i18n_params
           ? Object.fromEntries(
-            Object.entries(result.effect_i18n_params).map(([key, value]) => [
-              key,
-              String(value),
-            ]),
-          )
+              Object.entries(result.effect_i18n_params).map(([key, value]) => [key, String(value)]),
+            )
           : undefined;
         const resolvedEffect = resolveBackendText(
           result.effect_i18n_key ?? undefined,
@@ -194,7 +181,7 @@ export default function InboxTab({
         );
         setEffectFeedback(resolvedEffect);
       }
-    } catch { }
+    } catch {}
   }
 
   async function handleMarkAllRead(): Promise<void> {
@@ -204,7 +191,7 @@ export default function InboxTab({
       if (seq !== inboxSeqRef.current) return;
       setFetchedMessages(updated);
       useGameStore.getState().setMessages(updated);
-    } catch { }
+    } catch {}
   }
 
   async function handleClearOld(): Promise<void> {
@@ -215,7 +202,7 @@ export default function InboxTab({
       setFetchedMessages(updated);
       useGameStore.getState().setMessages(updated);
       setSelectedMessageId(null);
-    } catch { }
+    } catch {}
   }
 
   async function handleConfirmDelete(): Promise<void> {
@@ -279,6 +266,15 @@ export default function InboxTab({
     });
   }
 
+  function handleToggleSelectAll(): void {
+    setSelectedMessageIds((currentIds) =>
+      toggleVisibleSelection(
+        currentIds,
+        filteredMessages.map((message) => message.id),
+      ),
+    );
+  }
+
   function handleToggleMessageSelection(messageId: string): void {
     setSelectedMessageIds((currentIds) => {
       if (currentIds.includes(messageId)) {
@@ -290,13 +286,13 @@ export default function InboxTab({
   }
 
   function handleRequestBulkDelete(): void {
-    if (selectedMessageIds.length === 0) {
+    if (visibleSelectedMessageIds.length === 0) {
       return;
     }
 
     setDeleteModalState({
       mode: "bulk",
-      messageIds: selectedMessageIds,
+      messageIds: visibleSelectedMessageIds,
     });
   }
 
@@ -320,15 +316,19 @@ export default function InboxTab({
     });
   }
 
+  // A new view starts with nothing ticked, so Delete only ever removes what is on screen.
   function handleShowAll(): void {
+    setSelectedMessageIds([]);
     setCategoryFilter(null);
   }
 
   function handleShowUnread(): void {
+    setSelectedMessageIds([]);
     setCategoryFilter("__unread");
   }
 
   function handleToggleCategory(category: string): void {
+    setSelectedMessageIds([]);
     setCategoryFilter((currentFilter) => {
       if (currentFilter === category) {
         return null;
@@ -354,7 +354,14 @@ export default function InboxTab({
         categories={categories}
         categoryCounts={categoryCounts}
         categoryFilter={categoryFilter}
-        selectedMessageCount={selectedMessageIds.length}
+        selectedMessageCount={visibleSelectedMessageIds.length}
+        visibleMessageCount={filteredMessages.length}
+        allVisibleSelected={
+          filteredMessages.length > 0 &&
+          visibleSelectedMessageIds.length === filteredMessages.length
+        }
+        someVisibleSelected={visibleSelectedMessageIds.length > 0}
+        onToggleSelectAll={handleToggleSelectAll}
         sortOrder={sortOrder}
         unreadCount={unreadCount}
         onClearOld={() => {
@@ -397,6 +404,7 @@ export default function InboxTab({
             currentTeamId={currentTeamId}
             currentTeamName={currentTeamName}
             language={i18n.language}
+            knowledgeRevision={knowledgeRevision}
             selectedMessage={selectedMessage}
             onAction={(messageId, actionId, optionId) => {
               void handleAction(messageId, actionId, optionId);
@@ -407,6 +415,8 @@ export default function InboxTab({
           />
         </div>
       </div>
+
+      <ArchivedMessages />
 
       <InboxDeleteConfirmModal
         deleteModalState={deleteModalState}

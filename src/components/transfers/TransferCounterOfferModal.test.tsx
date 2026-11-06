@@ -1,11 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type {
-  PlayerData,
-  TeamData,
-  TransferOfferData,
-} from "../../store/gameStore";
+import type { PlayerData, TeamData, TransferOfferData } from "../../store/gameStore";
 import type { TransferNegotiationResponseData } from "../../services/transfersService";
 import TransferCounterOfferModal from "./TransferCounterOfferModal";
 
@@ -194,7 +190,33 @@ describe("TransferCounterOfferModal", () => {
     expect(screen.getByText("Recent exchange")).toBeInTheDocument();
     expect(screen.getByText("Counter countered")).toBeInTheDocument();
     expect(screen.getByText("Negotiation warning")).toBeInTheDocument();
-    expect(screen.getByText("€1,600,000")).toBeInTheDocument();
+    // Once in the exchange history (their current offer), once as the typed counter amount.
+    expect(screen.getAllByText("€1,600,000")).toHaveLength(2);
+  });
+
+  /**
+   * Given a club's offer of €1,400,000 being answered
+   * When the counter-offer dialog opens
+   * Then the offer is shown exactly, not as "€1.4M", since the counter is chosen against it.
+   */
+  it("shows the offer being answered exactly", () => {
+    render(
+      <TransferCounterOfferModal
+        counterTarget={createCounterTarget()}
+        teams={[createTeam(), createTeam({ id: "team-2", name: "Buyer FC" })]}
+        counterAmount=""
+        onCounterAmountChange={vi.fn()}
+        counterFeedback={null}
+        activeCounterOffer={createOffer()}
+        counterResult={null}
+        counterError={null}
+        counterLoading={false}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Current offer €1,400,000/)).toBeInTheDocument();
   });
 
   it("wires counter amount, submit, and close interactions through props", () => {
@@ -227,5 +249,65 @@ describe("TransferCounterOfferModal", () => {
     expect(onCounterAmountChange).toHaveBeenCalledWith("1800000");
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Given a counter target whose `position` is the legacy bucket and whose natural position is granular
+   * When the counter-offer modal opens
+   * Then the badge reads the granular position.
+   */
+  it("badges the player by their granular natural position", () => {
+    render(
+      <TransferCounterOfferModal
+        counterTarget={{
+          ...createCounterTarget(),
+          player: createPlayer({ position: "Defender", natural_position: "LeftBack" }),
+        }}
+        teams={[createTeam(), createTeam({ id: "team-2", name: "Buyer FC" })]}
+        counterAmount="1600000"
+        onCounterAmountChange={vi.fn()}
+        counterFeedback={null}
+        activeCounterOffer={createOffer()}
+        counterResult={null}
+        counterError={null}
+        counterLoading={false}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("common.posAbbr.LeftBack")).toBeInTheDocument();
+  });
+
+  /**
+   * Given a club's offer being answered
+   * When the counter-offer dialog opens, and the player presses Escape
+   * Then it is a dialog named by its heading with the focus inside it (it used to leave the focus
+   *      on the transfers list behind, with no Escape and no Tab trap), and Escape closes it
+   */
+  it("is a named dialog that takes the focus and closes on Escape", () => {
+    const onClose = vi.fn();
+    render(
+      <TransferCounterOfferModal
+        counterTarget={createCounterTarget()}
+        teams={[createTeam(), createTeam({ id: "team-2", name: "Buyer FC" })]}
+        counterAmount=""
+        onCounterAmountChange={vi.fn()}
+        counterFeedback={null}
+        activeCounterOffer={createOffer()}
+        counterResult={null}
+        counterError={null}
+        counterLoading={false}
+        onSubmit={vi.fn()}
+        onClose={onClose}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Counter Offer" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });

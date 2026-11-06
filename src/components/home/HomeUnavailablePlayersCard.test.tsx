@@ -82,10 +82,7 @@ function createPlayer(overrides: Partial<PlayerData> = {}): PlayerData {
 describe("HomeUnavailablePlayersCard", () => {
   it("renders unavailable players with injury details", () => {
     render(
-      <HomeUnavailablePlayersCard
-        players={[createPlayer()]}
-        resolveInjuryName={(name) => name}
-      />,
+      <HomeUnavailablePlayersCard players={[createPlayer()]} resolveInjuryName={(name) => name} />,
     );
 
     expect(screen.getByText("Unavailable Players")).toBeInTheDocument();
@@ -93,5 +90,21 @@ describe("HomeUnavailablePlayersCard", () => {
     expect(screen.getByText("Injured")).toBeInTheDocument();
     expect(screen.getByText(/Hamstring/)).toBeInTheDocument();
     expect(screen.getByText(/6 days out/)).toBeInTheDocument();
+  });
+
+  /**
+   * Given an injured player whose `position` is the legacy bucket and whose natural position is granular
+   * When the card lists the unavailable players
+   * Then the position label is the granular one.
+   */
+  it("labels the player by their granular natural position", () => {
+    render(
+      <HomeUnavailablePlayersCard
+        players={[createPlayer({ position: "Defender", natural_position: "LeftBack" })]}
+        resolveInjuryName={(name) => name}
+      />,
+    );
+
+    expect(screen.getByText("common.positions.LeftBack")).toBeInTheDocument();
   });
 });

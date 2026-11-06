@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { GameStateData, ManagerData, PlayerData, TeamData } from "../../store/gameStore";
 import type { SeasonAwardsData } from "../../store/types";
 import AwardsCeremonyScreen from "./AwardsCeremonyScreen";
+import { createSeasonContext } from "../../test-utils/factories";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -122,6 +123,7 @@ function createManager(overrides: Partial<ManagerData> = {}): ManagerData {
     id: "manager-1",
     first_name: "Jane",
     last_name: "Doe",
+    display_name: "Jane Doe",
     date_of_birth: "1980-01-01",
     nationality: "ENG",
     football_nation: "ENG",
@@ -144,6 +146,7 @@ function createManager(overrides: Partial<ManagerData> = {}): ManagerData {
 
 function createGameState(): GameStateData {
   return {
+    season_context: createSeasonContext(),
     clock: {
       current_date: "2026-08-10T00:00:00Z",
       start_date: "2026-07-01T00:00:00Z",
@@ -254,5 +257,30 @@ describe("AwardsCeremonyScreen", () => {
     expect(screen.queryByRole("button", { name: "Victor Vale" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Alpha FC" })).not.toBeInTheDocument();
     expect(screen.getAllByText("Victor Vale").length).toBeGreaterThan(0);
+  });
+  // Given an unrated season with an empty POTY list, when the ceremony renders, then its card and badge are hidden.
+  it("hides the empty player-of-year card and badge while keeping other winners", () => {
+    const awards = createAwards();
+    awards.player_of_year = [];
+    render(
+      <AwardsCeremonyScreen
+        season={2026}
+        leagueName="League"
+        gameState={createGameState()}
+        awards={awards}
+      />,
+    );
+    expect(screen.queryByText("Player of the Year")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Golden Boot")).toHaveLength(2);
+    expect(screen.getAllByText("Manager of the Season")).toHaveLength(2);
+    expect(screen.queryByText("Rating")).not.toBeInTheDocument();
+  });
+
+  // Given an older news article without a POTY winner, when opened, then it has no empty rating card.
+  it("hides the player-of-year card when no awards or article winner exist", () => {
+    render(
+      <AwardsCeremonyScreen season={2026} leagueName="League" gameState={createGameState()} />,
+    );
+    expect(screen.queryByText("Player of the Year")).not.toBeInTheDocument();
   });
 });

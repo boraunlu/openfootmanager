@@ -1,12 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type {
-  PlayerData,
-  ScoutingAssignment,
-  StaffData,
-  TeamData,
-} from "../../store/gameStore";
+import type { PlayerData, ScoutingAssignment, StaffData, TeamData } from "../../store/gameStore";
 import ScoutingAssignmentsList from "./ScoutingAssignmentsList";
 
 vi.mock("react-i18next", () => ({
@@ -129,6 +124,7 @@ function createScout(overrides: Partial<StaffData> = {}): StaffData {
     id: "staff-1",
     first_name: "Sam",
     last_name: "Scout",
+    display_name: "Sam Scout",
     date_of_birth: "1985-01-01",
     nationality: "GB",
     role: "Scout",
@@ -146,9 +142,7 @@ function createScout(overrides: Partial<StaffData> = {}): StaffData {
   };
 }
 
-function createAssignment(
-  overrides: Partial<ScoutingAssignment> = {},
-): ScoutingAssignment {
+function createAssignment(overrides: Partial<ScoutingAssignment> = {}): ScoutingAssignment {
   return {
     id: "assignment-1",
     scout_id: "staff-1",
@@ -206,5 +200,30 @@ describe("ScoutingAssignmentsList", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "View team" }));
 
     expect(onSelectTeam).toHaveBeenCalledWith("team-2");
+  });
+
+  /**
+   * Given a scout known as "Cafu" (Marcos Evangelista) on an assignment
+   * When the assignments list is drawn
+   * Then the scout is named by the backend's display name.
+   */
+  it("names the scout by their display name", () => {
+    render(
+      <ScoutingAssignmentsList
+        assignments={[createAssignment()]}
+        scouts={[
+          createScout({ first_name: "Marcos", last_name: "Evangelista", display_name: "Cafu" }),
+        ]}
+        players={[createPlayer()]}
+        teams={[
+          createTeam(),
+          createTeam({ id: "team-2", name: "Beta FC", manager_id: "manager-2" }),
+        ]}
+        onSelectPlayer={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Scout Cafu")).toBeInTheDocument();
+    expect(screen.queryByText(/Marcos Evangelista/)).not.toBeInTheDocument();
   });
 });

@@ -1,10 +1,14 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { GameStateData } from "../store/gameStore";
+import type { LeagueData, SeasonContextData } from "../store/types";
 import { applyExtraTranslations } from "../lib/extraTranslations";
 import Dashboard from "./Dashboard";
+import i18n, { i18nReady, SUPPORTED_LANGUAGES } from "../i18n";
+import { useTranslation } from "react-i18next";
+import { createSeasonContext } from "../test-utils/factories";
 
-const { listenMock, registeredEventHandlers } = vi.hoisted(() => {
+const { listenMock, registeredEventHandlers, matchConfirmState } = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
 
   return {
@@ -13,6 +17,7 @@ const { listenMock, registeredEventHandlers } = vi.hoisted(() => {
       return Promise.resolve(vi.fn());
     }),
     registeredEventHandlers: handlers,
+    matchConfirmState: { visible: false },
   };
 });
 
@@ -22,14 +27,20 @@ const setGameStateMock = vi.fn();
 const clearGameMock = vi.fn();
 const markCleanMock = vi.fn();
 const loadSettingsMock = vi.fn();
+const updateSettingsMock = vi.fn(async () => undefined);
+const destroyMock = vi.fn();
+let closeRequested: ((event: { preventDefault: () => void }) => Promise<void>) | undefined;
+let isDirty = false;
 
 function createGameState(): GameStateData {
   return {
+    season_context: createSeasonContext(),
     clock: {
       current_date: "2026-07-10T12:00:00Z",
       start_date: "2026-07-01T12:00:00Z",
     },
     manager: {
+      display_name: "Jane Doe",
       id: "manager-1",
       first_name: "Jane",
       last_name: "Doe",
@@ -172,7 +183,26 @@ function createGameState(): GameStateData {
   };
 }
 
-const gameState = createGameState();
+let gameState = createGameState();
+function createBackendFinanceSnapshot() {
+  return {
+    annual_wage_bill: 12000,
+    weekly_wage_spend: 12000,
+    weekly_wage_budget: 50000,
+    weekly_recurring_income: 12000,
+    weekly_sponsor_income: 12000,
+    projected_weekly_net: 0,
+    cash_runway_weeks: null as number | null,
+    wage_budget_usage_percent: 24,
+    currently_in_debt: false,
+    currently_over_budget: false,
+    wage_budget_status: "stable",
+    runway_status: "stable",
+    overall_status: "stable",
+    marketing_campaign_cooldown_days_remaining: 0,
+  };
+}
+let backendFinanceSnapshot = createBackendFinanceSnapshot();
 
 vi.mock("../lib/extraTranslations", () => ({
   applyExtraTranslations: vi.fn(),
@@ -188,8 +218,11 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
-    onCloseRequested: vi.fn(() => Promise.resolve(() => {})),
-    destroy: vi.fn(),
+    onCloseRequested: vi.fn((handler: (event: { preventDefault: () => void }) => Promise<void>) => {
+      closeRequested = handler;
+      return Promise.resolve(() => {});
+    }),
+    destroy: destroyMock,
   }),
 }));
 
@@ -197,61 +230,44 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,
 }));
 
-vi.mock("react-i18next", () => ({
-  useTranslation: () => ({
-    t: (key: string) => {
-      const labels: Record<string, string> = {
-        "dashboard.home": "Home",
-        "dashboard.inbox": "Inbox",
-        "dashboard.loading": "Loading",
-        "dashboard.managers": "Managers",
-        "dashboard.hallOfFame": "Hall of Fame",
-        "continueMenu.goToField": "Go To Field",
-        "continueMenu.goToFieldDesc": "desc",
-        "continueMenu.watchSpectator": "Watch",
-        "continueMenu.watchSpectatorDesc": "desc",
-        "continueMenu.delegateAssistant": "Delegate",
-        "continueMenu.delegateAssistantDesc": "desc",
-      };
-
-      return labels[key] ?? key;
-    },
-  }),
-}));
-
-vi.mock("../utils/backendI18n", () => ({
-  resolveBackendText: (_key: string | undefined, fallback: string) => fallback ?? "",
-}));
-
-vi.mock("../store/gameStore", () => ({
-  useGameStore: () => ({
+vi.mock("../store/gameStore", () => {
+  const state = () => ({
     hasActiveGame: true,
     managerName: "Jane Doe",
     gameState,
     setGameState: setGameStateMock,
     clearGame: clearGameMock,
-    isDirty: false,
+    isDirty,
     markClean: markCleanMock,
-  }),
-}));
+  });
+  // The service layer reads the career token from the store's current game.
+  return { useGameStore: Object.assign(state, { getState: state }) };
+});
 
-vi.mock("../store/settingsStore", () => ({
-  useSettingsStore: () => ({
+vi.mock("../store/settingsStore", () => {
+  const getState = () => ({
     settings: {
       language: "en",
       default_match_mode: "live",
+      sidebar_collapsed: false,
     },
+    currency: { code: "EUR", symbol: "€", exchange_rate: 1 },
+    supportedCurrencies: { EUR: { code: "EUR", symbol: "€", exchange_rate: 1 } },
     loaded: true,
-    loadSettings: loadSettingsMock,
-  }),
-}));
+  });
+  const useSettingsStore = Object.assign(
+    () => ({ ...getState(), loadSettings: loadSettingsMock, updateSettings: updateSettingsMock }),
+    { getState },
+  );
+  return { useSettingsStore };
+});
 
 vi.mock("../hooks/useAdvanceTime", () => ({
   useAdvanceTime: () => ({
     isAdvancing: false,
     showContinueMenu: false,
     setShowContinueMenu: vi.fn(),
-    showMatchConfirm: false,
+    showMatchConfirm: matchConfirmState.visible,
     setShowMatchConfirm: vi.fn(),
     matchMode: "live",
     setMatchMode: vi.fn(),
@@ -264,76 +280,186 @@ vi.mock("../hooks/useAdvanceTime", () => ({
 }));
 
 vi.mock("../components/dashboard/DashboardSidebar", () => ({
-  default: ({ onNavClick, activeTab }: any) => (
+  default: ({
+    onNavClick,
+    onToggleCollapse,
+    activeTab,
+    onExitClick,
+    competitionName,
+  }: {
+    onToggleCollapse: () => void;
+    onExitClick: () => void;
+    onNavClick: (tab: string, options?: { fromDrawer: boolean }) => void;
+    activeTab: string;
+    competitionName?: string | null;
+  }) => (
     <div>
       <span>Sidebar {activeTab}</span>
-      <button onClick={() => onNavClick("Inbox")}>nav-inbox</button>
-      <button onClick={() => onNavClick("Managers")}>nav-managers</button>
+      {competitionName ? <span>{competitionName}</span> : null}
+      <button type="button" onClick={onExitClick}>
+        exit-menu
+      </button>
+      <button type="button" onClick={() => onNavClick("Inbox")}>
+        nav-inbox
+      </button>
+      <button type="button" onClick={() => onNavClick("Managers")}>
+        nav-managers
+      </button>
+      <button type="button" onClick={() => onNavClick("Squad", { fromDrawer: true })}>
+        nav-squad-from-drawer
+      </button>
+      <button type="button" onClick={onToggleCollapse}>
+        fold-sidebar
+      </button>
     </div>
   ),
 }));
 
 vi.mock("../components/dashboard/DashboardHeader", () => ({
-  default: ({ activeTabLabel, onBack, onSelectSearchPlayer, onSelectSearchTeam }: any) => (
-    <div>
-      <span>Header {activeTabLabel}</span>
-      <button onClick={onBack}>header-back</button>
-      <button onClick={() => onSelectSearchPlayer("player-1")}>search-player</button>
-      <button onClick={() => onSelectSearchTeam("team-2")}>search-team</button>
-    </div>
-  ),
+  default: ({
+    title,
+    onBack,
+    onSelectSearchPlayer,
+    onSelectSearchTeam,
+    onSave,
+  }: {
+    onSave: () => void;
+    title: string;
+    onBack: () => void;
+    onSelectSearchPlayer: (playerId: string) => void;
+    onSelectSearchTeam: (teamId: string) => void;
+  }) => {
+    const { t } = useTranslation();
+    return (
+      <div>
+        <button type="button" onClick={onSave}>
+          {t("common.save")}
+        </button>
+        <h2 data-page-title tabIndex={-1}>
+          Header {title}
+        </h2>
+        <button type="button" onClick={onBack}>
+          header-back
+        </button>
+        <button type="button" onClick={() => onSelectSearchPlayer("player-1")}>
+          search-player
+        </button>
+        <button type="button" onClick={() => onSelectSearchPlayer("retired-9")}>
+          search-retired-player
+        </button>
+        <button type="button" onClick={() => onSelectSearchTeam("team-2")}>
+          search-team
+        </button>
+      </div>
+    );
+  },
 }));
 
 vi.mock("../components/playerProfile/PlayerProfile", () => ({
-  default: ({ onClose, onSelectTeam }: any) => (
+  default: ({ onSelectTeam }: { onSelectTeam: (teamId: string) => void }) => (
     <div>
       <span>Player Profile Mock</span>
-      <button onClick={onClose}>player-close</button>
-      <button onClick={() => onSelectTeam("team-2")}>player-select-team</button>
+      <button type="button" onClick={() => onSelectTeam("team-2")}>
+        player-select-team
+      </button>
     </div>
   ),
 }));
 
 vi.mock("../components/teamProfile", () => ({
-  default: ({ onClose, onSelectPlayer }: any) => (
+  default: ({ onSelectPlayer }: { onSelectPlayer: (playerId: string) => void }) => (
     <div>
       <span>Team Profile Mock</span>
-      <button onClick={onClose}>team-close</button>
-      <button onClick={() => onSelectPlayer("player-1")}>team-select-player</button>
+      <button type="button" onClick={() => onSelectPlayer("player-1")}>
+        team-select-player
+      </button>
     </div>
   ),
 }));
 
 vi.mock("../components/dashboard/DashboardAlerts", () => ({
-  default: () => <div>Alerts Mock</div>,
+  default: ({ alerts }: { alerts: { id: string }[] }) => (
+    <div>
+      Alerts Mock
+      {alerts.map((alert) => (
+        <span key={alert.id}>{alert.id}</span>
+      ))}
+    </div>
+  ),
 }));
 
 vi.mock("../components/dashboard/DashboardTabContent", () => ({
-  default: ({ viewModel }: any) => <div>Tab Content {viewModel.activeTab}</div>,
+  default: ({
+    viewModel,
+  }: {
+    viewModel: {
+      activeTab: string;
+      seasonComplete: boolean;
+      handlers: { onNavigate: (tab: string) => void };
+    };
+  }) => (
+    <div>
+      <div>Tab Content {viewModel.activeTab}</div>
+      {viewModel.seasonComplete ? <div>season over</div> : null}
+      <button type="button" onClick={() => viewModel.handlers.onNavigate("Inbox")}>
+        content-nav-inbox
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("../components/dashboard/DashboardBlockerModal", () => ({
   default: () => null,
 }));
 
-vi.mock("../components/dashboard/DashboardCloseConfirmModal", () => ({
-  default: () => null,
-}));
-
-vi.mock("../components/dashboard/DashboardExitConfirmModal", () => ({
-  default: () => null,
-}));
-
-vi.mock("../components/dashboard/DashboardExitSavingModal", () => ({
-  default: () => null,
-}));
-
-vi.mock("../components/dashboard/DashboardMatchConfirmModal", () => ({
-  default: () => null,
-}));
+/**
+ * A Storage that records every key read, installed as `window.localStorage` until `restore`: the
+ * object the dashboard reads, whatever Storage the runtime itself provides.
+ */
+function installRecordingStorage(): { reads: string[]; restore: () => void } {
+  const reads: string[] = [];
+  const values = new Map<string, string>();
+  const storage: Storage = {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key: string) => {
+      reads.push(key);
+      return values.get(key) ?? null;
+    },
+    key: (index: number) => [...values.keys()][index] ?? null,
+    removeItem: (key: string) => {
+      values.delete(key);
+    },
+    setItem: (key: string, value: string) => {
+      values.set(key, String(value));
+    },
+  };
+  const own = Object.getOwnPropertyDescriptor(window, "localStorage");
+  Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+  return {
+    reads,
+    restore: () => {
+      if (own) {
+        Object.defineProperty(window, "localStorage", own);
+      } else {
+        Reflect.deleteProperty(window, "localStorage");
+      }
+    },
+  };
+}
 
 describe("Dashboard", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await i18nReady;
+    await i18n.changeLanguage("en");
+    isDirty = false;
+    closeRequested = undefined;
+    destroyMock.mockReset();
+    gameState = createGameState();
+    backendFinanceSnapshot = createBackendFinanceSnapshot();
+    matchConfirmState.visible = false;
     registeredEventHandlers.clear();
     listenMock.mockClear();
     invokeMock.mockReset();
@@ -341,16 +467,530 @@ describe("Dashboard", () => {
     clearGameMock.mockReset();
     markCleanMock.mockReset();
     loadSettingsMock.mockReset();
+    updateSettingsMock.mockClear();
     navigateMock.mockReset();
     vi.mocked(applyExtraTranslations).mockReset();
     window.localStorage.clear();
+    gameState.competitions = undefined;
+    gameState.season_context = createSeasonContext();
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_active_game") {
         return gameState;
       }
 
+      if (command === "get_finance_snapshot") {
+        return { snapshot: backendFinanceSnapshot };
+      }
+
       return null;
     });
+  });
+
+  function refuseCommand(commandToRefuse: string, error: unknown) {
+    const original = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation((command: string, ...args: unknown[]) => {
+      if (command === commandToRefuse) return Promise.reject(error);
+      return original?.(command, ...args);
+    });
+  }
+
+  async function requestWindowClose() {
+    const preventDefault = vi.fn();
+    await act(async () => closeRequested?.({ preventDefault }));
+    expect(preventDefault).toHaveBeenCalledOnce();
+  }
+
+  for (const { code } of SUPPORTED_LANGUAGES) {
+    /** Given a live-match save refusal, when saving in this locale, then the real i18n hook shows the reason and retains the game. */
+    it(`explains a refused save in ${code}`, async () => {
+      await i18n.changeLanguage(code);
+      render(<Dashboard />);
+      refuseCommand("save_game", "be.error.liveMatch.inProgress");
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("common.save") }));
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(i18n.t("be.error.liveMatch.inProgress"));
+      expect(alert).not.toHaveTextContent("be.error.");
+      expect(markCleanMock).not.toHaveBeenCalled();
+      expect(clearGameMock).not.toHaveBeenCalled();
+      expect(navigateMock).not.toHaveBeenCalled();
+    });
+
+    /** Given a dirty career with a live match, when Save & Quit is refused, then the window and game remain and another close is intercepted. */
+    it(`keeps the window after a refused Save & Quit in ${code}`, async () => {
+      await i18n.changeLanguage(code);
+      isDirty = true;
+      render(<Dashboard />);
+      refuseCommand("save_game", "be.error.liveMatch.inProgress");
+      await requestWindowClose();
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("closeConfirm.saveQuit") }));
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(i18n.t("be.error.liveMatch.inProgress"));
+      expect(alert).not.toHaveTextContent("be.error.");
+      expect(destroyMock).not.toHaveBeenCalled();
+      expect(clearGameMock).not.toHaveBeenCalled();
+      expect(markCleanMock).not.toHaveBeenCalled();
+      await requestWindowClose();
+      expect(
+        screen.getByRole("button", { name: i18n.t("closeConfirm.saveQuit") }),
+      ).toBeInTheDocument();
+    });
+
+    /** Given a live match, when Save & Exit is refused, then the translated reason is shown, the game remains and exit can be retried. */
+    it(`keeps the career after a refused Save & Exit in ${code}`, async () => {
+      await i18n.changeLanguage(code);
+      render(<Dashboard />);
+      refuseCommand("exit_to_menu", "be.error.liveMatch.inProgress");
+      fireEvent.click(screen.getByRole("button", { name: "exit-menu" }));
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("exitConfirm.saveExit") }));
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(i18n.t("be.error.liveMatch.inProgress"));
+      expect(alert).not.toHaveTextContent("be.error.");
+      expect(clearGameMock).not.toHaveBeenCalled();
+      expect(navigateMock).not.toHaveBeenCalled();
+      expect(screen.queryByText(i18n.t("exitConfirm.savingTitle"))).not.toBeInTheDocument();
+      invokeMock.mockResolvedValue(null);
+      fireEvent.click(screen.getByRole("button", { name: "exit-menu" }));
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("exitConfirm.saveExit") }));
+      await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/"));
+      expect(clearGameMock).toHaveBeenCalledOnce();
+    });
+  }
+
+  /**
+   * Given the dashboard, with the focus on the Exit button
+   * When the player presses it, and then Escape
+   * Then the focus is inside "Exit to Main Menu?" (not left on the Exit button behind it), and
+   * Escape closes the confirmation and gives the focus back to the Exit button.
+   */
+  it("moves the focus into the Exit confirmation and back on Escape", async () => {
+    await i18n.changeLanguage("en");
+    render(<Dashboard />);
+    const exit = screen.getByRole("button", { name: "exit-menu" });
+    exit.focus();
+    fireEvent.click(exit);
+
+    const dialog = screen.getByRole("dialog", { name: i18n.t("exitConfirm.title") });
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(exit).toHaveFocus();
+  });
+
+  /** Given a dirty career, when Save & Quit succeeds, then saving precedes closing the window. */
+  /**
+   * Given the sidebar open as a drawer over the page
+   * When the player chooses a page from it, and then a page from the sidebar itself
+   * Then the new page's heading takes the focus after the drawer, so a keyboard player lands on the
+   * page; a choice from the open sidebar leaves the focus where it is.
+   */
+  it("moves the focus to the page heading after a page chosen from the drawer", async () => {
+    render(<Dashboard />);
+    fireEvent.click(await screen.findByRole("button", { name: "nav-squad-from-drawer" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Header/ })).toHaveFocus());
+
+    const inbox = screen.getByRole("button", { name: "nav-inbox" });
+    inbox.focus();
+    fireEvent.click(inbox);
+    await waitFor(() => expect(screen.getByText("Sidebar Inbox")).toBeInTheDocument());
+    expect(inbox).toHaveFocus();
+  });
+
+  /**
+   * Given an unfolded sidebar (Normal, room to spare)
+   * When the player folds it
+   * Then the fold is saved in the settings, so the next launch opens folded too.
+   */
+  it("saves the player's fold of the sidebar", async () => {
+    render(<Dashboard />);
+    fireEvent.click(await screen.findByRole("button", { name: "fold-sidebar" }));
+    expect(updateSettingsMock).toHaveBeenCalledWith({ sidebar_collapsed: true });
+  });
+
+  /**
+   * Given Squad open
+   * When the player chooses Squad again from the drawer
+   * Then the heading still takes the focus: the drawer closed, and the keyboard player lands on the
+   * page even though the page didn't change.
+   */
+  it("moves the focus to the heading when the drawer chooses the page already open", async () => {
+    render(<Dashboard initialTab="Squad" />);
+    const choice = await screen.findByRole("button", { name: "nav-squad-from-drawer" });
+    choice.focus();
+    fireEvent.click(choice);
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Header/ })).toHaveFocus());
+  });
+
+  /**
+   * Given Squad open, and the drawer has chosen Squad again
+   * When the page itself then navigates to the Inbox (not the drawer)
+   * Then the focus stays where the player put it: a heading focus is owed only to a drawer choice,
+   * and the earlier one was already paid.
+   */
+  it("doesn't move the focus on a later navigation from the page", async () => {
+    render(<Dashboard initialTab="Squad" />);
+    fireEvent.click(await screen.findByRole("button", { name: "nav-squad-from-drawer" }));
+
+    const contentLink = screen.getByRole("button", { name: "content-nav-inbox" });
+    contentLink.focus();
+    fireEvent.click(contentLink);
+    await waitFor(() => expect(screen.getByText("Sidebar Inbox")).toBeInTheDocument());
+    expect(contentLink).toHaveFocus();
+  });
+
+  it("closes the window after a successful save", async () => {
+    isDirty = true;
+    render(<Dashboard />);
+    let finishSave: (() => void) | undefined;
+    const save = new Promise<void>((resolve) => {
+      finishSave = resolve;
+    });
+    const original = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation((command, ...args: unknown[]) =>
+      command === "save_game" ? save : original?.(command, ...args),
+    );
+    await requestWindowClose();
+    fireEvent.click(screen.getByRole("button", { name: "Save & Quit" }));
+    expect(invokeMock).toHaveBeenCalledWith("save_game", { careerToken: 0 });
+    expect(destroyMock).not.toHaveBeenCalled();
+    expect(markCleanMock).not.toHaveBeenCalled();
+    await act(async () => finishSave?.());
+    await waitFor(() => expect(destroyMock).toHaveBeenCalledOnce());
+    expect(markCleanMock).toHaveBeenCalledOnce();
+  });
+
+  /** Given a dirty career, when the player explicitly chooses Quit Without Saving, then no save is attempted and the window closes. */
+  it("honors an explicit quit without saving", async () => {
+    isDirty = true;
+    render(<Dashboard />);
+    await requestWindowClose();
+    fireEvent.click(screen.getByRole("button", { name: "Quit Without Saving" }));
+    await waitFor(() => expect(destroyMock).toHaveBeenCalledOnce());
+    const saves = invokeMock.mock.calls.filter(([command]) => command === "save_game");
+    expect(saves).toEqual([]);
+    expect(markCleanMock).not.toHaveBeenCalled();
+  });
+
+  /** Given a disk failure, when Save & Quit fails, then the error is visible and the unsaved career stays open. */
+  it("keeps the window after another save failure", async () => {
+    isDirty = true;
+    render(<Dashboard />);
+    refuseCommand("save_game", new Error("disk unavailable"));
+    await requestWindowClose();
+    fireEvent.click(screen.getByRole("button", { name: "Save & Quit" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("disk unavailable");
+    expect(destroyMock).not.toHaveBeenCalled();
+    expect(markCleanMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Given no starting tab
+   * When the dashboard loads
+   * Then it opens on Home, as the app always does.
+   */
+  it("opens on Home by default", async () => {
+    render(<Dashboard />);
+    expect(await screen.findByText("Tab Content Home")).toBeInTheDocument();
+  });
+
+  /**
+   * Given a starting tab (the dev page harness mounts a page this way)
+   * When the dashboard loads
+   * Then it opens on that tab.
+   */
+  it("opens on the tab it is given", async () => {
+    render(<Dashboard initialTab="Squad" />);
+    expect(await screen.findByText("Tab Content Squad")).toBeInTheDocument();
+  });
+
+  /**
+   * Given the backend names the user's league
+   * When the dashboard loads
+   * Then the competition name is in the sidebar, whatever tab is open.
+   */
+  it("shows the club's competition in the sidebar", async () => {
+    const original = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation((command: string, ...args: unknown[]) => {
+      if (command === "get_club_league_standing") {
+        return Promise.resolve({
+          competition_id: "league-1",
+          competition_name: "Backend Name",
+          league_pos: 1,
+          standing: {
+            played: 0,
+            won: 0,
+            drawn: 0,
+            lost: 0,
+            goals_for: 0,
+            goals_against: 0,
+            points: 0,
+          },
+        });
+      }
+      return original?.(command, ...args);
+    });
+
+    gameState.competitions = [
+      { id: "cup-1", name: "Other Cup", season: 2025, fixtures: [], standings: [] },
+      { id: "league-1", name: "Premier Test League", season: 2025, fixtures: [], standings: [] },
+    ] as unknown as typeof gameState.competitions;
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText("Premier Test League")).toBeInTheDocument();
+    expect(screen.queryByText("Other Cup")).not.toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("get_club_league_standing", { teamId: "team-1" });
+  });
+
+  it("uses the backend cash verdict instead of a false local crisis", async () => {
+    const team = gameState.teams[0];
+    const player = gameState.players[0];
+    if (!team || !player) throw new Error("expected managed team and player");
+    team.finance = 20000;
+    team.wage_budget = 20000;
+    player.wage = 10000;
+    backendFinanceSnapshot = {
+      ...backendFinanceSnapshot,
+      weekly_recurring_income: 15200,
+      projected_weekly_net: 5200,
+      wage_budget_status: "warning",
+      wage_budget_usage_percent: 105,
+      overall_status: "warning",
+    };
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText("wage_pressure")).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("get_finance_snapshot", { teamId: "team-1" });
+    expect(screen.queryByText("finance_crisis")).not.toBeInTheDocument();
+  });
+
+  it("shows a finance crisis when the backend verdict is critical", async () => {
+    backendFinanceSnapshot = {
+      ...backendFinanceSnapshot,
+      runway_status: "critical",
+      cash_runway_weeks: 2,
+      overall_status: "critical",
+    };
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText("finance_crisis")).toBeInTheDocument();
+  });
+
+  it("keeps the last verdict during a same-club refetch but drops it for a different club", async () => {
+    backendFinanceSnapshot = {
+      ...backendFinanceSnapshot,
+      runway_status: "critical",
+      cash_runway_weeks: 2,
+      overall_status: "critical",
+    };
+    const pendingFinanceResponses: Array<
+      (response: { snapshot: ReturnType<typeof createBackendFinanceSnapshot> }) => void
+    > = [];
+    let financeRequestCount = 0;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_active_game") return Promise.resolve(gameState);
+      if (command === "get_finance_snapshot") {
+        financeRequestCount += 1;
+        if (financeRequestCount === 1) {
+          return Promise.resolve({ snapshot: backendFinanceSnapshot });
+        }
+        return new Promise<{ snapshot: ReturnType<typeof createBackendFinanceSnapshot> }>(
+          (resolve) => pendingFinanceResponses.push(resolve),
+        );
+      }
+      return Promise.resolve(null);
+    });
+
+    const { rerender } = render(<Dashboard />);
+    expect(await screen.findByText("finance_crisis")).toBeInTheDocument();
+
+    gameState = createGameState();
+    rerender(<Dashboard />);
+    await waitFor(() => expect(pendingFinanceResponses).toHaveLength(1));
+    expect(screen.getByText("finance_crisis")).toBeInTheDocument();
+
+    gameState = createGameState();
+    gameState.manager.team_id = "team-2";
+    rerender(<Dashboard />);
+    await waitFor(() => expect(pendingFinanceResponses).toHaveLength(2));
+    expect(screen.queryByText("finance_crisis")).not.toBeInTheDocument();
+  });
+
+  it("ignores stale finance responses after the game state changes", async () => {
+    const firstGameState = gameState;
+    const pendingFinanceResponses: Array<
+      (response: { snapshot: ReturnType<typeof createBackendFinanceSnapshot> }) => void
+    > = [];
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_active_game") return Promise.resolve(gameState);
+      if (command === "get_finance_snapshot") {
+        return new Promise<{ snapshot: ReturnType<typeof createBackendFinanceSnapshot> }>(
+          (resolve) => pendingFinanceResponses.push(resolve),
+        );
+      }
+      return Promise.resolve(null);
+    });
+
+    const criticalResponse = {
+      snapshot: {
+        ...createBackendFinanceSnapshot(),
+        runway_status: "critical",
+        cash_runway_weeks: 2,
+        overall_status: "critical",
+      },
+    };
+    const { rerender } = render(<Dashboard />);
+    await waitFor(() => expect(pendingFinanceResponses).toHaveLength(1));
+
+    gameState = createGameState();
+    gameState.manager.team_id = "team-2";
+    rerender(<Dashboard />);
+    await waitFor(() => expect(pendingFinanceResponses).toHaveLength(2));
+    await act(async () => pendingFinanceResponses[1]?.(criticalResponse));
+    expect(screen.getByText("finance_crisis")).toBeInTheDocument();
+
+    // A verdict for the other club must disappear while this club refetches.
+    gameState = firstGameState;
+    rerender(<Dashboard />);
+    await waitFor(() => expect(pendingFinanceResponses).toHaveLength(3));
+    expect(screen.queryByText("finance_crisis")).not.toBeInTheDocument();
+
+    // Returning to the original state also checks that its cancelled request
+    // cannot overwrite the current verdict while the new request is pending.
+    await act(async () => pendingFinanceResponses[0]?.(criticalResponse));
+    expect(screen.queryByText("finance_crisis")).not.toBeInTheDocument();
+  });
+
+  // A finished league that is not the player's own, sorting first in the array.
+  // Competitions are ordered by country code, so in a generated world this is
+  // always Argentina — a split-season country on a different calendar.
+  function foreignLeagueStillPlaying(): LeagueData {
+    return {
+      id: "ar-d1-apertura",
+      name: "ar-d1-apertura",
+      season: 2035,
+      kind: "League",
+      scope: "Domestic",
+      country_id: "AR",
+      priority: 0,
+      participant_ids: ["ar-00", "ar-01"],
+      rules: { format: "LeagueTable", counts_in_season_flow: true },
+      fixtures: [
+        {
+          id: "ar-1",
+          matchday: 1,
+          date: "2036-02-10",
+          home_team_id: "ar-00",
+          away_team_id: "ar-01",
+          competition: "League",
+          competitive: true,
+          advancing_team_id: null,
+          status: "Completed",
+          result: null,
+        },
+        {
+          id: "ar-2",
+          matchday: 2,
+          date: "2036-10-10",
+          home_team_id: "ar-01",
+          away_team_id: "ar-00",
+          competition: "League",
+          competitive: true,
+          advancing_team_id: null,
+          status: "Scheduled",
+          result: null,
+        },
+      ],
+      standings: [],
+    } as LeagueData;
+  }
+
+  function seasonContext(seasonComplete: boolean): SeasonContextData {
+    return {
+      phase: seasonComplete ? "PostSeason" : "InSeason",
+      season_complete: seasonComplete,
+      season_start: null,
+      season_end: null,
+      days_until_season_start: null,
+      transfer_window: {
+        status: "Closed",
+        opens_on: null,
+        closes_on: null,
+        days_until_opens: null,
+        days_remaining: null,
+      },
+    } as SeasonContextData;
+  }
+
+  /// The end-of-season screen is the only way to roll the season over, and the
+  /// rollover is what runs promotion and relegation. This used to be decided
+  /// from `competitions[0]` — never the player's league — so an English career
+  /// that finished in April waited on an Argentine Apertura running to October,
+  /// the screen never appeared, and the player could not continue.
+  it("offers the end of season from the backend flag, not the first competition", async () => {
+    gameState.competitions = [foreignLeagueStillPlaying()];
+    gameState.season_context = seasonContext(true);
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("season over")).toBeInTheDocument();
+    });
+  });
+
+  it("keeps the season running while the backend says it is not over", async () => {
+    // The first competition has finished every fixture, which is exactly what
+    // the old local rule keyed on. The backend says otherwise.
+    const finished = foreignLeagueStillPlaying();
+    finished.fixtures = finished.fixtures.map((fixture) => ({
+      ...fixture,
+      status: "Completed",
+    }));
+    gameState.competitions = [finished];
+    gameState.season_context = seasonContext(false);
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Tab Content Home")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("season over")).not.toBeInTheDocument();
+  });
+
+  it("shows the localized named cup in the match confirmation modal", async () => {
+    matchConfirmState.visible = true;
+    i18n.addResource("en", "translation", "tournaments.competitions.nationalCup", "Copa Nacional");
+    gameState.competitions = [
+      {
+        id: "cup-1",
+        name: "National Cup",
+        name_key: "tournaments.competitions.nationalCup",
+        season: 2026,
+        fixtures: [
+          {
+            competitive: true,
+            advancing_team_id: null,
+            id: "cup-match",
+            competition_id: "cup-1",
+            competition: "Cup",
+            matchday: 1,
+            date: "2026-07-10",
+            home_team_id: "team-1",
+            away_team_id: "team-2",
+            status: "Scheduled",
+            result: null,
+          },
+        ],
+        standings: [],
+      },
+    ];
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText("Copa Nacional")).toBeInTheDocument();
+    expect(screen.queryByText("National Cup")).not.toBeInTheDocument();
   });
 
   it("supports search selection, profile switching, back-navigation, and tab switching", async () => {
@@ -379,10 +1019,52 @@ describe("Dashboard", () => {
     expect(screen.getByText("Header Managers")).toBeInTheDocument();
   });
 
+  /**
+   * Given the dashboard on Home
+   * When a player's profile opens, then his club's, then Back is pressed twice
+   * Then the header names the player, then the club, then Home again
+   */
+  it("names the open profile in the header, not the tab it was opened from", async () => {
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("Tab Content Home")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("search-player"));
+    expect(screen.getByText("Header J. Smith")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("player-select-team"));
+    expect(screen.getByText("Header Beta FC")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("header-back"));
+    fireEvent.click(screen.getByText("header-back"));
+    expect(screen.getByText("Header Home")).toBeInTheDocument();
+  });
+
+  /**
+   * Given the dashboard on Home
+   * When the profile of a player who is not in the world (a retired player) opens
+   * Then the header says it is a player's profile, not the tab it was opened from
+   */
+  it("calls a retired player's profile a player's in the header", async () => {
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("Tab Content Home")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("search-retired-player"));
+
+    expect(screen.getByText("Header Player")).toBeInTheDocument();
+  });
+
   it("loads game state when the active save id fetch fails", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_active_game") {
         return gameState;
+      }
+
+      if (command === "get_finance_snapshot") {
+        return { snapshot: backendFinanceSnapshot };
       }
 
       if (command === "get_active_save_id") {
@@ -405,12 +1087,20 @@ describe("Dashboard", () => {
   it("clears a stale active save id when a later refresh cannot load it", async () => {
     const saveStorageKey = "ofm-onboarding-visited-tabs:save:save-1";
     const legacyStorageKey = `ofm-onboarding-visited-tabs:legacy:${gameState.manager.id}:${gameState.clock.start_date}`;
-    const getItemSpy = vi.spyOn(Storage.prototype, "getItem");
+    // A recording Storage in place of window.localStorage, which the dashboard reads. Spying on a
+    // runtime's Storage held on one Node major only: on Node 22 and 24, jsdom's localStorage turns
+    // `localStorage.getItem = spy` into a stored item, and on Node 26 the global Storage is not
+    // jsdom's, so a Storage.prototype spy sees nothing.
+    const storage = installRecordingStorage();
     let saveIdRequestCount = 0;
 
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_active_game") {
         return gameState;
+      }
+
+      if (command === "get_finance_snapshot") {
+        return { snapshot: backendFinanceSnapshot };
       }
 
       if (command === "get_active_save_id") {
@@ -427,20 +1117,59 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    await waitFor(() => {
-      expect(getItemSpy).toHaveBeenCalledWith(saveStorageKey);
+    try {
+      await waitFor(() => {
+        expect(storage.reads).toContain(saveStorageKey);
+      });
+
+      storage.reads.length = 0;
+      const gameStateChangedHandler = registeredEventHandlers.get("game-state-changed");
+      expect(gameStateChangedHandler).toBeTypeOf("function");
+
+      // Inside act, so React has applied the cleared save id and run the effect that reads the
+      // onboarding key before the assertion, as every other event-driven call in this file does.
+      await act(async () => {
+        await gameStateChangedHandler?.();
+      });
+
+      expect(storage.reads).toContain(legacyStorageKey);
+    } finally {
+      storage.restore();
+    }
+  });
+
+  /**
+   * Given a career that has not taken its first club
+   * When the dashboard loads it
+   * Then the player is sent to team selection
+   */
+  it("sends_a_career_awaiting_a_club_to_team_selection", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_active_game") return gameState;
+      if (command === "get_career_stage") return "awaitingClub";
+      return null;
     });
 
-    getItemSpy.mockClear();
-    const gameStateChangedHandler = registeredEventHandlers.get("game-state-changed");
-    expect(gameStateChangedHandler).toBeTypeOf("function");
+    render(<Dashboard />);
 
-    await gameStateChangedHandler?.();
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/select-team"));
+  });
 
-    await waitFor(() => {
-      expect(getItemSpy).toHaveBeenCalledWith(legacyStorageKey);
+  /**
+   * Given a sacked manager (unemployed, not a new career)
+   * When the dashboard loads
+   * Then the dashboard stays: that is where the job offers are
+   */
+  it("keeps_an_unemployed_manager_on_the_dashboard", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_active_game") return gameState;
+      if (command === "get_career_stage") return "unemployed";
+      return null;
     });
 
-    getItemSpy.mockRestore();
+    render(<Dashboard />);
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_career_stage"));
+    expect(navigateMock).not.toHaveBeenCalledWith("/select-team");
   });
 });

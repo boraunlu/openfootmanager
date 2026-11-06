@@ -7,7 +7,7 @@ import {
   type PlayerPortraitIdentity,
 } from "../../services/portraitService";
 import AssetImage from "./AssetImage";
-import GeneratedAvatar from "./GeneratedAvatar";
+import { GeneratedAvatar } from "./GeneratedAvatar";
 
 interface PlayerAvatarPlayer extends PlayerPortraitIdentity {
   full_name: string;
@@ -47,13 +47,7 @@ function RuntimePortraitFallback({
       nationality: player.nationality ?? null,
       date_of_birth: player.date_of_birth ?? null,
     }),
-    [
-      player.id,
-      player.full_name,
-      player.match_name,
-      player.nationality,
-      player.date_of_birth,
-    ],
+    [player.id, player.full_name, player.match_name, player.nationality, player.date_of_birth],
   );
   const identityKey = useMemo(
     () => runtimePortraitIdentityKey(portraitIdentity),
@@ -117,20 +111,19 @@ function RuntimePortraitFallback({
 
 export function PlayerAvatar({
   player,
-  className = "h-9 w-9 shrink-0 overflow-hidden rounded-lg bg-gray-100 dark:bg-navy-700 flex items-center justify-center text-xs font-heading font-bold text-gray-500 dark:text-gray-300",
+  className = "h-9 w-9 shrink-0 overflow-hidden rounded-lg bg-sunken flex items-center justify-center text-caption font-heading font-bold text-fg-muted",
   imageClassName = "h-full w-full object-cover",
   fallback,
   enableRuntimePortrait = true,
 }: PlayerAvatarProps) {
   const faceSrc = usePackageAssetSrc(player.media?.face);
-  const defaultFallback =
-    fallback ?? (
-      <GeneratedAvatar
-        name={player.full_name || player.match_name}
-        initials={playerInitials(player)}
-        className="h-full w-full"
-      />
-    );
+  const defaultFallback = fallback ?? (
+    <GeneratedAvatar
+      name={player.full_name || player.match_name}
+      initials={playerInitials(player)}
+      className="h-full w-full"
+    />
+  );
 
   return (
     <div className={className}>

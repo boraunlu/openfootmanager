@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 
 import {
+  getTrainingFocusAttributes,
   setPlayerTrainingFocus,
   setTraining,
   setTrainingGroups,
@@ -25,6 +26,7 @@ describe("trainingService", () => {
 
     await expect(setTraining("Physical", "High")).resolves.toBe(response);
     expect(mockedInvoke).toHaveBeenCalledWith("set_training", {
+      careerToken: 0,
       focus: "Physical",
       intensity: "High",
     });
@@ -36,6 +38,7 @@ describe("trainingService", () => {
 
     await expect(setTrainingSchedule("Light")).resolves.toBe(response);
     expect(mockedInvoke).toHaveBeenCalledWith("set_training_schedule", {
+      careerToken: 0,
       schedule: "Light",
     });
   });
@@ -46,9 +49,7 @@ describe("trainingService", () => {
     mockedInvoke.mockResolvedValueOnce(response);
 
     await expect(setTrainingGroups(groups)).resolves.toBe(response);
-    expect(mockedInvoke).toHaveBeenCalledWith("set_training_groups", {
-      groups,
-    });
+    expect(mockedInvoke).toHaveBeenCalledWith("set_training_groups", { careerToken: 0, groups });
   });
 
   it("calls the set player training focus backend command", async () => {
@@ -57,8 +58,17 @@ describe("trainingService", () => {
 
     await expect(setPlayerTrainingFocus("player-1", null)).resolves.toBe(response);
     expect(mockedInvoke).toHaveBeenCalledWith("set_player_training_focus", {
+      careerToken: 0,
       playerId: "player-1",
       focus: null,
     });
+  });
+
+  it("loads the focus attribute table from the backend", async () => {
+    const table = [{ focus: "Technical", outfield: ["passing"], goalkeeper: ["handling"] }];
+    mockedInvoke.mockResolvedValueOnce(table);
+
+    await expect(getTrainingFocusAttributes()).resolves.toEqual(table);
+    expect(mockedInvoke).toHaveBeenCalledWith("get_training_focus_attributes");
   });
 });

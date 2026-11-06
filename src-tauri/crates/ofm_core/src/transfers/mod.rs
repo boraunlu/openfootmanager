@@ -1,20 +1,28 @@
 use crate::contract_wage_policy::{
+    BuyerWageFacts, loan_borrower_wage_policy_error_message, purchase_wage_policy_verdict,
     renewal_wage_policy_error_message, wage_policy_allows_projection,
 };
-use crate::finances::calc_annual_wages;
+use crate::contracts::{
+    ERR_UNABLE_TO_CALCULATE_CONTRACT_END_DATE, contract_entry, contract_record, record_movement,
+    standard_contract_terms,
+};
+use crate::finances::calc_wages;
 use crate::game::Game;
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{Duration, NaiveDate};
+use domain::contract_ledger::ContractSource;
 use domain::league::CompletedTransfer;
 use domain::negotiation::{NegotiationFeedback, NegotiationMood};
 use domain::player::{
-    ActiveLoan, LoanOfferStatus, PlayerMovementEntry, PlayerMovementKind, Position,
+    ActiveLoan, LoanOfferStatus, Player, PlayerMovementEntry, PlayerMovementKind, Position,
     TransferOfferStatus,
 };
 use domain::season::TransferWindowStatus;
+use domain::team::Team;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+mod affordability;
 mod bids;
 mod consts;
 mod execution;
@@ -22,16 +30,22 @@ mod hosted;
 mod lifecycle;
 mod loans;
 mod market;
+mod notifications;
 mod registration;
 pub use hosted::*;
 
+pub(crate) use affordability::{can_afford_fee, fee_block, transfer_fee_ceiling};
 pub use bids::*;
 use consts::*;
 pub use execution::*;
 use lifecycle::*;
 pub use loans::*;
 pub use market::*;
+use notifications::*;
 use registration::*;
+pub(crate) use registration::{
+    has_pending_transfer_registration, player_has_active_or_pending_loan,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -60,8 +74,9 @@ pub struct TransferBidFinancialProjection {
     pub annual_wage_bill_before: i64,
     pub annual_wage_bill_after: i64,
     pub annual_wage_budget: i64,
-    /// Weekly wage figures (annual / 52), so the UI can show the same before →
-    /// after breakdown the renewal projection uses instead of a lone usage %.
+    /// Weekly wage figures (stored wages are already weekly), so the UI can
+    /// show the same before → after breakdown the renewal projection uses
+    /// instead of a lone usage %.
     pub current_weekly_wage_spend: i64,
     pub projected_weekly_wage_spend: i64,
     pub weekly_wage_budget: i64,
@@ -69,6 +84,10 @@ pub struct TransferBidFinancialProjection {
     pub projected_wage_budget_usage_pct: i64,
     pub exceeds_transfer_budget: bool,
     pub exceeds_finance: bool,
+    /// The board would refuse the player's standard wage at this club: the verdict the bid itself
+    /// is held to, so the preview and the refusal cannot disagree.
+    #[serde(default)]
+    pub blocked_by_wage_policy: bool,
     /// Set when the window is closed and this bid would land as
     /// PendingRegistration: the date the debit will actually fire. `None` when
     /// the window is open and the debit fires immediately on acceptance.

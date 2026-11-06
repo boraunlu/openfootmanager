@@ -6,7 +6,7 @@ import DashboardBlockerModal from "./DashboardBlockerModal";
 import DashboardCloseConfirmModal from "./DashboardCloseConfirmModal";
 import DashboardExitConfirmModal from "./DashboardExitConfirmModal";
 import DashboardExitSavingModal from "./DashboardExitSavingModal";
-import { type DashboardMatchModeMeta } from "./DashboardHeader";
+import type { DashboardMatchModeMeta } from "./DashboardHeader";
 import DashboardMatchConfirmModal from "./DashboardMatchConfirmModal";
 import DashboardSimulatingModal from "./DashboardSimulatingModal";
 
@@ -29,6 +29,7 @@ interface DashboardOverlaysProps {
   showMatchConfirm: boolean;
   teams: TeamData[];
   todayMatchFixture: FixtureData | null;
+  todayMatchCompetitionName?: string;
   // Digest feed props (present when digest mode is active)
   digestEntries?: DigestEntry[];
   digestStopReason?: DigestStopReason | null;
@@ -60,6 +61,7 @@ export default function DashboardOverlays({
   showMatchConfirm,
   teams,
   todayMatchFixture,
+  todayMatchCompetitionName,
   digestEntries,
   digestStopReason,
   isDigestVisible,
@@ -72,7 +74,7 @@ export default function DashboardOverlays({
 }: DashboardOverlaysProps) {
   return (
     <>
-      {(isDigestVisible || isAdvancing) ? (
+      {isDigestVisible || isAdvancing ? (
         <DashboardSimulatingModal
           // While a batch advance is still crunching there is no feed yet:
           // withhold the entries so the modal shows the plain spinner, then
@@ -118,6 +120,7 @@ export default function DashboardOverlays({
           onConfirm={handleConfirmMatch}
           teams={teams}
           todayMatchFixture={todayMatchFixture}
+          competitionName={todayMatchCompetitionName}
         />
       ) : null}
 

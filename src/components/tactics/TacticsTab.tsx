@@ -1,8 +1,5 @@
 import type { JSX } from "react";
-import type {
-  GameStateData,
-  PlayerSelectionOptions,
-} from "../../store/gameStore";
+import type { GameStateData, PlayerSelectionOptions } from "../../store/gameStore";
 import { useTranslation } from "react-i18next";
 import { setPlayerRole } from "../../services/squadService";
 
@@ -10,7 +7,7 @@ import TacticsPitch from "./TacticsPitch";
 import TacticsPlayerList from "./TacticsPlayerList";
 import TacticsRightPanel from "./TacticsRightPanel";
 import TacticsCommandBar from "./TacticsCommandBar";
-import TacticsPlayerFocusPanel from "./TacticsPlayerFocusPanel";
+import TacticsCompareDialog from "./TacticsCompareDialog";
 import { useTacticsLibrary } from "./useTacticsLibrary";
 import { useTacticsFilters } from "./useTacticsFilters";
 import { useTacticsLineup } from "./useTacticsLineup";
@@ -40,6 +37,7 @@ export default function TacticsTab({
     pitchSlots,
     outOfPositionCount,
     effectiveMatchRoles,
+    autoSetPieces,
     selectedPlayer,
     comparePlayer,
     selectedPlayerId,
@@ -50,6 +48,7 @@ export default function TacticsTab({
     dragPreviewRef,
     handleFormationChange,
     handlePlayStyleChange,
+    handleApplyTacticPreset,
     handleAssignBestFit,
     handlePromoteBenchPlayer,
     handleDemoteStarter,
@@ -63,6 +62,7 @@ export default function TacticsTab({
     resetDragState,
     handleAssignMatchRole,
     handleTacticsPhaseChange,
+    lineupReady,
   } = useTacticsLineup({ gameState, onGameUpdate });
 
   const {
@@ -79,10 +79,14 @@ export default function TacticsTab({
     activeTactic,
     tacticLibrary,
     isCommandBarDirty,
+    canResetTactic,
+    handleResetTactic,
     applyTacticSelection,
     handleCreateCustomTactic,
     handleDuplicateTactic,
     handleSaveTactic,
+    canDeleteTactic,
+    handleDeleteTactic,
   } = useTacticsLibrary({
     gameState,
     formation,
@@ -90,12 +94,11 @@ export default function TacticsTab({
     initialPreset,
     onFormationChange: handleFormationChange,
     onPlayStyleChange: handlePlayStyleChange,
+    onApplyPreset: handleApplyTacticPreset,
   });
 
   if (!team) {
-    return (
-      <p className="text-gray-500 dark:text-gray-400">{t("common.noTeam")}</p>
-    );
+    return <p className="text-gray-500 dark:text-gray-400">{t("common.noTeam")}</p>;
   }
 
   return (
@@ -110,7 +113,13 @@ export default function TacticsTab({
         activePlayStyle={activePlayStyle}
         formation={formation}
         isDirty={isCommandBarDirty}
+        canReset={canResetTactic}
+        onReset={() => {
+          void handleResetTactic();
+        }}
+        canDelete={canDeleteTactic}
         onCreateNew={handleCreateCustomTactic}
+        onDelete={handleDeleteTactic}
         onDuplicate={handleDuplicateTactic}
         onFormationChange={(nextFormation) => {
           void handleFormationChange(nextFormation);
@@ -129,6 +138,12 @@ export default function TacticsTab({
         }}
         tacticLibrary={tacticLibrary}
       />
+
+      {lineupReady ? null : (
+        <p role="status" className="text-caption text-fg-muted">
+          {t("common.lineupLoading")}
+        </p>
+      )}
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[260px_1fr_270px] xl:items-start">
         {/* Left: player list */}
@@ -213,6 +228,7 @@ export default function TacticsTab({
         {/* Right: roles + phase blueprint */}
         <TacticsRightPanel
           allSquad={roster}
+          autoSetPieces={autoSetPieces}
           matchRoles={team.match_roles}
           onGameUpdate={onGameUpdate}
           onTacticsPhaseChange={(patch) => {
@@ -225,23 +241,15 @@ export default function TacticsTab({
 
       {/* Inspector modal — only when both players are selected for comparison */}
       {selectedPlayer && comparePlayer && (
-        <>
-          <div
-            className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm"
-            onClick={clearLineupSelection}
-          />
-          <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="pointer-events-auto w-full max-w-lg max-h-[85vh] overflow-y-auto">
-              <TacticsPlayerFocusPanel
-                canConfirmSwap={canConfirmSwap}
-                comparePlayer={comparePlayer}
-                onClose={clearLineupSelection}
-                onConfirmSwap={() => { void handleConfirmSwap(); }}
-                selectedPlayer={selectedPlayer}
-              />
-            </div>
-          </div>
-        </>
+        <TacticsCompareDialog
+          canConfirmSwap={canConfirmSwap}
+          comparePlayer={comparePlayer}
+          onClose={clearLineupSelection}
+          onConfirmSwap={() => {
+            void handleConfirmSwap();
+          }}
+          selectedPlayer={selectedPlayer}
+        />
       )}
     </div>
   );

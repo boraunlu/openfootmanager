@@ -283,7 +283,7 @@ list of problems. Nothing loads half-broken.
 |-------|-----------|---------|-------------|
 | `kind` | all | — | The competition shape. |
 | `legs` | LeagueTable, GroupAndKnockout | `2` | Round-robin legs (1 = single, 2 = home & away). |
-| `groupSize` | GroupAndKnockout | `4` | Clubs per group. |
+| `groupSize` | GroupAndKnockout | `4` | Maximum clubs per group. Uneven fields are balanced across groups. |
 | `qualifiersPerGroup` | GroupAndKnockout | `2` | Clubs advancing from each group. |
 | `bestThirdQualifiers` | GroupAndKnockout | `0` | Extra best next-placed finishers that advance (the 2026 World Cup's "best thirds"). |
 
@@ -301,10 +301,10 @@ Provide **exactly one** of `explicit` or `selector`.
 
 | Selector `kind` | Fields | Resolves to |
 |-----------------|--------|-------------|
-| `topByReputation` | `country`, `count` | The strongest `count` clubs of a country. |
+| `topByReputation` | `country`, `count` | The strongest `count` clubs of a country. In a package, clubs are ranked by the middle of their `reputationRange` (the default range when it has none), never by the value a career rolls inside it, so a package that validates resolves to the same clubs in every career. |
 | `allInCountry` | `country` | Every club of a country. |
 | `allInRegion` | `region` | Every club of a region. |
-| `championsOf` | `sourceCompetition`, `count` | The top `count` finishers of another competition (continental qualification). |
+| `championsOf` | `sourceCompetition`, `count` | The top `count` finishers of another competition (continental qualification). When the source has not been played and the field must be topped up by reputation, clubs are ranked the same way as `topByReputation`: in a package, by the middle of their `reputationRange`. |
 
 `selector.excludeCompetitions` (a list of competition ids) removes clubs already
 placed elsewhere — e.g. a second division excludes the first division's clubs:

@@ -13,13 +13,7 @@ vi.mock("react-i18next", () => ({
 // to (editing.id) and lets us trigger the save callback. This keeps the test
 // focused on the form-panel -> editor wiring rather than PlayerForm internals.
 vi.mock("../menu/PackageEditor/PlayerForm", () => ({
-  PlayerForm: ({
-    editing,
-    onSave,
-  }: {
-    editing: PlayerDef;
-    onSave: () => void;
-  }) => (
+  PlayerForm: ({ editing, onSave }: { editing: PlayerDef; onSave: () => void }) => (
     <div>
       <span data-testid="bound-id">{editing.id}</span>
       <button type="button" onClick={onSave}>
@@ -38,7 +32,13 @@ vi.mock("../menu/PackageEditor/CountryForm", () => ({ CountryForm: () => null })
 vi.mock("../menu/PackageEditor/StaffForm", () => ({ StaffForm: () => null }));
 vi.mock("../menu/PackageEditor/NamesPoolForm", () => ({ NamesPoolForm: () => null }));
 vi.mock("../menu/PackageEditor/CompetitionForm", () => ({ CompetitionForm: () => null }));
-vi.mock("../menu/PackageEditor/IssueList", () => ({ IssueList: () => null }));
+// A list that says what it was given, so the panel's wiring of errors and warnings is visible.
+vi.mock("../menu/PackageEditor/IssueList", () => ({
+  IssueList: ({ issues, severity }: { issues: unknown[]; severity?: string }) =>
+    issues.length === 0 ? null : (
+      <div data-testid={`issue-list-${severity ?? "error"}`}>{issues.length}</div>
+    ),
+}));
 
 function makeEditor(id: string) {
   return {
@@ -51,7 +51,18 @@ function makeEditor(id: string) {
   };
 }
 
-function renderPanel(formPanel: FormPanel, playerId: string, youthId: string) {
+const warning = {
+  code: "be.warning.package.countryWithoutRegion",
+  file: "countries/qq.json",
+  params: { name: "Qland", code: "QQ" },
+};
+
+function renderPanel(
+  formPanel: FormPanel,
+  playerId: string,
+  youthId: string,
+  report: { issues?: (typeof warning)[]; warnings?: (typeof warning)[] } = {},
+) {
   const playerEditor = makeEditor(playerId);
   const youthEditor = makeEditor(youthId);
   const stub = makeEditor("x");
@@ -65,8 +76,16 @@ function renderPanel(formPanel: FormPanel, playerId: string, youthId: string) {
       onMetaCommit={() => {}}
       onSaveMetadata={() => {}}
       onAssetError={() => {}}
-      counts={{ teams: 0, players: 0, confederations: 0, countries: 0, competitions: 0, namePools: 0 }}
-      issues={[]}
+      counts={{
+        teams: 0,
+        players: 0,
+        confederations: 0,
+        countries: 0,
+        competitions: 0,
+        namePools: 0,
+      }}
+      issues={report.issues ?? []}
+      warnings={report.warnings ?? []}
       teamEditor={stub as never}
       confEditor={stub as never}
       countryEditor={stub as never}
@@ -103,5 +122,40 @@ describe("WorldEditorFormPanel player/youth wiring", () => {
     fireEvent.click(screen.getByText("save"));
     expect(youthEditor.handleSave).toHaveBeenCalledTimes(1);
     expect(playerEditor.handleSave).not.toHaveBeenCalled();
+  });
+});
+
+describe("WorldEditorFormPanel issues panel (#830)", () => {
+  // Given a package with a warning and no errors
+  // When the Issues panel is shown
+  // Then the warning list is drawn and "no issues" is not claimed.
+  it("shows warnings, and does not say there are no issues, when only warnings exist", () => {
+    renderPanel("issues", "p", "y", { warnings: [warning] });
+
+    expect(screen.getByTestId("issue-list-warning").textContent).toBe("1");
+    expect(screen.queryByTestId("issue-list-error")).toBeNull();
+    expect(screen.queryByText("worldEditor.noIssues")).toBeNull();
+  });
+
+  // Given neither errors nor warnings
+  // When the Issues panel is shown
+  // Then it says there are no issues.
+  it("says there are no issues when there is nothing to report", () => {
+    renderPanel("issues", "p", "y");
+
+    expect(screen.getByText("worldEditor.noIssues")).toBeInTheDocument();
+  });
+
+  // Given errors and a warning
+  // When the Issues panel is shown
+  // Then both lists are drawn, each in its own kind.
+  it("draws errors and warnings as separate lists", () => {
+    renderPanel("issues", "p", "y", {
+      issues: [{ ...warning, code: "be.error.package.x" }],
+      warnings: [warning],
+    });
+
+    expect(screen.getByTestId("issue-list-error").textContent).toBe("1");
+    expect(screen.getByTestId("issue-list-warning").textContent).toBe("1");
   });
 });

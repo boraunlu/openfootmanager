@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import TournamentsFixtureRow from "./TournamentsFixtureRow";
+import { formatMatchDate } from "../../lib/helpers";
 import type { TournamentsTeamLookup } from "./teamLookup";
 import type { FixtureData } from "../../store/gameStore";
 
@@ -10,14 +11,15 @@ vi.mock("react-i18next", async () => {
   return {
     useTranslation: () => {
       useRef(null);
-      return { t: (key: string) => key };
+      return {
+        t: (key: string, params?: Record<string, string>) =>
+          key === "schedule.movedFrom" ? `Moved from ${params?.date}` : key,
+      };
     },
   };
 });
 
-function teamLookup(
-  overrides: Partial<TournamentsTeamLookup> = {},
-): TournamentsTeamLookup {
+function teamLookup(overrides: Partial<TournamentsTeamLookup> = {}): TournamentsTeamLookup {
   return {
     userTeamId: "home",
     isClubTeam: () => true,
@@ -37,18 +39,31 @@ function fixture(overrides: Partial<FixtureData> = {}): FixtureData {
   } as unknown as FixtureData;
 }
 
-function renderRow(
-  props: Partial<React.ComponentProps<typeof TournamentsFixtureRow>> = {},
-) {
+function renderRow(props: Partial<React.ComponentProps<typeof TournamentsFixtureRow>> = {}) {
   return render(
-    <TournamentsFixtureRow
-      fixture={fixture()}
-      testId="row"
-      teams={teamLookup()}
-      {...props}
-    />,
+    <TournamentsFixtureRow fixture={fixture()} testId="row" teams={teamLookup()} {...props} />,
   );
 }
+
+describe("TournamentsFixtureRow moved matches", () => {
+  it("names the date a postponed fixture was first scheduled for", () => {
+    renderRow({
+      fixture: fixture({
+        postponement: { original_date: "2026-08-15", reason: "CupTie" },
+      } as Partial<FixtureData>),
+    });
+
+    expect(screen.getByTestId("moved-from-fixture-1")).toHaveTextContent(
+      `Moved from ${formatMatchDate("2026-08-15")}`,
+    );
+  });
+
+  it("shows nothing extra for a fixture that was never moved", () => {
+    renderRow();
+
+    expect(screen.queryByTestId("moved-from-fixture-1")).not.toBeInTheDocument();
+  });
+});
 
 describe("TournamentsFixtureRow", () => {
   it("shows both teams and no score before a fixture is played", () => {

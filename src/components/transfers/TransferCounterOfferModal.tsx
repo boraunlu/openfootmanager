@@ -1,25 +1,17 @@
 import { useTranslation } from "react-i18next";
 import { AlertTriangle } from "lucide-react";
 
-import type {
-  PlayerData,
-  TeamData,
-  TransferOfferData,
-} from "../../store/gameStore";
-import {
-  formatExactMoney,
-  formatVal,
-  getTeamName,
-  positionBadgeVariant,
-} from "../../lib/helpers";
+import type { PlayerData, TeamData, TransferOfferData } from "../../store/gameStore";
+import { formatExactMoney, getTeamName } from "../../lib/helpers";
 import type { TransferNegotiationResponseData } from "../../services/transfersService";
 import NegotiationFeedbackPanel, {
   type NegotiationFeedbackPanelData,
 } from "../NegotiationFeedbackPanel";
-import { Badge } from "../ui";
-import { translatePositionAbbreviation } from "../squad/SquadTab.helpers";
+import { naturalPositionOf } from "../../lib/positions";
 import TransferNegotiationHistory from "./TransferNegotiationHistory";
 import { parseTransferFeeInput } from "./TransfersTab.helpers";
+import PlayerPositionBadge from "../PlayerPositionBadge";
+import { Dialog } from "../ui";
 
 interface TransferCounterTarget {
   player: PlayerData;
@@ -65,24 +57,21 @@ export default function TransferCounterOfferModal({
   const parsedCounterAmount = parseTransferFeeInput(counterAmount);
 
   return (
-    <div
-      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-      onClick={onClose}
+    <Dialog
+      labelledBy="transfer-counter-offer-title"
+      onClose={onClose}
+      dismissOnBackdrop
+      className="w-full max-w-sm rounded-xl p-6"
     >
-      <div
-        className="bg-white dark:bg-navy-800 rounded-xl shadow-2xl border border-gray-200 dark:border-navy-600 p-6 w-full max-w-sm"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <h3 className="text-sm font-heading font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3">
+      <div>
+        <h3
+          id="transfer-counter-offer-title"
+          className="text-sm font-heading font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3"
+        >
           {t("transfers.counterOffer")}
         </h3>
         <div className="flex items-center gap-3 mb-4">
-          <Badge
-            variant={positionBadgeVariant(counterTarget.player.position)}
-            size="sm"
-          >
-            {translatePositionAbbreviation(t, counterTarget.player.position)}
-          </Badge>
+          <PlayerPositionBadge position={naturalPositionOf(counterTarget.player)} />
           <div>
             <p className="font-semibold text-sm text-gray-800 dark:text-gray-200">
               {counterTarget.player.full_name}
@@ -90,7 +79,7 @@ export default function TransferCounterOfferModal({
             <p className="text-xs text-gray-400">
               {getTeamName(teams, counterTarget.fromTeamId)} •
               {t("transfers.currentOffer", {
-                fee: formatVal(counterTarget.fee),
+                fee: formatExactMoney(counterTarget.fee),
               })}
             </p>
           </div>
@@ -102,9 +91,7 @@ export default function TransferCounterOfferModal({
           >
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="text-xs">
-              <p className="font-heading font-bold uppercase tracking-wider">
-                {blockingTitle}
-              </p>
+              <p className="font-heading font-bold uppercase tracking-wider">{blockingTitle}</p>
               {blockingDetail ? <p className="mt-1">{blockingDetail}</p> : null}
             </div>
           </div>
@@ -161,17 +148,15 @@ export default function TransferCounterOfferModal({
         ) : null}
         <div className="flex gap-2">
           <button
+            type="button"
             onClick={onSubmit}
-            disabled={
-              submitDisabled || counterLoading || counterResult === "accepted"
-            }
+            disabled={submitDisabled || counterLoading || counterResult === "accepted"}
             className="flex-1 py-2 bg-primary-700 hover:bg-primary-800 text-white rounded-lg font-heading font-bold text-sm uppercase tracking-wider transition-colors disabled:opacity-50"
           >
-            {counterLoading
-              ? t("transfers.submitting")
-              : t("transfers.submitCounter")}
+            {counterLoading ? t("transfers.submitting") : t("transfers.submitCounter")}
           </button>
           <button
+            type="button"
             onClick={onClose}
             className="px-4 py-2 bg-gray-200 dark:bg-navy-700 text-gray-600 dark:text-gray-300 rounded-lg font-heading font-bold text-sm uppercase tracking-wider hover:bg-gray-300 dark:hover:bg-navy-600 transition-colors"
           >
@@ -179,6 +164,6 @@ export default function TransferCounterOfferModal({
           </button>
         </div>
       </div>
-    </div>
+    </Dialog>
   );
 }

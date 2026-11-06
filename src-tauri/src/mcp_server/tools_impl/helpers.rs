@@ -1,6 +1,5 @@
 //! Shared helpers for MCP tool implementations.
 
-use chrono::Datelike;
 use ofm_core::state::StateManager;
 
 /// Get the active game from StateManager, returning a formatted error if none.
@@ -57,14 +56,15 @@ pub(crate) fn format_position(pos: &domain::player::Position) -> &'static str {
 
 /// Calculate age from date of birth relative to the game clock.
 pub(crate) fn age_from_dob(dob: &str, game: &ofm_core::game::Game) -> String {
-    let dob_date = match chrono::NaiveDate::parse_from_str(dob, "%Y-%m-%d") {
-        Ok(d) => d,
-        Err(_) => return "?".to_string(),
-    };
-    let ref_date = game.clock.current_date.date_naive();
-    let mut age = ref_date.year() - dob_date.year();
-    if (ref_date.month(), ref_date.day()) < (dob_date.month(), dob_date.day()) {
-        age -= 1;
+    domain::age::age_on(game.clock.current_date.date_naive(), dob)
+        .map_or_else(|| "?".to_string(), |age| age.to_string())
+}
+
+/// An enum as its serialized name, so a result field carries `"Coach"` and not a Debug rendering.
+pub(crate) fn serde_label<T: serde::Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(label)) => label,
+        Ok(other) => other.to_string(),
+        Err(_) => String::new(),
     }
-    age.to_string()
 }

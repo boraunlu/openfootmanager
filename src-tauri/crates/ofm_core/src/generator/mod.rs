@@ -1,11 +1,15 @@
+mod authored_player;
 pub mod clubs;
 pub mod competition_def;
 pub mod definitions;
 pub mod file_format;
 mod generation;
 pub mod package;
+mod package_warnings;
 pub mod scaffold;
+mod staff_bell;
 pub mod world_io;
+mod youth;
 
 pub use clubs::WorldGenConfig;
 pub use competition_def::*;
@@ -13,18 +17,21 @@ pub use definitions::*;
 pub use file_format::{load_definition_file, parse_definition_str};
 pub use package::{
     ConfederationDef, ConflictSeverity, CountryDef, MAX_ARCHIVE_BYTES, PackageError, PackageInfo,
-    PackageLock, PlayerDef, RESERVED_PACKAGE_ID, StackConflict, StaffDef, WorldMetaDef,
-    WorldPackage, extract_package_assets, hash_package_file, is_manifest_metadata_error,
-    is_unreadable, is_valid_package_id, load_world_package, load_world_package_files,
-    load_world_package_from_ofm, merge_world_packages, qualify_package_asset_paths,
-    read_logo_from_ofm, read_package_manifest_from_ofm, validate_manifest, validate_package,
-    validate_package_stack, validate_references,
+    PackageLock, PlayerCareerEntryDef, PlayerDef, RESERVED_PACKAGE_ID, StackConflict, StaffDef,
+    WorldMetaDef, WorldPackage, authored_reputations, extract_package_assets, hash_package_file,
+    is_manifest_metadata_error, is_unreadable, is_valid_package_id, load_world_package,
+    load_world_package_files, load_world_package_from_ofm, merge_world_packages,
+    qualify_package_asset_paths, read_logo_from_ofm, read_package_manifest_from_ofm,
+    validate_manifest, validate_package, validate_package_stack, validate_references,
 };
+pub use package_warnings::package_warnings;
 pub use scaffold::{
     EntityKind, entity_template, manifest_json, names_json, new_package_meta, scaffold_package,
     slugify,
 };
 pub use world_io::*;
+pub(crate) use youth::generate_youth_intake_recruit;
+pub use youth::{generate_youth_academy_recruit, generate_youth_academy_recruit_with_nationality};
 
 use domain::league::{CompetitionFormat, CompetitionScope};
 use domain::player::{Player, Position};
@@ -33,34 +40,40 @@ use domain::team::Team;
 use domain::team::TeamColors;
 use log::info;
 use rand::RngExt;
+use std::collections::HashSet;
+#[cfg(test)]
 use uuid::Uuid;
 
+use crate::finances::MIN_OPENING_RUNWAY_WEEKS;
+use crate::stable_hash::stable_hash;
 use chrono::Datelike;
 use generation::*;
 
 const MAX_OPENING_EXPIRING_CONTRACTS: usize = 2;
-const MIN_OPENING_RUNWAY_WEEKS: i64 = 16;
-const OPENING_SHORT_CONTRACT_END: &str = "2027-06-30";
+const DEFAULT_TEAM_REPUTATION_RANGE: [u32; 2] = [300, 900];
+#[cfg(test)]
+thread_local! {
+    // Count actual builder entries on this test thread, including validation.
+    static PACKAGE_WORLD_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 const OPENING_YOUTH_ACADEMY_SIZE: usize = 3;
-const OPENING_YOUTH_MAX_AGE: i32 = 21;
+use crate::roster::YOUTH_ACADEMY_MAX_AGE as OPENING_YOUTH_MAX_AGE;
 const AVAILABLE_STAFF_MARKET_ROTATION_DAYS: i64 = 30;
 
-fn standard_available_staff_roles() -> [StaffRole; 12] {
-    [
-        StaffRole::Coach,
-        StaffRole::Scout,
-        StaffRole::Physio,
-        StaffRole::Coach,
-        StaffRole::AssistantManager,
-        StaffRole::Scout,
-        StaffRole::Physio,
-        StaffRole::Coach,
-        StaffRole::Coach,
-        StaffRole::Physio,
-        StaffRole::Scout,
-        StaffRole::AssistantManager,
-    ]
-}
+/// Unattached players a generated world opens with, per club, by position
+/// group. Real football always has players between clubs; a club short of
+/// players signs from them rather than having one made for it (see
+/// `squad_floor`). Keepers included, because no club's academy produces a
+/// senior keeper quickly and every club needs a second one.
+/// Players a generated club opens with: its squad slots and an academy keeper.
+const GENERATED_CLUB_PLAYERS: usize = SQUAD_SLOTS + 1;
+
+const OPENING_FREE_AGENTS_PER_CLUB: [(Position, usize); 4] = [
+    (Position::Goalkeeper, 1),
+    (Position::Defender, 1),
+    (Position::Midfielder, 1),
+    (Position::Forward, 1),
+];
 
 fn target_wage_usage_percent(reputation: u32) -> i64 {
     if reputation >= 750 {
@@ -72,17 +85,38 @@ fn target_wage_usage_percent(reputation: u32) -> i64 {
     }
 }
 
-fn normalized_wage_budget(annual_wage_bill: i64, reputation: u32) -> i64 {
-    let annual_wage_bill = annual_wage_bill.max(0);
+fn normalized_wage_budget(weekly_wage_bill: i64, reputation: u32) -> i64 {
+    let weekly_wage_bill = weekly_wage_bill.max(0);
     let usage_target = target_wage_usage_percent(reputation);
-    ((annual_wage_bill * 100) + usage_target - 1) / usage_target
+    ((weekly_wage_bill * 100) + usage_target - 1) / usage_target
 }
 
-fn normalize_opening_contracts(players: &mut [Player]) {
+/// Keep a newly generated squad from opening with a wave of contracts that all
+/// run out the first summer.
+///
+/// "The first summer" is the one after `opening_year`, derived rather than written
+/// down. This compared against a literal `2027-06-30`, which is right for exactly
+/// one opening year: for a 1962 or a 2031 world nothing matched, so the cap did
+/// nothing and however many short deals generation rolled were kept.
+///
+/// `authored_ids` are exempt: neither moved nor counted. The cap is there to tame a
+/// *generated* squad, and a package author who writes four contracts ending the
+/// first summer has said so. Only a player whose contract the author wrote belongs
+/// here; one written with no contract fields is given one by generation and is capped. It has to be told who they are, because
+/// `build_package_club` runs this again after swapping authored players in.
+fn normalize_opening_contracts(
+    players: &mut [Player],
+    opening_year: i32,
+    authored_ids: &HashSet<String>,
+) {
+    let first_summer = format!("{}-06-30", opening_year + 1);
+    let second_summer = format!("{}-06-30", opening_year + 2);
+
     let mut expiring_indices: Vec<usize> = players
         .iter()
         .enumerate()
-        .filter(|(_, player)| player.contract_end.as_deref() == Some(OPENING_SHORT_CONTRACT_END))
+        .filter(|(_, player)| !authored_ids.contains(&player.id))
+        .filter(|(_, player)| player.contract_end() == Some(first_summer.as_str()))
         .map(|(index, _)| index)
         .collect();
 
@@ -92,11 +126,7 @@ fn normalize_opening_contracts(players: &mut [Player]) {
         .into_iter()
         .skip(MAX_OPENING_EXPIRING_CONTRACTS)
     {
-        if let Some(contract_end) = players[index].contract_end.as_deref()
-            && let Ok(year) = contract_end[0..4].parse::<i32>()
-        {
-            players[index].contract_end = Some(format!("{}-06-30", year + 1));
-        }
+        players[index].stage_contract_end(Some(second_summer.clone()));
     }
 }
 
@@ -142,18 +172,10 @@ pub fn default_opening_year() -> u32 {
         .clamp(MIN_OPENING_YEAR as i32, MAX_OPENING_YEAR as i32) as u32
 }
 
-fn opening_player_age(date_of_birth: &str, opening_year: i32) -> Option<i32> {
-    use chrono::{Datelike, NaiveDate};
-
-    let opening_date = NaiveDate::from_ymd_opt(opening_year, 7, 1)?;
-    let birth_date = NaiveDate::parse_from_str(date_of_birth, "%Y-%m-%d").ok()?;
-    let mut age = opening_date.year() - birth_date.year();
-
-    if (birth_date.month(), birth_date.day()) > (opening_date.month(), opening_date.day()) {
-        age -= 1;
-    }
-
-    Some(age)
+/// Age on 1 July of `opening_year`, by month and day (not day-of-year, which is off by one
+/// for birthdays after 28 February across a leap boundary). `None` for an unparseable date.
+pub(crate) fn opening_player_age(date_of_birth: &str, opening_year: i32) -> Option<i32> {
+    domain::age::age_on(domain::age::season_midpoint(opening_year), date_of_birth)
 }
 
 fn is_opening_youth_candidate(player: &Player, opening_year: i32) -> bool {
@@ -241,58 +263,6 @@ pub fn repair_opening_youth_academies(game: &mut crate::game::Game) -> bool {
     repaired
 }
 
-/// Generate a youth prospect who is joining **now**.
-///
-/// `current_year` is the year the recruit arrives, not the year the world opened:
-/// a prospect scouted five seasons into a career is fifteen in *that* season. The
-/// two coincide only for the opening intake, which is why the distinction is
-/// worth naming — a call site that passed the world's opening year here would
-/// quietly produce a squad of players five years too old.
-pub fn generate_youth_academy_recruit(
-    team: &Team,
-    target_position: Option<&Position>,
-    current_year: u32,
-) -> Player {
-    generate_youth_academy_recruit_with_nationality(team, target_position, None, current_year)
-}
-
-/// As [`generate_youth_academy_recruit`], with the prospect's nationality forced
-/// rather than drawn from the club's country. See there for `current_year`.
-pub fn generate_youth_academy_recruit_with_nationality(
-    team: &Team,
-    target_position: Option<&Position>,
-    nationality_override: Option<&str>,
-    current_year: u32,
-) -> Player {
-    use domain::player::SquadRole;
-
-    let mut rng = rand::rng();
-    let names_def = default_names_definition();
-    let country_codes = generation::nationality_distribution();
-    let nationality = nationality_override
-        .map(generation::canonicalize_generated_nationality)
-        .unwrap_or_else(|| {
-            // `team_local_nationality`, not `team.country`: a club carries both a
-            // location and a football identity, and where they differ the
-            // football identity is the one a youth intake should draw on.
-            pick_nationality_from_def(team_local_nationality(team), country_codes, &mut rng)
-        });
-    let youth_slots = youth_slots_for_target(target_position.map(Position::to_group_position));
-    let slot_index = youth_slots[rng.random_range(0..youth_slots.len())];
-    let mut player = generate_random_player_from_def(
-        &team.id,
-        slot_index,
-        &nationality,
-        current_year,
-        &names_def,
-        &mut rng,
-    );
-    player.squad_role = SquadRole::Youth;
-    player.transfer_listed = false;
-    player.loan_listed = false;
-    player
-}
-
 /// Generate a senior free-agent player for a national squad. `squad_slot`
 /// follows the standard squad layout (GK 0-1, DEF 2-8, MID 9-15, FWD 16-21)
 /// and drives the position; the player belongs to no club and holds no
@@ -301,39 +271,70 @@ pub fn generate_national_team_player(
     nationality: &str,
     squad_slot: usize,
     opening_year: u32,
+    rng: &mut impl rand::Rng,
 ) -> Player {
-    let mut rng = rand::rng();
     let names_def = default_names_definition();
     let nationality = generation::canonicalize_generated_nationality(nationality);
     // Avoid the youth-reserved slots so the player generates at a senior age.
     let slot = senior_slot(squad_slot % SQUAD_SLOTS);
-    let mut player = generate_random_player_from_def(
+    let player = generate_random_player_from_def(
         "national-pool",
         slot,
         &nationality,
         opening_year,
+        PlayerRoll::unscaled(None),
         &names_def,
-        &mut rng,
+        rng,
     );
+    let mut agent = as_free_agent(player);
+    // Specific from the start, like every other player made after the world is built.
+    crate::player_identity::upgrade_player_identity(&mut agent, None);
+    agent
+}
+
+/// A generated player belonging to nobody: no club, no contract, no wage, not
+/// on any list.
+fn as_free_agent(mut player: Player) -> Player {
     player.team_id = None;
-    player.contract_end = None;
-    player.wage = 0;
+    // The academy squad belongs to a club; a player generated for one (an authored `youth` flag)
+    // is a senior free agent once he has none.
+    player.squad_role = domain::player::SquadRole::Senior;
+    // Both dates, not just the end: this player is generated from a club
+    // template and then unattached, so leaving a start behind would describe an
+    // agreement with no employer and no expiry.
+    player.stage_contract_start(None);
+    player.stage_contract_end(None);
+    player.stage_wage(0);
     player.transfer_listed = false;
     player.loan_listed = false;
     player
 }
 
-fn normalize_generated_team(team: &mut Team, players: &mut [Player], opening_year: i32) {
+fn normalize_generated_team(
+    team: &mut Team,
+    players: &mut [Player],
+    opening_year: i32,
+    authored_ids: &HashSet<String>,
+) {
     seed_opening_youth_academy(players, opening_year);
-    normalize_opening_contracts(players);
+    normalize_opening_contracts(players, opening_year, authored_ids);
+    // Last, and here rather than in `build_club`: the package path calls this
+    // again after swapping generated players for authored ones, and a role
+    // belongs to the squad that finished rather than the one that was built.
+    crate::ai_roles::assign_squad_roles(team, players.iter());
 
-    let annual_wage_bill: i64 = players.iter().map(|player| player.wage as i64).sum();
-    let weekly_wage_spend = (annual_wage_bill + 51) / 52;
+    let weekly_wage_bill: i64 = players.iter().map(|player| player.wage() as i64).sum();
 
-    team.wage_budget = normalized_wage_budget(annual_wage_bill, team.reputation);
-    team.finance = team
-        .finance
-        .max(weekly_wage_spend.saturating_mul(MIN_OPENING_RUNWAY_WEEKS));
+    team.wage_budget = normalized_wage_budget(weekly_wage_bill, team.reputation);
+    floor_opening_cash(team, weekly_wage_bill);
+}
+
+fn floor_opening_cash(team: &mut Team, weekly_wage_bill: i64) {
+    team.finance = team.finance.max(
+        weekly_wage_bill
+            .max(0)
+            .saturating_mul(MIN_OPENING_RUNWAY_WEEKS),
+    );
 }
 
 /// The country a club's *people* should be drawn from.
@@ -357,19 +358,15 @@ fn create_staff_generator_context() -> (definitions::NamesDefinition, Vec<String
     (names_def, generation::nationality_distribution().clone())
 }
 
-fn generate_missing_team_staff(world: &mut WorldData, opening_year: u32) -> bool {
-    let mut rng = rand::rng();
+fn generate_missing_team_staff(
+    world: &mut WorldData,
+    opening_year: u32,
+    rng: &mut impl rand::Rng,
+) -> bool {
     let (names_def, country_codes) = create_staff_generator_context();
     let mut generated_staff = Vec::new();
-    let roles = [
-        StaffRole::AssistantManager,
-        StaffRole::Coach,
-        StaffRole::Scout,
-        StaffRole::Physio,
-    ];
-
     for team in &world.teams {
-        for role in &roles {
+        for role in &StaffRole::ALL {
             let has_role = world.staff.iter().any(|staff_member| {
                 staff_member.team_id.as_deref() == Some(team.id.as_str())
                     && &staff_member.role == role
@@ -379,14 +376,14 @@ fn generate_missing_team_staff(world: &mut WorldData, opening_year: u32) -> bool
             }
 
             let nationality =
-                pick_nationality_from_def(team_local_nationality(team), &country_codes, &mut rng);
+                pick_nationality_from_def(team_local_nationality(team), &country_codes, rng);
             generated_staff.push(generate_random_staff_from_def(
                 &team.id,
                 role.clone(),
                 &nationality,
                 opening_year,
                 &names_def,
-                &mut rng,
+                rng,
             ));
         }
     }
@@ -425,29 +422,18 @@ pub(crate) fn generated_manager_for(
     // would silently change the world's history. Keying on the appointment also
     // makes the same world produce the same managers twice running.
     use rand::SeedableRng;
-    let mut rng = rand::rngs::StdRng::seed_from_u64(stable_seed(manager_id));
+    let mut rng = rand::rngs::StdRng::seed_from_u64(stable_hash(manager_id.as_bytes(), 0));
 
     let nationality =
         pick_nationality_from_def(team_local_nationality(team), country_codes, &mut rng);
     generate_random_unemployed_manager(&nationality, names_def, opening_year, &mut rng)
 }
 
-/// FNV-1a over the bytes, for turning an id into an RNG seed.
-///
-/// Hand-rolled rather than `DefaultHasher`, whose output std does not promise to
-/// keep stable between releases — a world would then generate different managers
-/// purely because it was built with a different compiler.
-fn stable_seed(text: &str) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in text.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-fn generate_standard_available_staff_for_teams(teams: &[Team], opening_year: u32) -> Vec<Staff> {
-    let mut rng = rand::rng();
+fn generate_standard_available_staff_for_teams(
+    teams: &[Team],
+    opening_year: u32,
+    rng: &mut impl rand::Rng,
+) -> Vec<Staff> {
     let (names_def, country_codes) = create_staff_generator_context();
     let fallback_seed = teams
         .first()
@@ -464,14 +450,14 @@ fn generate_standard_available_staff_for_teams(teams: &[Team], opening_year: u32
                     .get(rng.random_range(0..teams.len().max(1)))
                     .map(team_local_nationality)
                     .unwrap_or(fallback_seed);
-                pick_nationality_from_def(seed_country, &country_codes, &mut rng)
+                pick_nationality_from_def(seed_country, &country_codes, &mut *rng)
             };
             generate_random_staff_unattached_from_def(
                 role,
                 &nationality,
                 opening_year,
                 &names_def,
-                &mut rng,
+                &mut *rng,
             )
         })
         .collect()
@@ -484,11 +470,17 @@ fn available_staff_count(staff: &[Staff]) -> usize {
         .count()
 }
 
-fn replace_available_staff_market(staff: &mut Vec<Staff>, teams: &[Team], opening_year: u32) {
+fn replace_available_staff_market(
+    staff: &mut Vec<Staff>,
+    teams: &[Team],
+    opening_year: u32,
+    rng: &mut impl rand::Rng,
+) {
     staff.retain(|staff_member| staff_member.team_id.is_some());
     staff.extend(generate_standard_available_staff_for_teams(
         teams,
         opening_year,
+        rng,
     ));
 }
 
@@ -496,18 +488,50 @@ pub fn replenish_available_staff_market(
     staff: &mut Vec<Staff>,
     teams: &[Team],
     opening_year: u32,
+    rng: &mut impl rand::Rng,
 ) -> bool {
     if available_staff_count(staff) > 0 {
         return false;
     }
 
-    replace_available_staff_market(staff, teams, opening_year);
+    replace_available_staff_market(staff, teams, opening_year, rng);
     true
 }
 
 pub fn normalize_imported_world_for_career_start(world: &mut WorldData, opening_year: u32) {
-    generate_missing_team_staff(world, opening_year);
-    let _ = replenish_available_staff_market(&mut world.staff, &world.teams, opening_year);
+    // An imported world has no game yet, so the staff it is given are keyed by what the world is:
+    // importing the same world twice gives it the same backroom.
+    let mut rng = crate::seed::rng_from_key(&format!(
+        "import-staff/{}/{}/{}",
+        world.name,
+        world.teams.len(),
+        opening_year
+    ));
+    generate_missing_team_staff(world, opening_year, &mut rng);
+    let _ =
+        replenish_available_staff_market(&mut world.staff, &world.teams, opening_year, &mut rng);
+    floor_imported_world_opening_cash(world);
+}
+
+fn floor_imported_world_opening_cash(world: &mut WorldData) {
+    let bills: Vec<(String, i64)> = world
+        .teams
+        .iter()
+        .map(|team| {
+            let weekly_wage_bill: i64 = world
+                .players
+                .iter()
+                .filter(|player| player.team_id.as_deref() == Some(team.id.as_str()))
+                .map(|player| i64::from(player.wage()))
+                .sum();
+            (team.id.clone(), weekly_wage_bill)
+        })
+        .collect();
+    for (team_id, weekly_wage_bill) in bills {
+        if let Some(team) = world.teams.iter_mut().find(|team| team.id == team_id) {
+            floor_opening_cash(team, weekly_wage_bill);
+        }
+    }
 }
 
 pub fn process_available_staff_market(game: &mut crate::game::Game) -> bool {
@@ -516,9 +540,16 @@ pub fn process_available_staff_market(game: &mut crate::game::Game) -> bool {
     let today = game.clock.current_date.format("%Y-%m-%d").to_string();
     let current_year = game.clock.current_date.year() as u32;
     let available_count = available_staff_count(&game.staff);
+    // The number of employed people is part of the stream's name. A market bought out and
+    // refilled on one day would otherwise deal the same ids again, to people now on a club's
+    // books; each batch hired adds to that number, so each refill is a stream of its own, with
+    // no limit on how many a day can have.
+    // Candidates are discarded by a rotation, so they cannot identify the retained batch.
+    let employed_count = game.staff.len() - available_count;
+    let mut rng = game.rng_today(&format!("staff-market/{employed_count}"));
 
     if available_count == 0 {
-        replace_available_staff_market(&mut game.staff, &game.teams, current_year);
+        replace_available_staff_market(&mut game.staff, &game.teams, current_year, &mut rng);
         game.available_staff_market_last_activity_date = Some(today);
         return true;
     }
@@ -538,7 +569,7 @@ pub fn process_available_staff_market(game: &mut crate::game::Game) -> bool {
         return false;
     }
 
-    replace_available_staff_market(&mut game.staff, &game.teams, current_year);
+    replace_available_staff_market(&mut game.staff, &game.teams, current_year, &mut rng);
     game.available_staff_market_last_activity_date = Some(today);
     true
 }
@@ -552,6 +583,7 @@ pub fn replenish_manager_and_scout_market(game: &mut crate::game::Game) {
     // The market is topped up while a career runs, so new faces are aged against
     // the running clock rather than the year the world opened in.
     let market_year = game.clock.current_date.year() as u32;
+    let mut rng = game.rng_today("manager-scout-market");
     let team_count = game.teams.len();
     let floor = team_count * 2;
 
@@ -571,7 +603,6 @@ pub fn replenish_manager_and_scout_market(game: &mut crate::game::Game) {
     if unemployed_mgr_count < floor {
         let needed = floor - unemployed_mgr_count;
         let (names_def, country_codes) = create_staff_generator_context();
-        let mut rng = rand::rng();
         for _ in 0..needed {
             let nationality = if country_codes.is_empty() {
                 "ENG".to_string()
@@ -599,7 +630,6 @@ pub fn replenish_manager_and_scout_market(game: &mut crate::game::Game) {
     if unemployed_scout_count < floor {
         let needed = floor - unemployed_scout_count;
         let (names_def, country_codes) = create_staff_generator_context();
-        let mut rng = rand::rng();
         for _ in 0..needed {
             let nationality = if country_codes.is_empty() {
                 "ENG".to_string()
@@ -637,10 +667,10 @@ pub fn generate_world(
 }
 
 /// Build a club (without players) from a definition. Uses the definition's
-/// stable `id` when set (world packages); otherwise a fresh UUID.
+/// stable `id` when set (world packages); otherwise one drawn from `rng`.
 fn build_team(tdef: &TeamDef, rng: &mut impl rand::Rng) -> domain::team::Team {
     let team_id = if tdef.id.is_empty() {
-        Uuid::new_v4().to_string()
+        generation::seeded_id(rng)
     } else {
         tdef.id.clone()
     };
@@ -662,7 +692,9 @@ fn build_team(tdef: &TeamDef, rng: &mut impl rand::Rng) -> domain::team::Team {
         tdef.stadium_name.clone()
     };
 
-    let rep_range = tdef.reputation_range.unwrap_or([300, 900]);
+    let rep_range = tdef
+        .reputation_range
+        .unwrap_or(DEFAULT_TEAM_REPUTATION_RANGE);
     let fin_range = tdef.finance_range.unwrap_or([500_000, 10_000_000]);
 
     let mut team = domain::team::Team::new(
@@ -703,6 +735,10 @@ fn build_team(tdef: &TeamDef, rng: &mut impl rand::Rng) -> domain::team::Team {
         secondary: tdef.colors.secondary.clone(),
     };
     team.play_style = play_style_from_str(&tdef.play_style);
+    // A club's tactics are its style expressed in the nine dials the engine
+    // actually reads. Set here rather than left at the neutral default, which is
+    // where every club in every save had been sitting: see `ai_tactics`.
+    team.tactics_phase = crate::ai_tactics::blueprint_for(&team.play_style);
     team.media.logo = tdef.logo.clone();
     if let Some(ref pattern_str) = tdef.kit_pattern
         && let Ok(pattern) = pattern_str.parse()
@@ -725,7 +761,7 @@ fn build_club(
     let mut team = build_team(tdef, rng);
     let team_id = team.id.clone();
 
-    let mut team_players = Vec::with_capacity(SQUAD_SLOTS);
+    let mut team_players = Vec::with_capacity(GENERATED_CLUB_PLAYERS);
     for slot in 0..SQUAD_SLOTS {
         let nationality = pick_nationality_from_def(&tdef.country, country_codes, rng);
         let mut player = generate_random_player_from_def(
@@ -733,6 +769,7 @@ fn build_club(
             slot,
             &nationality,
             opening_year,
+            PlayerRoll::unscaled(None),
             names_def,
             rng,
         );
@@ -745,12 +782,7 @@ fn build_club(
     }
 
     let mut team_staff = Vec::with_capacity(4);
-    for role in [
-        StaffRole::AssistantManager,
-        StaffRole::Coach,
-        StaffRole::Scout,
-        StaffRole::Physio,
-    ] {
+    for role in StaffRole::ALL {
         let nationality = pick_nationality_from_def(&tdef.country, country_codes, rng);
         team_staff.push(generate_random_staff_from_def(
             &team_id,
@@ -762,24 +794,70 @@ fn build_club(
         ));
     }
 
-    normalize_generated_team(&mut team, &mut team_players, opening_year as i32);
+    // An academy keeper on top of the two senior ones. The opening academy
+    // never takes a keeper from the senior squad — that would leave the club
+    // below the squad floor — so without this one a club's academy could never
+    // replace a keeper. Added before the club is normalised, so its wage
+    // budget is set with him in the squad.
+    let nationality = pick_nationality_from_def(&tdef.country, country_codes, rng);
+    let youth_keeper_slot = youth_slots_for_target(Some(Position::Goalkeeper))[0];
+    let mut academy_keeper = generate_random_player_from_def(
+        &team_id,
+        youth_keeper_slot,
+        &nationality,
+        opening_year,
+        PlayerRoll::unscaled(None),
+        names_def,
+        rng,
+    );
+    academy_keeper.squad_role = domain::player::SquadRole::Youth;
+    academy_keeper.jersey_number = crate::roster::jersey_among(
+        team_players
+            .iter()
+            .filter_map(|player| player.jersey_number),
+        None,
+    );
+    team_players.push(academy_keeper);
+
+    // A generated club has no authored players; `build_package_club` names them.
+    normalize_generated_team(
+        &mut team,
+        &mut team_players,
+        opening_year as i32,
+        &HashSet::new(),
+    );
     (team, team_players, team_staff)
 }
 
-/// Position-group floor for a finished squad, or 0 for a group with no floor.
-fn group_floor(group: &Position) -> usize {
-    MIN_PLAYERS_PER_GROUP
-        .iter()
-        .find(|(position, _)| position == group)
-        .map(|(_, floor)| *floor)
-        .unwrap_or(0)
-}
-
-/// Index of a position group within [`MIN_PLAYERS_PER_GROUP`].
-fn group_index(group: &Position) -> Option<usize> {
-    MIN_PLAYERS_PER_GROUP
-        .iter()
-        .position(|(position, _)| position == group)
+/// The free agents a generated world opens with: [`OPENING_FREE_AGENTS_PER_CLUB`]
+/// for each of `club_count` clubs, senior-aged, drawn from `rng` so a seeded
+/// world opens with the same pool.
+fn generate_opening_free_agents(
+    club_count: usize,
+    country_codes: &[String],
+    opening_year: u32,
+    names_def: &NamesDefinition,
+    rng: &mut impl rand::Rng,
+) -> Vec<Player> {
+    let mut free_agents = Vec::new();
+    for (group, per_club) in OPENING_FREE_AGENTS_PER_CLUB {
+        for _ in 0..club_count * per_club {
+            let nationality = &country_codes[rng.random_range(0..country_codes.len())];
+            let player = generate_random_player_from_def(
+                "",
+                senior_slot_for(&group),
+                nationality,
+                opening_year,
+                PlayerRoll::unscaled(None),
+                names_def,
+                rng,
+            );
+            let mut agent = as_free_agent(player);
+            agent.jersey_number = None;
+            free_agents.push(agent);
+        }
+    }
+    free_agents
 }
 
 /// Drop generated backfill players — the ones no authored player displaced —
@@ -826,10 +904,8 @@ fn trim_backfill_players(
         // Recount survivors each pass so the floors are honoured as we go.
         let mut counts = [0usize; MIN_PLAYERS_PER_GROUP.len()];
         for (index, player) in players.iter().enumerate() {
-            if !doomed[index]
-                && let Some(group) = group_index(&player.position.to_group_position())
-            {
-                counts[group] += 1;
+            if !doomed[index] {
+                counts[crate::squad_floor::group_index(&player.position)] += 1;
             }
         }
 
@@ -839,8 +915,8 @@ fn trim_backfill_players(
             .filter(|index| !doomed[*index])
             .filter_map(|index| {
                 let group = players[index].position.to_group_position();
-                let surviving = group_index(&group).map(|slot| counts[slot]).unwrap_or(0);
-                let surplus = surviving.checked_sub(group_floor(&group))?;
+                let surviving = counts[crate::squad_floor::group_index(&group)];
+                let surplus = surviving.checked_sub(crate::squad_floor::group_floor(&group))?;
                 (surplus > 0).then_some((index, surplus))
             })
             .max_by_key(|(index, surplus)| {
@@ -884,8 +960,12 @@ fn build_package_club(
     }
 
     let mut placed = vec![false; players.len()];
+    let mut authored_ids = HashSet::new();
     for def in authored {
         let authored_player = generate_player_from_def(def, &team.id, opening_year, names_def, rng);
+        if authored_player::authors_a_contract(def) {
+            authored_ids.insert(authored_player.id.clone());
+        }
         let group = authored_player.position.to_group_position();
         let slot = players
             .iter()
@@ -907,8 +987,9 @@ fn build_package_club(
     trim_backfill_players(&mut players, &placed, authored.len(), opening_year as i32);
 
     // Authored wages may differ from the players they replaced, so re-normalise
-    // the opening wage budget to the final squad.
-    normalize_generated_team(&mut team, &mut players, opening_year as i32);
+    // the opening wage budget to the final squad. The authored players are named so
+    // the contract cap, which runs again here, leaves their deals alone.
+    normalize_generated_team(&mut team, &mut players, opening_year as i32, &authored_ids);
     (team, players, staff)
 }
 
@@ -952,12 +1033,20 @@ fn regions_from_package(
         .map(|country| (country.id.as_str(), country.confederation.as_str()))
         .collect();
 
-    for team in teams {
-        let code = if team.football_nation.is_empty() {
-            team.country.as_str()
-        } else {
-            team.football_nation.as_str()
-        };
+    // Declared countries remain part of the world even when they have no club.
+    // Carry them in the existing region catalog so export/load retains them.
+    for code in package
+        .countries
+        .iter()
+        .map(|country| country.id.as_str())
+        .chain(teams.iter().map(|team| {
+            if team.football_nation.is_empty() {
+                team.country.as_str()
+            } else {
+                team.football_nation.as_str()
+            }
+        }))
+    {
         let region = country_region
             .get(code)
             .copied()
@@ -1015,6 +1104,7 @@ fn filler_club_defs(
         nations: vec![nation],
         color_palette: standard.color_palette.clone(),
         generic_cities: standard.generic_cities.clone(),
+        opening_year: None,
     };
     let mut defs = clubs::generate_club_defs(&config, rng);
     // When the authored team's country isn't a generation nation, the generator
@@ -1080,6 +1170,7 @@ fn build_fallback_competition(
             Some("be.competition.fallbackLeagueName".to_string())
         },
         logo: None,
+        calendar: None,
     }
 }
 
@@ -1098,6 +1189,19 @@ pub fn build_world_data_from_package(
     opening_year: Option<u32>,
     sources: &definitions::DefinitionSources,
 ) -> WorldData {
+    build_world_data_from_package_with_rng(package, opening_year, sources, &mut rand::rng())
+}
+
+/// [`build_world_data_from_package`] drawing every die from `rng`, so a seeded one gives the same
+/// world twice.
+pub fn build_world_data_from_package_with_rng(
+    package: &package::WorldPackage,
+    opening_year: Option<u32>,
+    sources: &definitions::DefinitionSources,
+    rng: &mut impl rand::Rng,
+) -> WorldData {
+    #[cfg(test)]
+    PACKAGE_WORLD_BUILDS.with(|count| count.set(count.get() + 1));
     let opening_year = opening_year
         .or_else(|| {
             package
@@ -1113,7 +1217,6 @@ pub fn build_world_data_from_package(
         })
         .unwrap_or_else(default_opening_year)
         .clamp(MIN_OPENING_YEAR, MAX_OPENING_YEAR);
-    let mut rng = rand::rng();
     let names_def = {
         // From `sources`, so a package's own pools layer on top of whatever the
         // player resolved rather than on top of the embedded copy — the same
@@ -1177,7 +1280,7 @@ pub fn build_world_data_from_package(
             &country_codes,
             opening_year,
             &names_def,
-            &mut rng,
+            &mut *rng,
         );
         // Replace auto-generated staff with authored versions, consuming each slot
         // at most once so multiple authored staff of the same role all survive.
@@ -1188,7 +1291,7 @@ pub fn build_world_data_from_package(
                 Some(&team.id),
                 opening_year,
                 &names_def,
-                &mut rng,
+                &mut *rng,
             );
             // Only the original auto-generated slots are replacement candidates;
             // already-placed authored staff (appended below) are never overwritten.
@@ -1209,6 +1312,13 @@ pub fn build_world_data_from_package(
         players.extend(team_players);
         staff.extend(team_staff);
     }
+    // An authored player with no club is a free agent: the package format says so ("empty /
+    // omitted = unattached"), and they used to be dropped without a word. Generated against a
+    // placeholder club and then unattached, like every other free agent.
+    for pdef in package.players.iter().filter(|p| p.club.is_empty()) {
+        let agent = generation::generate_player_from_def(pdef, "", opening_year, &names_def, rng);
+        players.push(as_free_agent(agent));
+    }
     // Unattached authored staff (no club) go directly into the staff list.
     for sdef in package.staff.iter().filter(|s| s.club.is_empty()) {
         staff.push(generation::generate_staff_from_authored_def(
@@ -1216,7 +1326,7 @@ pub fn build_world_data_from_package(
             None,
             opening_year,
             &names_def,
-            &mut rng,
+            &mut *rng,
         ));
     }
 
@@ -1230,9 +1340,9 @@ pub fn build_world_data_from_package(
     if package.competitions.is_empty() && teams.len() == 1 {
         build_notices.push("be.error.notice.fallbackTeamsFilled".to_string());
         let country = teams[0].country.clone();
-        for def in &filler_club_defs(&country, THIN_PACKAGE_MIN_TEAMS - 1, sources, &mut rng) {
+        for def in &filler_club_defs(&country, THIN_PACKAGE_MIN_TEAMS - 1, sources, &mut *rng) {
             let (team, team_players, team_staff) =
-                build_club(def, &country_codes, opening_year, &names_def, &mut rng);
+                build_club(def, &country_codes, opening_year, &names_def, &mut *rng);
             teams.push(team);
             players.extend(team_players);
             staff.extend(team_staff);
@@ -1322,9 +1432,14 @@ fn generate_world_with_rng(
     config: &clubs::WorldGenConfig,
     sources: &definitions::DefinitionSources,
 ) -> (Vec<domain::team::Team>, Vec<Player>, Vec<Staff>) {
-    // A procedurally generated world is contemporary, so it opens in the real
-    // calendar year rather than a year baked in at build time.
-    let opening_year = default_opening_year();
+    // A procedurally generated world is contemporary, so unless the config names
+    // a year it opens in the real calendar year rather than one baked in at
+    // build time.
+    let opening_year = config
+        .opening_year
+        .map_or_else(default_opening_year, |year| {
+            year.clamp(MIN_OPENING_YEAR, MAX_OPENING_YEAR)
+        });
     let mut teams_out = Vec::new();
     let mut players = Vec::new();
     let mut staff = Vec::new();
@@ -1348,6 +1463,14 @@ fn generate_world_with_rng(
         staff.extend(team_staff);
         teams_out.push(team);
     }
+
+    players.extend(generate_opening_free_agents(
+        team_defs.len(),
+        country_codes,
+        opening_year,
+        &names_def,
+        &mut rng,
+    ));
 
     // Generate free-agent staff
     for role in standard_available_staff_roles() {
@@ -1374,6 +1497,7 @@ fn generate_world_with_rng(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod identity;
     use crate::clock::GameClock;
     use crate::game::Game;
     use chrono::{TimeZone, Utc};
@@ -1389,6 +1513,36 @@ mod tests {
     use domain::staff::{Staff, StaffAttributes, StaffRole};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+
+    /// Given one seed and two configs that name different opening years,
+    /// When a world is generated from each,
+    /// Then every contract end moves by exactly the years between them —
+    ///      so the named year, not the wall clock, dates the world, and a world
+    ///      built for a clock in 2033 is not one whose contracts all expired.
+    #[test]
+    fn a_world_generated_for_a_named_year_is_dated_for_that_year() {
+        let sources = definitions::DefinitionSources::embedded_only();
+        let contract_ends = |year: u32| {
+            let mut config = clubs::WorldGenConfig::compact();
+            config.opening_year = Some(year);
+            let (_, players, _) =
+                generate_world_with_rng(rand::rngs::StdRng::seed_from_u64(1), &config, &sources);
+            players
+                .iter()
+                .filter_map(|player| player.contract_end().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+
+        let in_2033 = contract_ends(2033);
+        let in_2040 = contract_ends(2040);
+
+        assert!(!in_2033.is_empty());
+        let shifted: Vec<String> = in_2033
+            .iter()
+            .map(|end| format!("{}{}", end[..4].parse::<u32>().unwrap() + 7, &end[4..]))
+            .collect();
+        assert_eq!(shifted, in_2040);
+    }
 
     // -- authored squad backfill trimming (#349) ----------------------------
 
@@ -1538,8 +1692,7 @@ mod tests {
         assert_eq!(age, 21, "a 1940-born player is 21 in 1962");
 
         let contract_end_year: i32 = star
-            .contract_end
-            .as_deref()
+            .contract_end()
             .expect("authored player should get a contract")[0..4]
             .parse()
             .expect("contract end should start with a year");
@@ -1767,7 +1920,7 @@ mod tests {
         assert_eq!(count_authored(&players), 28, "every authored player kept");
         assert_eq!(
             count_group(&players, Position::Goalkeeper),
-            group_floor(&Position::Goalkeeper),
+            crate::squad_floor::group_floor(&Position::Goalkeeper),
             "generated keepers backfill the missing group"
         );
         assert_eq!(players.len(), 30);
@@ -1873,21 +2026,144 @@ mod tests {
         }
     }
 
+    /// The cap on squad members opening on an expiring contract compared against a
+    /// literal `2027-06-30`, so it did nothing for any era but 2026: a 1962 world and
+    /// a 2031 world both opened with however many short contracts generation rolled.
+    ///
+    /// Built from a real club and then overwritten with a controlled squad, because
+    /// generation rolls contract lengths at random and a test that merely hoped for
+    /// more than two short deals would pass or fail by seed. 2026 is included as the
+    /// control: it held before and must hold after.
+    #[test]
+    fn opening_contract_cap_follows_the_opening_year() {
+        for opening_year in [HISTORICAL_OPENING_YEAR, TEST_OPENING_YEAR, 2031] {
+            let tdef = test_team_def();
+            let names_def = default_names_definition();
+            let country_codes = generation::nationality_distribution();
+            let mut rng = StdRng::seed_from_u64(7);
+            let (mut team, mut players, _staff) =
+                build_club(&tdef, country_codes, opening_year, &names_def, &mut rng);
+
+            let expiring_next_summer = format!("{}-06-30", opening_year + 1);
+            for player in players.iter_mut().take(6) {
+                player.stage_contract_end(Some(expiring_next_summer.clone()));
+            }
+
+            normalize_generated_team(
+                &mut team,
+                &mut players,
+                opening_year as i32,
+                &HashSet::new(),
+            );
+
+            let still_expiring = players
+                .iter()
+                .filter(|player| player.contract_end() == Some(expiring_next_summer.as_str()))
+                .count();
+            assert!(
+                still_expiring <= MAX_OPENING_EXPIRING_CONTRACTS,
+                "a {opening_year} world opened with {still_expiring} players on contracts \
+                 ending {expiring_next_summer}; the cap is {MAX_OPENING_EXPIRING_CONTRACTS}"
+            );
+        }
+    }
+
+    /// The cap exists so a generated squad does not open with a wave of renewals. An
+    /// author who writes four contracts ending the first summer has said so, and the
+    /// cap, which runs again after authored players are swapped in, must not move them.
+    #[test]
+    fn authored_contracts_are_not_moved_by_the_opening_cap() {
+        for opening_year in [HISTORICAL_OPENING_YEAR, TEST_OPENING_YEAR] {
+            let first_summer = format!("{}-06-30", opening_year + 1);
+            let authored: Vec<package::PlayerDef> = (0..4)
+                .map(|index| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": format!("authored-{index}"),
+                        "firstName": "Authored",
+                        "lastName": format!("Authored{index}"),
+                        "club": "fc-test",
+                        "nationality": "ENG",
+                        "position": "Striker",
+                        "dateOfBirth": "1990-05-01",
+                        "overall": 70,
+                        "contractEnd": first_summer,
+                    }))
+                    .expect("the fixture deserializes")
+                })
+                .collect();
+
+            let players = build_test_package_club_in_year(&authored, opening_year);
+
+            let kept = players
+                .iter()
+                .filter(|player| player.match_name.starts_with("Authored"))
+                .filter(|player| player.contract_end() == Some(first_summer.as_str()))
+                .count();
+            assert_eq!(
+                kept,
+                4,
+                "a {opening_year} package lost {} of four authored contracts ending \
+                 {first_summer} to the opening cap",
+                4 - kept
+            );
+        }
+    }
+
+    /// An author who wrote no contract has not said anything about it, so those
+    /// players are as subject to the cap as generated ones. Exempting every authored
+    /// player would let a package of real people, with no contract fields, open a
+    /// club with most of its squad expiring in the first summer.
+    #[test]
+    fn authored_players_who_wrote_no_contract_are_still_capped() {
+        for opening_year in [HISTORICAL_OPENING_YEAR, TEST_OPENING_YEAR] {
+            let first_summer = format!("{}-06-30", opening_year + 1);
+            let authored: Vec<package::PlayerDef> = (0..40)
+                .map(|index| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": format!("authored-{index}"),
+                        "firstName": "Authored",
+                        "lastName": format!("Authored{index}"),
+                        "club": "fc-test",
+                        "nationality": "ENG",
+                        "position": "Striker",
+                        "dateOfBirth": "1990-05-01",
+                        "overall": 70,
+                    }))
+                    .expect("the fixture deserializes")
+                })
+                .collect();
+
+            let players = build_test_package_club_in_year(&authored, opening_year);
+
+            let expiring = players
+                .iter()
+                .filter(|player| player.contract_end() == Some(first_summer.as_str()))
+                .count();
+            assert!(
+                expiring <= MAX_OPENING_EXPIRING_CONTRACTS,
+                "a {opening_year} club opened with {expiring} contracts ending {first_summer}; \
+                 the cap is {MAX_OPENING_EXPIRING_CONTRACTS}"
+            );
+        }
+    }
+
     #[test]
     fn generate_national_team_player_is_a_senior_free_agent() {
-        let player = generate_national_team_player("JP", 5, TEST_OPENING_YEAR);
+        let player = generate_national_team_player("JP", 5, TEST_OPENING_YEAR, &mut rand::rng());
 
         assert_eq!(player.nationality, "JP");
         assert_eq!(
             player.team_id, None,
             "national-pool players belong to no club"
         );
-        assert_eq!(player.contract_end, None);
+        assert_eq!(player.contract_end(), None);
         assert_eq!(
-            player.position.to_group_position(),
-            Position::Defender,
-            "slot 5 is a defender"
+            player.contract_start(),
+            None,
+            "an unattached player must not carry half an agreement: this one is built \
+             from a club template, so the start has to be cleared with the end"
         );
+        assert_eq!(player.position, Position::Defender, "slot 5 is a defender");
         assert!(player.ovr > 0, "derived ratings must be computed");
         assert_eq!(player.squad_role, SquadRole::Senior);
     }
@@ -1934,8 +2210,12 @@ mod tests {
         let expected = config.total_clubs();
         let (teams, players, staff) =
             generate_world_with(&config, &definitions::DefinitionSources::embedded_only());
+        let free_agents: usize = OPENING_FREE_AGENTS_PER_CLUB.iter().map(|(_, n)| n).sum();
         assert_eq!(teams.len(), expected);
-        assert_eq!(players.len(), expected * 22);
+        assert_eq!(
+            players.len(),
+            expected * (GENERATED_CLUB_PLAYERS + free_agents)
+        );
         assert_eq!(staff.len(), expected * 4 + 12);
     }
 
@@ -1968,13 +2248,19 @@ mod tests {
             &definitions::DefinitionSources::embedded_only(),
         );
         let team_ids: Vec<&str> = teams.iter().map(|t| t.id.as_str()).collect();
+        let mut free_agents = 0;
         for p in &players {
-            assert!(p.team_id.is_some(), "Player {} has no team", p.full_name);
-            assert!(
-                team_ids.contains(&p.team_id.as_deref().unwrap()),
-                "Player has unknown team"
-            );
+            match p.team_id.as_deref() {
+                Some(team_id) => assert!(team_ids.contains(&team_id), "Player has unknown team"),
+                None => free_agents += 1,
+            }
         }
+        let per_club: usize = OPENING_FREE_AGENTS_PER_CLUB.iter().map(|(_, n)| n).sum();
+        assert_eq!(
+            free_agents,
+            teams.len() * per_club,
+            "only the opening pool is unattached"
+        );
     }
 
     #[test]
@@ -1988,7 +2274,7 @@ mod tests {
                 .iter()
                 .filter(|p| p.team_id.as_deref() == Some(&team.id))
                 .collect();
-            assert_eq!(team_players.len(), 22);
+            assert_eq!(team_players.len(), GENERATED_CLUB_PLAYERS);
             let gk = team_players
                 .iter()
                 .filter(|p| p.position == Position::Goalkeeper)
@@ -2005,19 +2291,18 @@ mod tests {
                 &definitions::DefinitionSources::embedded_only(),
             );
             for team in &teams {
-                let annual_wages: i64 = players
+                let weekly_wages: i64 = players
                     .iter()
                     .filter(|player| player.team_id.as_deref() == Some(team.id.as_str()))
-                    .map(|player| player.wage as i64)
+                    .map(|player| player.wage() as i64)
                     .sum();
-                let weekly_wage_spend = (annual_wages + 51) / 52;
-                let usage_percent = (annual_wages * 100) / std::cmp::max(1, team.wage_budget);
+                let usage_percent = (weekly_wages * 100) / std::cmp::max(1, team.wage_budget);
 
                 assert!(
-                    annual_wages <= team.wage_budget,
+                    weekly_wages <= team.wage_budget,
                     "{} started over budget: wages={} budget={}",
                     team.name,
-                    annual_wages,
+                    weekly_wages,
                     team.wage_budget
                 );
                 assert!(
@@ -2027,7 +2312,7 @@ mod tests {
                     usage_percent
                 );
                 assert!(
-                    team.finance >= weekly_wage_spend * MIN_OPENING_RUNWAY_WEEKS,
+                    team.finance >= weekly_wages * MIN_OPENING_RUNWAY_WEEKS,
                     "{} opened without the minimum wage runway",
                     team.name
                 );
@@ -2051,8 +2336,8 @@ mod tests {
 
             assert_eq!(
                 youth_players.len(),
-                OPENING_YOUTH_ACADEMY_SIZE,
-                "{} should open with {} youth academy players",
+                OPENING_YOUTH_ACADEMY_SIZE + 1,
+                "{} should open with {} youth academy players and an academy keeper",
                 team.name,
                 OPENING_YOUTH_ACADEMY_SIZE
             );
@@ -2064,11 +2349,15 @@ mod tests {
                 "{} has an overage opening youth player",
                 team.name
             );
-            assert!(
+            // The academy keeper is added on top of the two senior keepers; the
+            // opening academy itself never takes a keeper from the senior squad.
+            assert_eq!(
                 youth_players
                     .iter()
-                    .all(|player| player.position != Position::Goalkeeper),
-                "{} should keep opening youth players in outfield reserve slots",
+                    .filter(|player| player.position == Position::Goalkeeper)
+                    .count(),
+                1,
+                "{} should open with exactly one academy keeper",
                 team.name
             );
         }
@@ -2081,13 +2370,16 @@ mod tests {
                 &WorldGenConfig::compact(),
                 &definitions::DefinitionSources::embedded_only(),
             );
+            // The summer after the year this world opened in, worked out here rather
+            // than read from a constant: `generate_world_with` opens in the real
+            // calendar year, so a literal date passes today and from 1 January 2027
+            // matches nothing, asserting about no one.
+            let first_summer = format!("{}-06-30", default_opening_year() + 1);
             for team in &teams {
                 let expiring_contracts = players
                     .iter()
                     .filter(|player| player.team_id.as_deref() == Some(team.id.as_str()))
-                    .filter(|player| {
-                        player.contract_end.as_deref() == Some(OPENING_SHORT_CONTRACT_END)
-                    })
+                    .filter(|player| player.contract_end() == Some(first_summer.as_str()))
                     .count();
 
                 assert!(
@@ -2330,6 +2622,7 @@ mod tests {
                     None,
                     None,
                     TEST_OPENING_YEAR,
+                    &mut rand::rng(),
                 )
                 .nationality
             })
@@ -2362,10 +2655,74 @@ mod tests {
             None,
             Some("GB"),
             TEST_OPENING_YEAR,
+            &mut rand::rng(),
         );
 
         assert_eq!(player.nationality, "ENG");
         assert_eq!(player.football_nation, "ENG");
+    }
+
+    /// Given a youngster a youth scout finds, or a club takes in at its intake (#225)
+    /// When he is generated, in every outfield position group
+    /// Then he carries a specific natural position (LB, CM, ...) from the start, not the generic
+    ///      group that only a save and a reload used to refine.
+    #[test]
+    fn a_youth_recruit_has_a_specific_natural_position_when_he_arrives() {
+        let team = domain::team::Team::new(
+            "team-1".to_string(),
+            "London FC".to_string(),
+            "LON".to_string(),
+            "England".to_string(),
+            "London".to_string(),
+            "Ground".to_string(),
+            20000,
+        );
+        // The goalkeeper is already as specific as that position gets.
+        for group in [
+            domain::player::Position::Defender,
+            domain::player::Position::Midfielder,
+            domain::player::Position::Forward,
+        ] {
+            for _ in 0..20 {
+                let scouted = generate_youth_academy_recruit(
+                    &team,
+                    Some(&group),
+                    TEST_OPENING_YEAR,
+                    &mut rand::rng(),
+                );
+                let intake = generate_youth_intake_recruit(
+                    &team,
+                    &group,
+                    16,
+                    TEST_OPENING_YEAR,
+                    &mut rand::rng(),
+                );
+                for player in [scouted, intake] {
+                    assert!(
+                        !player.natural_position.is_legacy_bucket(),
+                        "a {group:?} recruit arrived as the generic {:?}",
+                        player.natural_position
+                    );
+                }
+            }
+        }
+    }
+
+    /// Given national-team players generated mid-game (#225)
+    /// When they are made for an outfield slot
+    /// Then they carry a specific natural position, not the generic group.
+    #[test]
+    fn a_national_team_player_has_a_specific_natural_position() {
+        // Outfield slots of the standard layout: DEF 2-8, MID 9-15, FWD 16-21.
+        for slot in 2..SQUAD_SLOTS {
+            let player =
+                generate_national_team_player("ENG", slot, TEST_OPENING_YEAR, &mut rand::rng());
+            assert!(
+                !player.natural_position.is_legacy_bucket(),
+                "slot {slot} arrived as the generic {:?}",
+                player.natural_position
+            );
+        }
     }
 
     #[test]
@@ -2386,6 +2743,7 @@ mod tests {
                 Some(&Position::Goalkeeper),
                 None,
                 TEST_OPENING_YEAR,
+                &mut rand::rng(),
             );
             assert_eq!(
                 player.position,
@@ -2408,7 +2766,8 @@ mod tests {
         // past the youth cap (the youth-reserved slot would cap every player at it).
         let mut saw_senior_age = false;
         for _ in 0..64 {
-            let player = generate_national_team_player("GB", 1, TEST_OPENING_YEAR);
+            let player =
+                generate_national_team_player("GB", 1, TEST_OPENING_YEAR, &mut rand::rng());
             assert_eq!(
                 player.position,
                 Position::Goalkeeper,
@@ -2484,7 +2843,8 @@ mod tests {
             "every club should come from the overridden nation: {:?}",
             teams.iter().map(|t| &t.country).collect::<Vec<_>>()
         );
-        assert_eq!(players.len(), 4 * 22);
+        let per_club: usize = OPENING_FREE_AGENTS_PER_CLUB.iter().map(|(_, n)| n).sum();
+        assert_eq!(players.len(), 4 * (GENERATED_CLUB_PLAYERS + per_club));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2759,6 +3119,26 @@ mod tests {
     }
 
     #[test]
+    fn normalize_imported_world_floors_cash_to_sixteen_weeks_of_wages() {
+        let mut world = make_roster_baseline_world_without_staff();
+        world.teams[0].finance = 1_000;
+        world.players[0].team_id = Some("team-1".to_string());
+        world.players[0].stage_wage(5_000);
+        for player in world.players.iter_mut().skip(1) {
+            if player.team_id.as_deref() == Some("team-1") {
+                player.stage_wage(0);
+            }
+        }
+
+        normalize_imported_world_for_career_start(&mut world, TEST_OPENING_YEAR);
+
+        assert_eq!(
+            world.teams[0].finance,
+            5_000 * crate::finances::MIN_OPENING_RUNWAY_WEEKS
+        );
+    }
+
+    #[test]
     fn normalize_imported_world_preserves_existing_staff_and_available_pool() {
         let mut world = make_roster_baseline_world_without_staff();
         world.staff = vec![
@@ -2862,6 +3242,157 @@ mod tests {
         assert_eq!(
             game.available_staff_market_last_activity_date.as_deref(),
             Some("2026-08-01")
+        );
+    }
+
+    /// Everything that identifies the people a market brought in.
+    fn market_staff(game: &Game) -> Vec<String> {
+        let mut rows: Vec<String> = game
+            .staff
+            .iter()
+            .filter(|staff_member| staff_member.team_id.is_none())
+            .map(|staff_member| serde_json::to_value(staff_member).unwrap().to_string())
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    fn market_after_a_rotation(seed: u64) -> Vec<String> {
+        let mut game =
+            make_staff_market_game(vec![make_import_staff("free-1", None, StaffRole::Coach)]);
+        game.seed = seed;
+        game.available_staff_market_last_activity_date = Some("2026-07-02".to_string());
+        process_available_staff_market(&mut game);
+        market_staff(&game)
+    }
+
+    /// Given a full staff market due to rotate and one already employed staff member,
+    /// When the market rotates, is bought out and refills on that same day,
+    /// Then every hired person keeps a distinct id and the new candidates have new ids.
+    #[test]
+    fn a_rotated_market_bought_out_and_refilled_on_one_day_deals_new_ids() {
+        let mut staff = vec![make_import_staff(
+            "employed",
+            Some("team-1"),
+            StaffRole::Coach,
+        )];
+        staff.extend(
+            (0..12)
+                .map(|index| make_import_staff(&format!("free-{index}"), None, StaffRole::Coach)),
+        );
+        let mut game = make_staff_market_game(staff);
+        game.seed = 7;
+        game.available_staff_market_last_activity_date = Some("2026-07-02".to_string());
+        let before_rotation = game.staff.len();
+
+        assert!(process_available_staff_market(&mut game));
+        assert_eq!(game.staff.len(), before_rotation);
+        let club = game.teams[0].id.clone();
+        for staff_member in game
+            .staff
+            .iter_mut()
+            .filter(|staff| staff.team_id.is_none())
+        {
+            staff_member.team_id = Some(club.clone());
+        }
+
+        assert!(process_available_staff_market(&mut game));
+
+        assert_eq!(available_staff_count(&game.staff), 12);
+        let ids: std::collections::BTreeSet<&String> =
+            game.staff.iter().map(|staff| &staff.id).collect();
+        assert_eq!(ids.len(), game.staff.len(), "two people share an id");
+    }
+
+    /// Given a market that is bought out on the day it was generated,
+    /// When it is regenerated the same day,
+    /// Then the new batch shares no id with the people just hired from the first — the day's
+    ///      stream is the same, so without a guard it would deal the same ids twice.
+    #[test]
+    fn a_market_emptied_and_refilled_on_one_day_deals_new_ids() {
+        let mut game = make_staff_market_game(vec![]);
+        game.seed = 7;
+        process_available_staff_market(&mut game);
+        let first_batch: std::collections::BTreeSet<String> = game
+            .staff
+            .iter()
+            .filter(|staff_member| staff_member.team_id.is_none())
+            .map(|staff_member| staff_member.id.clone())
+            .collect();
+        assert!(!first_batch.is_empty());
+        let club = game.teams[0].id.clone();
+        for staff_member in game
+            .staff
+            .iter_mut()
+            .filter(|s| first_batch.contains(&s.id))
+        {
+            staff_member.team_id = Some(club.clone());
+        }
+
+        process_available_staff_market(&mut game);
+
+        let ids: Vec<&String> = game
+            .staff
+            .iter()
+            .map(|staff_member| &staff_member.id)
+            .collect();
+        let distinct: std::collections::BTreeSet<&&String> = ids.iter().collect();
+        assert_eq!(distinct.len(), ids.len(), "two people share an id");
+    }
+
+    /// Given a market bought out and refilled again and again on one day,
+    /// When it is refilled twenty times,
+    /// Then no two people ever share an id — however many batches the day has dealt.
+    #[test]
+    fn a_market_refilled_twenty_times_in_one_day_never_repeats_an_id() {
+        let mut game = make_staff_market_game(vec![]);
+        game.seed = 7;
+        let club = game.teams[0].id.clone();
+        for _ in 0..20 {
+            process_available_staff_market(&mut game);
+            for staff_member in game.staff.iter_mut().filter(|s| s.team_id.is_none()) {
+                staff_member.team_id = Some(club.clone());
+            }
+        }
+
+        let ids: Vec<&String> = game.staff.iter().map(|s| &s.id).collect();
+        let distinct: std::collections::BTreeSet<&&String> = ids.iter().collect();
+        assert_eq!(distinct.len(), ids.len(), "two people share an id");
+    }
+
+    /// Given a save whose staff market is due to rotate,
+    /// When the day is played twice from the same seed, and once from another,
+    /// Then the same people are on offer, ids and all, the first two times and not the third.
+    #[test]
+    fn the_staff_market_rotates_the_same_way_from_the_same_seed() {
+        assert_eq!(market_after_a_rotation(7), market_after_a_rotation(7));
+        assert_ne!(market_after_a_rotation(7), market_after_a_rotation(8));
+    }
+
+    fn unemployed_pool_after_a_season_end(seed: u64) -> (Vec<String>, Vec<String>) {
+        let mut game = make_staff_market_game(vec![]);
+        game.seed = seed;
+        replenish_manager_and_scout_market(&mut game);
+        let managers = game
+            .managers
+            .iter()
+            .map(|manager| serde_json::to_value(manager).unwrap().to_string())
+            .collect();
+        (managers, market_staff(&game))
+    }
+
+    /// Given a world short of unemployed managers and scouts,
+    /// When the season ends, twice from the same seed, and once from another,
+    /// Then the same candidates are brought in, and other ones from another seed.
+    #[test]
+    fn the_manager_and_scout_market_is_topped_up_the_same_way_from_the_same_seed() {
+        assert_eq!(
+            unemployed_pool_after_a_season_end(7),
+            unemployed_pool_after_a_season_end(7)
+        );
+        assert_ne!(
+            unemployed_pool_after_a_season_end(7),
+            unemployed_pool_after_a_season_end(8)
         );
     }
 }

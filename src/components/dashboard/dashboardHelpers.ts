@@ -1,12 +1,11 @@
-import type {
-  FixtureData,
-  GameStateData,
-  PlayerData,
-  TeamData,
-} from "../../store/gameStore";
+import type { SquadFitness } from "../../services/squadService";
+import type { PositionTable } from "../../lib/positionTable";
+import type { FixtureData, GameStateData, PlayerData, TeamData } from "../../store/gameStore";
 import { formatVal } from "../../lib/helpers";
+import { competitionDisplayName } from "../../lib/competitionName";
 import { getAllFixturesAcrossCompetitions } from "../../lib/fixtures";
-import { getTeamFinanceSnapshot } from "../../lib/finance";
+import { getActiveCompetitions } from "../../lib/helpers";
+import type { TeamFinanceSnapshotData } from "../../services/financeService";
 import { buildStartingXIIds } from "../squad/SquadTab.helpers";
 import { isMessageVisible } from "../../utils/newsVisibility";
 
@@ -22,10 +21,15 @@ export interface DashboardSearchResults {
   matchedTeams: TeamData[];
 }
 
-type DashboardAlertTranslator = (
-  key: string,
-  options?: Record<string, unknown>,
-) => string;
+type DashboardAlertTranslator = (key: string, options?: Record<string, unknown>) => string;
+type DashboardFinanceVerdict = Pick<
+  TeamFinanceSnapshotData,
+  | "cashRunwayWeeks"
+  | "currentlyInDebt"
+  | "runwayStatus"
+  | "wageBudgetStatus"
+  | "wageBudgetUsagePercent"
+>;
 
 export function getTodayMatchFixture(gameState: GameStateData): FixtureData | null {
   const fixtures = getAllFixturesAcrossCompetitions(gameState);
@@ -45,17 +49,33 @@ export function getTodayMatchFixture(gameState: GameStateData): FixtureData | nu
 
 export function getUnreadMessagesCount(gameState: GameStateData): number {
   return gameState.messages.filter(
-    (message) =>
-      !message.read
-      && isMessageVisible(message.date, gameState.clock?.current_date),
+    (message) => !message.read && isMessageVisible(message.date, gameState.clock?.current_date),
   ).length;
 }
 
-export function getManagerTeamName(gameState: GameStateData): string | null {
-  return (
-    gameState.teams.find((team) => team.id === gameState.manager.team_id)?.name ??
-    null
+/**
+ * The name of the competition the club's standing is in, for the always-visible sidebar. Which
+ * competition counts is the backend's call (it ships the standing); this only picks the wording:
+ * the translated display name when the game carries that competition, else the backend's own name.
+ */
+export function clubCompetitionLabel(
+  gameState: GameStateData,
+  standing: { competition_id: string; competition_name: string } | null,
+  t: DashboardAlertTranslator,
+): string | null {
+  if (!standing) {
+    return null;
+  }
+
+  const competition = getActiveCompetitions(gameState).find(
+    (candidate) => candidate.id === standing.competition_id,
   );
+
+  return competition ? competitionDisplayName(competition, t) : standing.competition_name || null;
+}
+
+export function getManagerTeamName(gameState: GameStateData): string | null {
+  return gameState.teams.find((team) => team.id === gameState.manager.team_id)?.name ?? null;
 }
 
 export function getDashboardSearchResults(
@@ -93,33 +113,28 @@ export function getDashboardSearchResults(
 
 export function getDashboardAlerts(
   gameState: GameStateData,
+  positionTable: PositionTable,
   hasMatchToday: boolean,
   t: DashboardAlertTranslator,
+  financeSnapshot?: DashboardFinanceVerdict | null,
+  fitness?: SquadFitness | null,
 ): DashboardAlert[] {
   const alerts: DashboardAlert[] = [];
-  const myTeam = gameState.teams.find(
-    (team) => team.id === gameState.manager.team_id,
-  );
-  const roster = myTeam
-    ? gameState.players.filter((player) => player.team_id === myTeam.id)
-    : [];
-  const teamStaff = myTeam
-    ? gameState.staff.filter((staffMember) => staffMember.team_id === myTeam.id)
-    : [];
-  const financeSnapshot = myTeam
-    ? getTeamFinanceSnapshot(myTeam, gameState.players, teamStaff)
-    : null;
-  const exhaustedCount = roster.filter((player) => player.condition < 25).length;
+  const myTeam = gameState.teams.find((team) => team.id === gameState.manager.team_id);
+  const roster = myTeam ? gameState.players.filter((player) => player.team_id === myTeam.id) : [];
+  // Players in a critical state, as the backend counts them (injured players are not in the squad
+  // that can play).
+  const exhaustedCount = fitness?.critical_count ?? 0;
   const urgentUnreadCount = gameState.messages.filter((message) => {
     return (
-      !message.read
-      && message.priority === "Urgent"
-      && isMessageVisible(message.date, gameState.clock?.current_date)
+      !message.read &&
+      message.priority === "Urgent" &&
+      isMessageVisible(message.date, gameState.clock?.current_date)
     );
   }).length;
   const savedStartingXi = myTeam?.starting_xi_ids ?? [];
   const effectiveStartingXi = myTeam
-    ? buildStartingXIIds(roster, savedStartingXi, myTeam.formation)
+    ? buildStartingXIIds(roster, savedStartingXi, myTeam.formation, positionTable)
     : [];
   const xiPlayersOnRoster = effectiveStartingXi.filter((playerId) => {
     return roster.some((player) => player.id === playerId);
@@ -150,11 +165,7 @@ export function getDashboardAlerts(
       });
     }
 
-    if (
-      healthyXiCount < 11 &&
-      injuredInXiCount === 0 &&
-      roster.length >= 11
-    ) {
+    if (healthyXiCount < 11 && injuredInXiCount === 0 && roster.length >= 11) {
       alerts.push({
         id: "xi",
         text: t("dashboard.alerts.incompleteStartingXi"),
@@ -174,7 +185,7 @@ export function getDashboardAlerts(
   }
 
   if (myTeam && financeSnapshot) {
-    if (myTeam.finance < 0 || financeSnapshot.runwayStatus === "critical") {
+    if (financeSnapshot.currentlyInDebt || financeSnapshot.runwayStatus === "critical") {
       alerts.push({
         id: "finance_crisis",
         text: t("dashboard.alerts.financeCrisis", {

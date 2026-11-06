@@ -18,7 +18,10 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-vi.mock("../ui", () => ({
+// Only the two visual components are stubbed; Dialog is the real shell, since its keyboard
+// behaviour is what the details-modal tests below assert.
+vi.mock("../ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../ui")>()),
   Badge: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
   TeamLogo: ({ team }: { team: { name?: string; short_name?: string } }) => (
     <span>{team?.short_name ?? team?.name}</span>
@@ -295,6 +298,8 @@ const defaultProps = {
   currentFixture: {
     id: "fix1",
     competition: "League" as const,
+    competitive: true,
+    advancing_team_id: null,
     home_team_id: "team1",
     away_team_id: "team2",
     date: "2026-08-10",
@@ -310,21 +315,20 @@ const defaultProps = {
     matchday: 1,
   },
   userSide: "Home" as const,
-  isLeagueFixture: true,
   roundSummary: makeRoundSummary(),
   onPressConference: vi.fn(),
   onFinish: vi.fn(),
 };
 
-describe("RoundDigestScreen", function () {
-  it("renders the matchday heading and league name for a league fixture", function () {
+describe("RoundDigestScreen", () => {
+  it("renders the matchday heading and league name for a league fixture", () => {
     render(<RoundDigestScreen {...defaultProps} />);
 
     expect(screen.getByText(/Matchday 1/)).toBeInTheDocument();
     expect(screen.getByText("match.roundSummary")).toBeInTheDocument();
   });
 
-  it("renders the hero result card with score and win badge", function () {
+  it("renders the hero result card with score and win badge", () => {
     render(<RoundDigestScreen {...defaultProps} />);
 
     expect(screen.getByText("match.yourResult")).toBeInTheDocument();
@@ -333,7 +337,7 @@ describe("RoundDigestScreen", function () {
     expect(screen.getAllByText("Beta FC").length).toBeGreaterThan(0);
   });
 
-  it("renders the standings and top scorers for a league fixture", function () {
+  it("renders the standings and top scorers for a league fixture", () => {
     render(<RoundDigestScreen {...defaultProps} />);
 
     expect(screen.getByText("tournaments.leagueTable")).toBeInTheDocument();
@@ -341,31 +345,49 @@ describe("RoundDigestScreen", function () {
     expect(screen.getByText("Alice")).toBeInTheDocument();
   });
 
-  it("does not render standings or top scorers for a friendly", function () {
-    render(
-      <RoundDigestScreen
-        {...defaultProps}
-        isLeagueFixture={false}
-        roundSummary={null}
-      />,
-    );
+  it("does not render standings or top scorers for a friendly", () => {
+    render(<RoundDigestScreen {...defaultProps} roundSummary={null} />);
 
-    expect(
-      screen.queryByText("tournaments.leagueTable"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("tournaments.topScorers"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText("tournaments.leagueTable")).not.toBeInTheDocument();
+    expect(screen.queryByText("tournaments.topScorers")).not.toBeInTheDocument();
     expect(screen.getAllByText("match.otherMatches").length).toBeGreaterThan(0);
   });
 
-  it("renders position context with points when standings are available", function () {
+  /**
+   * Given a cup day on which the user's league also played (the backend sent that league round)
+   * When the digest shows the match the user played, a cup tie that is not in the league round
+   * Then it shows the cup result, and the league round and table beneath it as "elsewhere in your
+   *      league", with no league position beside the cup result.
+   */
+  it("shows a cup result with the league round and table elsewhere in the league", () => {
+    const cupTie = {
+      ...defaultProps.currentFixture,
+      id: "cup-tie",
+      competition: "Cup" as const,
+    };
+
+    render(<RoundDigestScreen {...defaultProps} currentFixture={cupTie} />);
+
+    expect(screen.getByText("match.yourResult")).toBeInTheDocument();
+    expect(screen.getByText("match.elsewhereInYourLeague")).toBeInTheDocument();
+    expect(screen.getByText("tournaments.leagueTable")).toBeInTheDocument();
+    expect(screen.queryByText(/match\.pts/)).not.toBeInTheDocument();
+    expect(screen.queryByText("match.roundSummary")).not.toBeInTheDocument();
+  });
+
+  it("does not label the league round as elsewhere when the user played in it", () => {
+    render(<RoundDigestScreen {...defaultProps} />);
+
+    expect(screen.queryByText("match.elsewhereInYourLeague")).not.toBeInTheDocument();
+  });
+
+  it("renders position context with points when standings are available", () => {
     render(<RoundDigestScreen {...defaultProps} />);
 
     expect(screen.getByText(/match\.pts/)).toBeInTheDocument();
   });
 
-  it("renders the notable upset card when one is present", function () {
+  it("renders the notable upset card when one is present", () => {
     const summary = {
       ...makeRoundSummary(),
       notable_upset: {
@@ -388,17 +410,15 @@ describe("RoundDigestScreen", function () {
     expect(screen.getAllByText(/Beta FC/).length).toBeGreaterThan(0);
   });
 
-  it("calls onPressConference when the press conference button is clicked", function () {
+  it("calls onPressConference when the press conference button is clicked", () => {
     const onPressConference = vi.fn();
-    render(
-      <RoundDigestScreen {...defaultProps} onPressConference={onPressConference} />,
-    );
+    render(<RoundDigestScreen {...defaultProps} onPressConference={onPressConference} />);
 
     fireEvent.click(screen.getByText("match.pressConference"));
     expect(onPressConference).toHaveBeenCalledOnce();
   });
 
-  it("calls onFinish when the skip button is clicked", function () {
+  it("calls onFinish when the skip button is clicked", () => {
     const onFinish = vi.fn();
     render(<RoundDigestScreen {...defaultProps} onFinish={onFinish} />);
 
@@ -406,8 +426,8 @@ describe("RoundDigestScreen", function () {
     expect(onFinish).toHaveBeenCalledOnce();
   });
 
-  it("opens and closes the other-match details modal", function () {
-    const gameStateWithReport = {
+  const gameStateWithReport = (): GameStateData => {
+    return {
       ...makeGameState(),
       league: {
         ...makeGameState().league!,
@@ -450,13 +470,12 @@ describe("RoundDigestScreen", function () {
         ],
       },
     } as unknown as GameStateData;
+  };
 
-    render(
-      <RoundDigestScreen
-        {...defaultProps}
-        gameState={gameStateWithReport}
-      />,
-    );
+  it("opens and closes the other-match details modal", () => {
+    const gameState = gameStateWithReport();
+
+    render(<RoundDigestScreen {...defaultProps} gameState={gameState} />);
 
     fireEvent.click(screen.getByText("match.viewDetails"));
 
@@ -466,5 +485,23 @@ describe("RoundDigestScreen", function () {
     fireEvent.click(screen.getByText("common.close"));
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  /**
+   * Given the other-match details dialog is open
+   * When the player presses Escape
+   * Then it closes and focus returns to the button that opened it.
+   */
+  it("closes the other-match details on Escape and gives focus back", () => {
+    render(<RoundDigestScreen {...defaultProps} gameState={gameStateWithReport()} />);
+    const opener = screen.getByText("match.viewDetails");
+    opener.focus();
+    fireEvent.click(opener);
+    expect(screen.getByRole("dialog", { name: "match.matchDetails" })).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
   });
 });

@@ -5,7 +5,8 @@ use crate::commands::round_summary::{build_round_summary_dto, RoundSummaryDto};
 use ofm_core::advance_results::{collect_advance_results, AdvanceMatchResult};
 use ofm_core::game::Game;
 use ofm_core::live_match_manager::{self, MatchMode};
-use ofm_core::state::StateManager;
+use ofm_core::state::{Career, StateManager};
+use ofm_core::turn::{build_cup_round_summaries, CupRoundSummary};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdvanceTimeWithModeResponse {
@@ -13,28 +14,29 @@ pub struct AdvanceTimeWithModeResponse {
     pub game: Option<Game>,
     pub snapshot: Option<engine::MatchSnapshot>,
     pub fixture_index: Option<usize>,
+    #[serde(default)]
+    pub competition_id: Option<String>,
+    #[serde(default)]
+    pub fixture_id: Option<String>,
     pub mode: Option<String>,
     pub round_summary: Option<RoundSummaryDto>,
+    /// The user's cup ties of the day, shown beside the league round; empty on a league-only day.
+    #[serde(default)]
+    pub cup_round_summaries: Vec<CupRoundSummary>,
     /// Matches finished during this advance (user's competitions + nationals).
     #[serde(default)]
     pub results: Vec<AdvanceMatchResult>,
 }
 
-fn round_context_for_today(
-    game: &Game,
-    today: &str,
-) -> Option<(u32, Vec<domain::league::StandingEntry>)> {
-    let league = game.primary_competition()?;
-    let matchday = league
-        .fixtures
-        .iter()
-        .find(|fixture| fixture.date == today)
-        .map(|fixture| fixture.matchday)?;
-
-    Some((matchday, league.standings.clone()))
-}
-
-fn scheduled_user_fixture_index(game: &Game, today: &str) -> Option<(usize, usize)> {
+/// Where the user's fixture due today is: which competition to swap into the legacy slot, and the
+/// fixture's index within it.
+///
+/// The competition is an `Option` because for a save written before `competitions` existed there is
+/// no competition to name — the fixture is reachable only through the legacy `game.league` mirror,
+/// and the answer is "leave the mirror alone". That used to be encoded as an index one past the end
+/// of `competitions`, which read as an out-of-range bug at every call site and stopped anyone
+/// guarding against a genuinely bad index.
+fn scheduled_user_fixture_index(game: &Game, today: &str) -> Option<(Option<usize>, usize)> {
     let user_team_id = game.manager.team_id.as_ref()?;
     for (competition_index, competition) in game.competitions.iter().enumerate() {
         if !game.active_competition_ids.is_empty()
@@ -59,10 +61,20 @@ fn scheduled_user_fixture_index(game: &Game, today: &str) -> Option<(usize, usiz
                     }
                 })
         {
-            return Some((competition_index, fixture_index));
+            return Some((Some(competition_index), fixture_index));
         }
     }
+    // Fall back to the legacy `game.league` mirror, for saves written before
+    // competitions existed. When the mirror *is* one of the competitions, name
+    // it — not competition zero: the caller replaces `game.league` with whatever
+    // it finds there, so a hardcoded zero handed the user a stranger's fixture.
+    // When it is not, there is nothing to name, and `None` says so: the mirror
+    // already holds the fixture and must be left as it is.
     let league = game.league.as_ref()?;
+    let mirror_index = game
+        .competitions
+        .iter()
+        .position(|competition| competition.id == league.id);
     league
         .fixtures
         .iter()
@@ -72,33 +84,19 @@ fn scheduled_user_fixture_index(game: &Game, today: &str) -> Option<(usize, usiz
                 && fixture.status == domain::league::FixtureStatus::Scheduled
                 && (fixture.home_team_id == *user_team_id || fixture.away_team_id == *user_team_id)
             {
-                Some((0, index))
+                Some((mirror_index, index))
             } else {
                 None
             }
         })
 }
 
-/// Knockout ties get extra time (and, if still level, a shootout) in the live
-/// engine; league fixtures end after regulation. `index` is a fixture index
-/// into `game.league`, which at the call sites holds the competition being
-/// played today.
-fn fixture_allows_extra_time(game: &Game, index: usize) -> bool {
-    game.league
-        .as_ref()
-        .and_then(|league| {
-            league
-                .fixtures
-                .get(index)
-                .map(|fixture| league.is_knockout_fixture(&fixture.id))
-        })
-        .unwrap_or(false)
-}
-
 pub fn advance_time_with_mode(
     state: &StateManager,
+    career: Career,
     mode: &str,
 ) -> Result<AdvanceTimeWithModeResponse, String> {
+    let _operation = super::live_session::idle_operation(state)?;
     info!("[cmd] advance_time_with_mode: mode={}", mode);
 
     // The whole day-start sequence runs under the game lock (update_game) so a
@@ -107,167 +105,9 @@ pub fn advance_time_with_mode(
     // stored only after the game lock is released, so the two state mutexes
     // are never held at once.
     let mut captures = Vec::new();
-    let mut session_out: Option<live_match_manager::LiveMatchSession> = None;
-    let response = state
-        .update_game(|game| -> Result<AdvanceTimeWithModeResponse, String> {
-            let today = game.clock.current_date.format("%Y-%m-%d").to_string();
-            let round_context = round_context_for_today(game, &today);
-            let user_fixture = scheduled_user_fixture_index(game, &today);
-
-            info!(
-                "[cmd] advance_time_with_mode: date={}, user_team_id={:?}, user_fixture={:?}",
-                today, game.manager.team_id, user_fixture
-            );
-
-            match (mode, user_fixture) {
-                ("live" | "spectator", Some((competition_index, index))) => {
-                    if let Some(competition) = game.competitions.get(competition_index).cloned() {
-                        game.league = Some(competition);
-                    }
-                    let match_mode = if mode == "live" {
-                        MatchMode::Live
-                    } else {
-                        MatchMode::Spectator
-                    };
-                    let allows_extra_time = fixture_allows_extra_time(game, index);
-                    let session = live_match_manager::create_live_match(
-                        game,
-                        index,
-                        match_mode,
-                        allows_extra_time,
-                    )?;
-                    let snapshot = session.snapshot();
-                    info!(
-                        "[cmd] advance_time_with_mode: live_match fixture_idx={}, phase={:?}, home_team={}, away_team={}",
-                        index,
-                        snapshot.phase,
-                        snapshot.home_team.name,
-                        snapshot.away_team.name
-                    );
-                    session_out = Some(session);
-
-                    ofm_core::turn::simulate_other_matches_with_capture(
-                        game,
-                        &today,
-                        Some(index),
-                        &mut |capture| captures.push(capture),
-                    );
-                    if competition_index < game.competitions.len() {
-                        if let Some(updated_competition) = game.league.take() {
-                            game.competitions[competition_index] = updated_competition;
-                            game.sync_legacy_league();
-                        }
-                    }
-                    let round_summary =
-                        round_context
-                            .as_ref()
-                            .and_then(|(matchday, previous_standings)| {
-                                build_round_summary_dto(game, *matchday, previous_standings)
-                            });
-
-                    Ok(AdvanceTimeWithModeResponse {
-                        action: "live_match".to_string(),
-                        game: None,
-                        snapshot: Some(snapshot),
-                        fixture_index: Some(index),
-                        mode: Some(mode.to_string()),
-                        round_summary,
-                        results: Vec::new(),
-                    })
-                }
-                ("delegate", Some((competition_index, index))) => {
-                    if let Some(competition) = game.competitions.get(competition_index).cloned() {
-                        game.league = Some(competition);
-                    }
-                    info!(
-                        "[cmd] advance_time_with_mode: delegate fixture_idx={}, date={}",
-                        index, today
-                    );
-                    let allows_extra_time = fixture_allows_extra_time(game, index);
-                    let mut session = live_match_manager::create_live_match(
-                        game,
-                        index,
-                        MatchMode::Instant,
-                        allows_extra_time,
-                    )?;
-                    session.user_side = None;
-                    session.run_to_completion();
-
-                    let home_team_id = session.home_team_id.clone();
-                    let away_team_id = session.away_team_id.clone();
-                    let report = session.match_state.into_report();
-
-                    ofm_core::turn::simulate_other_matches_with_capture(
-                        game,
-                        &today,
-                        Some(index),
-                        &mut |capture| captures.push(capture),
-                    );
-
-                    ofm_core::turn::apply_match_report_with_capture(
-                        game,
-                        index,
-                        &home_team_id,
-                        &away_team_id,
-                        &report,
-                        &mut |capture| captures.push(capture),
-                    );
-                    if competition_index < game.competitions.len() {
-                        if let Some(updated_competition) = game.league.take() {
-                            game.competitions[competition_index] = updated_competition;
-                            game.sync_legacy_league();
-                        }
-                    }
-
-                    let round_summary =
-                        round_context
-                            .as_ref()
-                            .and_then(|(matchday, previous_standings)| {
-                                build_round_summary_dto(game, *matchday, previous_standings)
-                            });
-
-                    ofm_core::turn::finish_live_match_day(game);
-                    let results = collect_advance_results(game, &today);
-
-                    Ok(AdvanceTimeWithModeResponse {
-                        action: "advanced".to_string(),
-                        game: Some(game.clone()),
-                        snapshot: None,
-                        fixture_index: None,
-                        mode: None,
-                        round_summary,
-                        results,
-                    })
-                }
-                _ => {
-                    info!(
-                        "[cmd] advance_time_with_mode: normal_advance date={}, mode={}",
-                        today, mode
-                    );
-                    ofm_core::turn::process_day_with_capture(game, &mut |capture| {
-                        captures.push(capture);
-                    });
-                    let round_summary =
-                        round_context
-                            .as_ref()
-                            .and_then(|(matchday, previous_standings)| {
-                                build_round_summary_dto(game, *matchday, previous_standings)
-                            });
-                    let results = collect_advance_results(game, &today);
-
-                    Ok(AdvanceTimeWithModeResponse {
-                        action: "advanced".to_string(),
-                        game: Some(game.clone()),
-                        snapshot: None,
-                        fixture_index: None,
-                        mode: None,
-                        round_summary,
-                        results,
-                    })
-                }
-            }
-        })
-        .ok_or("be.error.noActiveGameSession")??;
+    let (response, session_out) = state.update_game_for(career, |game| {
+        advance_day_in_mode(game, mode, &mut captures)
+    })??;
 
     for capture in captures {
         state.append_stats_state(capture);
@@ -277,4 +117,540 @@ pub fn advance_time_with_mode(
     }
 
     Ok(response)
+}
+
+use ofm_core::matchday::LeagueRoundContext;
+
+fn advance_day_in_mode(
+    game: &mut Game,
+    mode: &str,
+    captures: &mut Vec<domain::stats::StatsState>,
+) -> Result<
+    (
+        AdvanceTimeWithModeResponse,
+        Option<live_match_manager::LiveMatchSession>,
+    ),
+    String,
+> {
+    let today = game.clock.current_date.format("%Y-%m-%d").to_string();
+    // Before anything is played, so a round drawn by today's results is known to be new.
+    ofm_core::turn::begin_day(game);
+    let round_context = ofm_core::matchday::user_league_round_context(game);
+    let user_fixture = scheduled_user_fixture_index(game, &today);
+    info!(
+        "[cmd] advance_time_with_mode: date={}, user_team_id={:?}, user_fixture={:?}",
+        today, game.manager.team_id, user_fixture
+    );
+    match (mode, user_fixture) {
+        ("live" | "spectator", Some(fixture)) => {
+            advance_live_matchday(game, mode, fixture, &today, round_context, captures)
+                .map(|(response, session)| (response, Some(session)))
+        }
+        ("delegate", Some(fixture)) => {
+            advance_delegated_matchday(game, fixture, &today, round_context, captures)
+                .map(|response| (response, None))
+        }
+        _ => Ok((
+            advance_simulated_day(game, mode, &today, round_context, captures),
+            None,
+        )),
+    }
+}
+
+fn advance_live_matchday(
+    game: &mut Game,
+    mode: &str,
+    fixture: (Option<usize>, usize),
+    today: &str,
+    round_context: Option<LeagueRoundContext>,
+    captures: &mut Vec<domain::stats::StatsState>,
+) -> Result<
+    (
+        AdvanceTimeWithModeResponse,
+        live_match_manager::LiveMatchSession,
+    ),
+    String,
+> {
+    let (competition_index, index) = fixture;
+    // Same hazard as the delegate path: the mirror is swapped before the session is
+    // built, and the kick-off can refuse — an empty squad nobody can fill is a
+    // handled `Err`.
+    // Called inside `update_game`, which mutates the live game in place,
+    // so returning without putting the mirror back leaves the player looking at
+    // another competition with no match to explain it.
+    let mirror_before_the_swap = game.league.clone();
+    if let Some(index) = competition_index {
+        let Some(competition) = game.competitions.get(index).cloned() else {
+            return Err("be.error.liveMatch.fixtureNotFound".to_string());
+        };
+        game.league = Some(competition);
+    }
+    let match_mode = if mode == "live" {
+        MatchMode::Live
+    } else {
+        MatchMode::Spectator
+    };
+    let allows_extra_time = ofm_core::matchday::fixture_allows_extra_time(game, index);
+    let session =
+        match live_match_manager::kick_off_live_match(game, index, match_mode, allows_extra_time) {
+            Ok(session) => session,
+            Err(error) => {
+                game.league = mirror_before_the_swap;
+                return Err(error);
+            }
+        };
+    let snapshot = session.snapshot();
+    let competition_id = session.competition_id.clone();
+    let fixture_id = session.fixture_id.clone();
+    info!(
+        "[cmd] advance_time_with_mode: live_match fixture_idx={}, phase={:?}, home_team={}, away_team={}",
+        index,
+        snapshot.phase,
+        snapshot.home_team.name,
+        snapshot.away_team.name
+    );
+
+    ofm_core::turn::simulate_other_matches_with_capture(game, today, Some(index), &mut |capture| {
+        captures.push(capture)
+    });
+    if let Some(competition_index) = competition_index {
+        if let Some(updated_competition) = game.league.take() {
+            game.competitions[competition_index] = updated_competition;
+            game.sync_legacy_league();
+        }
+    }
+    let round_summary = round_context
+        .as_ref()
+        .and_then(|context| build_round_summary_dto(game, context));
+
+    Ok((
+        AdvanceTimeWithModeResponse {
+            action: "live_match".to_string(),
+            game: None,
+            snapshot: Some(snapshot),
+            fixture_index: Some(index),
+            competition_id: Some(competition_id),
+            fixture_id: Some(fixture_id),
+            mode: Some(mode.to_string()),
+            round_summary,
+            cup_round_summaries: build_cup_round_summaries(game, today),
+            results: Vec::new(),
+        },
+        session,
+    ))
+}
+
+fn advance_delegated_matchday(
+    game: &mut Game,
+    fixture: (Option<usize>, usize),
+    today: &str,
+    round_context: Option<LeagueRoundContext>,
+    captures: &mut Vec<domain::stats::StatsState>,
+) -> Result<AdvanceTimeWithModeResponse, String> {
+    let (competition_index, index) = fixture;
+    info!(
+        "[cmd] advance_time_with_mode: delegate fixture_idx={}, date={}",
+        index, today
+    );
+    // The whole day, in one call, so the harness and this branch cannot drift.
+    let outcome = ofm_core::matchday::play_user_matchday_with_capture(
+        game,
+        competition_index,
+        index,
+        &mut |capture| captures.push(capture),
+    )?;
+
+    // The baseline comes from the session, captured before the round was played;
+    // reading the table now would report every delta as zero. Built after the day
+    // so it describes the round the response is carrying.
+    let round_summary = outcome
+        .league_round_context
+        .or(round_context)
+        .and_then(|context| build_round_summary_dto(game, &context));
+
+    Ok(advanced_day_response(game, today, round_summary))
+}
+
+fn advance_simulated_day(
+    game: &mut Game,
+    mode: &str,
+    today: &str,
+    round_context: Option<LeagueRoundContext>,
+    captures: &mut Vec<domain::stats::StatsState>,
+) -> AdvanceTimeWithModeResponse {
+    info!(
+        "[cmd] advance_time_with_mode: normal_advance date={}, mode={}",
+        today, mode
+    );
+    ofm_core::turn::process_day_with_capture(game, &mut |capture| {
+        captures.push(capture);
+    });
+    let round_summary = round_context
+        .as_ref()
+        .and_then(|context| build_round_summary_dto(game, context));
+
+    advanced_day_response(game, today, round_summary)
+}
+
+fn advanced_day_response(
+    game: &Game,
+    today: &str,
+    round_summary: Option<RoundSummaryDto>,
+) -> AdvanceTimeWithModeResponse {
+    let results = collect_advance_results(game, today);
+    AdvanceTimeWithModeResponse {
+        action: "advanced".to_string(),
+        game: Some(game.clone()),
+        snapshot: None,
+        fixture_index: None,
+        competition_id: None,
+        fixture_id: None,
+        mode: None,
+        round_summary,
+        cup_round_summaries: build_cup_round_summaries(game, today),
+        results,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{advance_time_with_mode, scheduled_user_fixture_index};
+    use chrono::{TimeZone, Utc};
+    use domain::league::{Fixture, FixtureCompetition, FixtureStatus, League};
+    use domain::manager::Manager;
+    use domain::player::Player;
+    use ofm_core::clock::GameClock;
+    use ofm_core::game::Game;
+    use ofm_core::state::StateManager;
+
+    fn scheduled(id: &str, date: &str, home: &str, away: &str) -> Fixture {
+        Fixture {
+            id: id.to_string(),
+            matchday: 1,
+            date: date.to_string(),
+            home_team_id: home.to_string(),
+            away_team_id: away.to_string(),
+            competition: FixtureCompetition::League,
+            status: FixtureStatus::Scheduled,
+            ..Default::default()
+        }
+    }
+
+    fn league(id: &str, fixtures: Vec<Fixture>) -> League {
+        League {
+            id: id.to_string(),
+            name: id.to_string(),
+            season: 2036,
+            fixtures,
+            ..Default::default()
+        }
+    }
+
+    fn game_with(competitions: Vec<League>, mirror: Option<League>) -> Game {
+        let mut manager = Manager::new(
+            "mgr".to_string(),
+            "Test".to_string(),
+            "Manager".to_string(),
+            "1980-01-01".to_string(),
+            "England".to_string(),
+        );
+        manager.hire("eng-00".to_string());
+        let clock = GameClock::new(Utc.with_ymd_and_hms(2036, 5, 1, 12, 0, 0).unwrap());
+        let mut game = Game::new(clock, manager, vec![], vec![], vec![], vec![]);
+        game.competitions = competitions;
+        game.league = mirror;
+        game
+    }
+
+    /// The caller replaces `game.league` with whatever competition the returned
+    /// index names, and builds the live match from it. The legacy fallback used
+    /// to answer zero regardless, so a player whose fixture was only reachable
+    /// through the mirror was handed the first competition in the list — in a
+    /// generated world an Argentine league, for an English manager.
+    #[test]
+    fn the_mirror_fallback_names_the_mirrors_own_competition_not_the_first() {
+        let foreign = league("ar-d1-apertura", vec![]);
+        let ours = league(
+            "eng-d2",
+            vec![scheduled("f1", "2036-05-01", "eng-00", "eng-01")],
+        );
+        // Out of scope, so the scan above the fallback skips it and the mirror
+        // is what answers.
+        let mut game = game_with(vec![foreign, ours.clone()], Some(ours));
+        game.active_competition_ids = vec!["ar-d1-apertura".to_string()];
+
+        let (competition_index, fixture_index) =
+            scheduled_user_fixture_index(&game, "2036-05-01").expect("the user plays today");
+
+        assert_eq!(fixture_index, 0);
+        let competition_index = competition_index.expect("the mirror is one of the competitions");
+        assert_eq!(
+            game.competitions[competition_index].id, "eng-d2",
+            "the index must name the mirror's competition, not competitions[0]"
+        );
+    }
+
+    /// A save written before competitions existed has only the mirror, so there is no competition
+    /// to name and the answer is `None` — which leaves `game.league` alone, correct, because the
+    /// mirror already holds the fixture.
+    #[test]
+    fn a_mirror_that_is_not_a_competition_names_no_competition() {
+        let ours = league(
+            "legacy-league",
+            vec![scheduled("f1", "2036-05-01", "eng-00", "eng-01")],
+        );
+        let game = game_with(Vec::new(), Some(ours));
+
+        let (competition_index, _) =
+            scheduled_user_fixture_index(&game, "2036-05-01").expect("the user plays today");
+
+        assert_eq!(
+            competition_index, None,
+            "nothing to replace the mirror with, so the mirror stands"
+        );
+    }
+
+    fn cup_tie(id: &str, date: &str) -> Fixture {
+        Fixture {
+            competition_id: "cup".to_string(),
+            competition: FixtureCompetition::Cup,
+            status: FixtureStatus::Completed,
+            result: Some(domain::league::MatchResult {
+                home_goals: 2,
+                away_goals: 1,
+                ..Default::default()
+            }),
+            ..scheduled(id, date, "eng-00", "eng-02")
+        }
+    }
+
+    /// A game on 1 May whose user club plays in a knockout cup and a league.
+    fn game_with_cup_and_league(cup_fixtures: Vec<Fixture>, league_fixtures: Vec<Fixture>) -> Game {
+        let mut cup = league("cup", cup_fixtures);
+        cup.rules.format = domain::league::CompetitionFormat::Knockout;
+        cup.participant_ids = vec!["eng-00".to_string(), "eng-02".to_string()];
+        let domestic = league("league", league_fixtures);
+        game_with(vec![domestic.clone(), cup], Some(domestic))
+    }
+
+    fn cup_ties_in_response(game: &Game, today: &str) -> Vec<String> {
+        super::advanced_day_response(game, today, None)
+            .cup_round_summaries
+            .iter()
+            .flat_map(|summary| summary.results.iter().map(|r| r.result.fixture_id.clone()))
+            .collect()
+    }
+
+    /// **Given** the user's cup tie is the only match of the day,
+    /// **when** the day is advanced,
+    /// **then** the response carries the cup summary.
+    #[test]
+    fn a_cup_only_day_carries_the_cup_summary() {
+        let game = game_with_cup_and_league(vec![cup_tie("tie", "2036-05-01")], vec![]);
+        assert_eq!(cup_ties_in_response(&game, "2036-05-01"), vec!["tie"]);
+    }
+
+    /// **Given** a cup tie and a league match on the same day,
+    /// **when** the day is advanced,
+    /// **then** the cup summary is carried beside the league round, not instead of it.
+    #[test]
+    fn a_cup_and_league_day_carries_both_summaries() {
+        let game = game_with_cup_and_league(
+            vec![cup_tie("tie", "2036-05-01")],
+            vec![Fixture {
+                status: FixtureStatus::Completed,
+                result: Some(domain::league::MatchResult {
+                    home_goals: 1,
+                    away_goals: 0,
+                    ..Default::default()
+                }),
+                ..scheduled("league-1", "2036-05-01", "eng-00", "eng-01")
+            }],
+        );
+        let context = ofm_core::matchday::LeagueRoundContext {
+            date: "2036-05-01".to_string(),
+            matchday: 1,
+            previous_standings: vec![],
+        };
+        let response = super::advanced_day_response(
+            &game,
+            "2036-05-01",
+            super::build_round_summary_dto(&game, &context),
+        );
+        assert!(response.round_summary.is_some());
+        assert_eq!(response.cup_round_summaries.len(), 1);
+    }
+
+    /// **Given** a day with only league fixtures,
+    /// **when** the day is advanced,
+    /// **then** no cup summary is carried.
+    #[test]
+    fn a_league_only_day_carries_no_cup_summary() {
+        let game = game_with_cup_and_league(vec![cup_tie("tie", "2036-05-08")], vec![]);
+        assert!(cup_ties_in_response(&game, "2036-05-01").is_empty());
+    }
+
+    /// **Given** a cup tie moved from 1 May to 4 May,
+    /// **when** each day is advanced,
+    /// **then** the tie appears on 4 May and not on the date it was moved from.
+    #[test]
+    fn a_moved_cup_tie_appears_on_the_day_it_is_played() {
+        let game = game_with_cup_and_league(vec![cup_tie("tie", "2036-05-04")], vec![]);
+        assert!(cup_ties_in_response(&game, "2036-05-01").is_empty());
+        assert_eq!(cup_ties_in_response(&game, "2036-05-04"), vec!["tie"]);
+    }
+
+    fn senior(id: &str, team_id: Option<&str>, position: domain::player::Position) -> Player {
+        let attributes = domain::player::PlayerAttributes {
+            pace: 60,
+            stamina: 60,
+            strength: 60,
+            agility: 60,
+            passing: 60,
+            shooting: 60,
+            tackling: 60,
+            dribbling: 60,
+            defending: 60,
+            positioning: 60,
+            vision: 60,
+            decisions: 60,
+            composure: 60,
+            aggression: 60,
+            teamwork: 60,
+            leadership: 60,
+            handling: 60,
+            reflexes: 60,
+            aerial: 60,
+        };
+        let mut player = Player::new(
+            id.to_string(),
+            id.to_string(),
+            id.to_string(),
+            "1998-01-01".to_string(),
+            "England".to_string(),
+            position,
+            attributes,
+        );
+        player.team_id = team_id.map(str::to_string);
+        player
+    }
+
+    /// Both clubs of the user's fixture: a sound 2/5/5/3 squad each, except that
+    /// the user's club has no keeper at all.
+    fn clubs_for_a_keeperless_user(game: &mut Game) {
+        use domain::player::Position;
+        for (team_id, keepers) in [("eng-00", 0), ("eng-01", 2)] {
+            game.teams.push(domain::team::Team::new(
+                team_id.to_string(),
+                team_id.to_string(),
+                team_id.to_uppercase(),
+                "England".to_string(),
+                "London".to_string(),
+                "Ground".to_string(),
+                20_000,
+            ));
+            for (position, count) in [
+                (Position::Goalkeeper, keepers),
+                (Position::Defender, 5),
+                (Position::Midfielder, 5),
+                (Position::Forward, 3),
+            ] {
+                for index in 0..count {
+                    game.players.push(senior(
+                        &format!("{team_id}-{position:?}-{index}"),
+                        Some(team_id),
+                        position.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// **Given** the user's club has no keeper on the day of its match and a keeper is on the
+    /// free-agent market,
+    /// **when** the manager starts the match live,
+    /// **then** the match kicks off through the squad floor's gate: the keeper is signed first, and
+    /// the manager is told.
+    ///
+    /// This branch builds its session itself rather than through `ofm_core::matchday`, so it needs
+    /// its own pin: building it with `create_live_match` directly would skip the gate and leave the
+    /// user's side without a keeper.
+    #[test]
+    fn a_live_match_kicks_off_through_the_squad_floor_gate() {
+        let ours = league(
+            "eng-d1",
+            vec![scheduled("f1", "2036-05-01", "eng-00", "eng-01")],
+        );
+        let mut game = game_with(vec![ours], None);
+        clubs_for_a_keeperless_user(&mut game);
+        game.players.push(senior(
+            "free-keeper",
+            None,
+            domain::player::Position::Goalkeeper,
+        ));
+
+        let state = StateManager::new();
+        state.set_game(game);
+
+        advance_time_with_mode(&state, ofm_core::state::Career::Active, "live")
+            .expect("the live match starts");
+
+        let signed = state
+            .get_game(|game| {
+                game.players
+                    .iter()
+                    .find(|player| player.id == "free-keeper")
+                    .and_then(|player| player.team_id.clone())
+            })
+            .flatten();
+        assert_eq!(
+            signed.as_deref(),
+            Some("eng-00"),
+            "the keeper was not signed"
+        );
+    }
+
+    /// **Given** the user's fixture sits in a competition whose clubs have nobody available,
+    /// **when** a live match is started for it,
+    /// **then** the call fails and `game.league` still holds what it held before.
+    ///
+    /// This branch swaps the competition into the legacy slot before building the session, because
+    /// that is where `create_live_match` reads the fixture from — and it can refuse, a side with
+    /// nobody available being a handled `Err` rather than a panic. The closure runs inside
+    /// `update_game`, which hands out `&mut Game` and keeps every mutation whether the closure
+    /// returns `Ok` or `Err`. So an early return without restoring leaves the player's own game
+    /// pointing at another competition, with no match played to explain why.
+    ///
+    /// The delegate path has the same shape and its own test in `ofm_core`; this pins the one the
+    /// reviewer's probe did not reach. Dropping the restore here left all twenty-five app-crate
+    /// tests green.
+    #[test]
+    fn a_live_match_that_cannot_start_leaves_the_mirror_as_it_found_it() {
+        let ours = league(
+            "eng-d1",
+            vec![scheduled("f1", "2036-05-01", "eng-00", "eng-01")],
+        );
+        // What the day-start code happened to leave staged in the legacy slot.
+        let staged = league("staged-elsewhere", Vec::new());
+        // No players anywhere in the world, so `create_live_match` refuses.
+        let game = game_with(vec![ours], Some(staged));
+
+        let state = StateManager::new();
+        state.set_game(game);
+
+        let outcome = advance_time_with_mode(&state, ofm_core::state::Career::Active, "live");
+
+        assert!(
+            outcome.is_err(),
+            "a side with nobody available cannot play, and that is an Err rather than a panic"
+        );
+        let mirror = state
+            .get_game(|game| game.league.as_ref().map(|league| league.id.clone()))
+            .flatten();
+        assert_eq!(
+            mirror.as_deref(),
+            Some("staged-elsewhere"),
+            "the mirror is restored, so the game the player returns to is the one they left"
+        );
+    }
 }

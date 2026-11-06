@@ -2,20 +2,30 @@
 
 use std::sync::Arc;
 
+use ofm_core::morale::apply_morale_change;
+
 use crate::application::press_conference::{
     first_player_outside_squad, last_completed_match, todays_article_id,
 };
+use mcp_results::live_match::{
+    CommandApplied, LiveMatchStarted, MatchAdvanced, MatchEventLine, MatchFinished, MatchSnapshot,
+    MoraleChange, PressConferenceComplete, RoundScore, ShootoutKicker, ShootoutOrder,
+    TeamTalkApplied,
+};
+
 use crate::mcp_server::context::McpContext;
 
-/// Format a match event as a readable string.
-fn fmt_event(event: &engine::MatchEvent) -> String {
-    let side = match event.side {
-        engine::Side::Home => "Home",
-        engine::Side::Away => "Away",
-    };
-    let player = event.player_id.as_deref().unwrap_or("?");
-    let desc = format!("{:?}", event.event_type);
-    format!("{}': {} {} ({})", event.minute, side, desc, player)
+fn event_line(event: &engine::MatchEvent) -> MatchEventLine {
+    MatchEventLine {
+        minute: event.minute,
+        side: match event.side {
+            engine::Side::Home => "Home",
+            engine::Side::Away => "Away",
+        }
+        .to_string(),
+        event: format!("{:?}", event.event_type),
+        player_id: event.player_id.clone(),
+    }
 }
 
 /// Start a live match for a given fixture index.
@@ -25,17 +35,20 @@ pub fn match_start(
     fixture_index: u32,
     mode: String,
     allows_extra_time: Option<bool>,
-) -> Result<String, String> {
+    competition_id: Option<String>,
+    fixture_id: Option<String>,
+) -> Result<LiveMatchStarted, String> {
     let fixture_idx = fixture_index as usize;
-    let allows_et = allows_extra_time.unwrap_or(true);
+    let allows_et = allows_extra_time.unwrap_or(false);
 
-    let snapshot = crate::application::live_match::start_live_match(
+    let snapshot = crate::commands::live_match::start_live_match_internal(
         &ctx.state_manager,
+        ofm_core::state::Career::Active,
         fixture_idx,
         &mode,
         allows_et,
-        None,
-        None,
+        competition_id.as_deref(),
+        fixture_id.as_deref(),
     )?;
 
     {
@@ -43,22 +56,33 @@ pub fn match_start(
         let _ = ctx.app_handle.emit("game-state-changed", ());
     }
 
-    Ok(format!(
-        "## Live Match Started\n\n**Fixture Index**: {}\n**Mode**: {}\n**Minute**: {}\n**Score**: {} - {}\n\nUse `match_step` to advance, `match_command` to issue tactical commands, and `match_finish` to end.",
-        fixture_index, mode, snapshot.current_minute, snapshot.home_score, snapshot.away_score
-    ))
+    let fixture_label = match (competition_id.as_deref(), fixture_id.as_deref()) {
+        (Some(competition), Some(fixture)) => format!("{competition}/{fixture}"),
+        _ => format!("Index {fixture_index}"),
+    };
+
+    Ok(LiveMatchStarted {
+        fixture: fixture_label,
+        mode,
+        minute: snapshot.current_minute,
+        home_score: snapshot.home_score,
+        away_score: snapshot.away_score,
+    })
 }
 
 /// Step the live match forward by N minutes.
-pub fn match_step(ctx: Arc<McpContext>, minutes: u16) -> Result<String, String> {
-    let results = crate::application::live_match::step_live_match(&ctx.state_manager, minutes)?;
+pub fn match_step(ctx: Arc<McpContext>, minutes: u16) -> Result<MatchAdvanced, String> {
+    let results = crate::application::live_match::step_live_match(
+        &ctx.state_manager,
+        ofm_core::state::Career::Active,
+        minutes,
+    )?;
 
-    let mut lines: Vec<String> = Vec::new();
-    for result in &results {
-        for event in &result.events {
-            lines.push(fmt_event(event));
-        }
-    }
+    let events: Vec<MatchEventLine> = results
+        .iter()
+        .flat_map(|result| &result.events)
+        .map(event_line)
+        .collect();
 
     // Get the latest snapshot for score
     let snapshot = crate::application::live_match::get_match_snapshot(&ctx.state_manager)?;
@@ -68,12 +92,6 @@ pub fn match_step(ctx: Arc<McpContext>, minutes: u16) -> Result<String, String> 
         let _ = ctx.app_handle.emit("game-state-changed", ());
     }
 
-    let events_text = if lines.is_empty() {
-        "No events occurred.".to_string()
-    } else {
-        lines.join("\n")
-    };
-
     // No minute count in the header. It reported the *requested* minutes, which a step that stops
     // early at half time or full time does not deliver; counting the returned results is no better,
     // because a MinuteResult is also produced for phase transitions that play no minute (kick-off,
@@ -81,80 +99,141 @@ pub fn match_step(ctx: Arc<McpContext>, minutes: u16) -> Result<String, String> 
     //
     // The snapshot's own minute is the truth an agent needs, and the phase tells it why the step
     // stopped — which is the actionable part, since a stop means the match is waiting on a decision.
-    Ok(format!(
-        "## Match Advanced\n\n**Minute**: {}\n**Phase**: {:?}\n**Score**: {} - {}\n\n### Events\n{}",
-        snapshot.current_minute,
-        snapshot.phase,
-        snapshot.home_score,
-        snapshot.away_score,
-        events_text
-    ))
+    Ok(MatchAdvanced {
+        minute: snapshot.current_minute,
+        phase: format!("{:?}", snapshot.phase),
+        home_score: snapshot.home_score,
+        away_score: snapshot.away_score,
+        events,
+    })
 }
 
 /// Apply a match command (substitution, tactic change, set piece taker, etc.)
-pub fn match_command(ctx: Arc<McpContext>, command_json: String) -> Result<String, String> {
+pub fn match_command(ctx: Arc<McpContext>, command_json: String) -> Result<CommandApplied, String> {
     let command: engine::MatchCommand = serde_json::from_str(&command_json)
         .map_err(|e| format!("Invalid match command JSON: {}", e))?;
 
-    let snapshot =
-        crate::application::live_match::apply_match_command(&ctx.state_manager, command)?;
+    let snapshot = crate::application::live_match::apply_match_command(
+        &ctx.state_manager,
+        ofm_core::state::Career::Active,
+        command,
+    )?;
 
     {
         use tauri::Emitter;
         let _ = ctx.app_handle.emit("game-state-changed", ());
     }
 
-    Ok(format!(
-        "## Command Applied\n\n**Minute**: {}\n**Score**: {} - {}",
-        snapshot.current_minute, snapshot.home_score, snapshot.away_score
-    ))
+    Ok(CommandApplied {
+        minute: snapshot.current_minute,
+        home_score: snapshot.home_score,
+        away_score: snapshot.away_score,
+    })
 }
 
 /// Get current match snapshot without advancing time.
-pub fn match_snapshot(ctx: Arc<McpContext>) -> Result<String, String> {
+pub fn match_snapshot(ctx: Arc<McpContext>) -> Result<MatchSnapshot, String> {
     let snapshot = crate::application::live_match::get_match_snapshot(&ctx.state_manager)?;
-
-    Ok(format!(
-        "## Match Snapshot\n\n**Minute**: {}\n**Score**: {} - {}\n**Phase**: {:?}\n**Possession**: Home {:.0}% / Away {:.0}%",
-        snapshot.current_minute,
-        snapshot.home_score,
-        snapshot.away_score,
-        snapshot.phase,
-        snapshot.home_possession_pct * 100.0,
-        snapshot.away_possession_pct * 100.0,
-    ))
+    Ok(snapshot_view(&snapshot))
 }
 
-/// Finish the live match: generate report, update game state, clean up.
-pub fn match_finish(ctx: Arc<McpContext>) -> Result<String, String> {
-    let response = crate::application::live_match::finish_live_match(&ctx.state_manager)?;
+/// Set the order the agent's own side takes its shootout kicks in. The agent never names a
+/// side, so it can only ever set its own.
+pub fn match_set_shootout_order(
+    ctx: Arc<McpContext>,
+    player_ids: Vec<String>,
+) -> Result<MatchSnapshot, String> {
+    let snapshot = ctx
+        .state_manager
+        .with_live_match(|session| {
+            session.set_own_shootout_order(player_ids)?;
+            Ok::<engine::MatchSnapshot, String>(session.snapshot())
+        })
+        .ok_or_else(|| "be.error.noActiveLiveMatch".to_string())??;
 
     {
         use tauri::Emitter;
         let _ = ctx.app_handle.emit("game-state-changed", ());
     }
 
-    let round_text = if let Some(ref summary) = response.round_summary {
-        let results: Vec<String> = summary
-            .completed_results
-            .iter()
-            .map(|r| {
-                format!(
-                    "- {} {} - {} {}",
-                    r.home_team_name, r.home_goals, r.away_goals, r.away_team_name
-                )
-            })
-            .collect();
-        format!("\n\n### Round Results\n{}", results.join("\n"))
-    } else {
-        String::new()
-    };
+    Ok(snapshot_view(&snapshot))
+}
 
-    Ok(format!(
-        "## Match Finished\n\n**Date**: {}{}",
-        response.game.clock.current_date.format("%d %B %Y"),
-        round_text
-    ))
+fn snapshot_view(snapshot: &engine::MatchSnapshot) -> MatchSnapshot {
+    MatchSnapshot {
+        minute: snapshot.current_minute,
+        home_score: snapshot.home_score,
+        away_score: snapshot.away_score,
+        phase: format!("{:?}", snapshot.phase),
+        // The engine counts possession in percent; the agent's view, and its Display, in shares.
+        home_possession: snapshot.home_possession_pct / 100.0,
+        away_possession: snapshot.away_possession_pct / 100.0,
+        shootout_order: own_shootout_order(snapshot),
+    }
+}
+
+/// The agent's own shootout order, with names. The session fills in only the user's side, so
+/// whichever side carries an order is the agent's.
+fn own_shootout_order(snapshot: &engine::MatchSnapshot) -> Option<ShootoutOrder> {
+    let shootout = snapshot.penalty_shootout.as_ref()?;
+    let (order, team) = match (&shootout.home_order, &shootout.away_order) {
+        (Some(order), _) => (order, &snapshot.home_team),
+        (None, Some(order)) => (order, &snapshot.away_team),
+        (None, None) => return None,
+    };
+    let players = order
+        .player_ids
+        .iter()
+        .map(|id| ShootoutKicker {
+            player_id: id.clone(),
+            name: team
+                .players
+                .iter()
+                .find(|player| player.id == *id)
+                .map(|player| player.name.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+    Some(ShootoutOrder {
+        players,
+        kickers: order.kickers,
+        // The home side kicks first, so no home kick means no kick at all.
+        changeable: shootout.home_taken == 0,
+    })
+}
+
+/// Finish the live match: generate report, update game state, clean up.
+pub fn match_finish(ctx: Arc<McpContext>) -> Result<MatchFinished, String> {
+    let response = crate::application::live_match::finish_live_match(
+        &ctx.state_manager,
+        ofm_core::state::Career::Active,
+    )?;
+
+    {
+        use tauri::Emitter;
+        let _ = ctx.app_handle.emit("game-state-changed", ());
+    }
+
+    Ok(MatchFinished {
+        date: response
+            .game
+            .clock
+            .current_date
+            .format("%d %B %Y")
+            .to_string(),
+        round_results: response.round_summary.as_ref().map(|summary| {
+            summary
+                .completed_results
+                .iter()
+                .map(|r| RoundScore {
+                    home_team: r.home_team_name.clone(),
+                    home_goals: r.home_goals,
+                    away_goals: r.away_goals,
+                    away_team: r.away_team_name.clone(),
+                })
+                .collect()
+        }),
+    })
 }
 
 /// Apply a team talk during a match (half-time or full-time).
@@ -164,46 +243,32 @@ pub fn match_team_talk(
     ctx: Arc<McpContext>,
     tone: String,
     context: String,
-) -> Result<String, String> {
-    let seed = rand::random::<u64>();
+) -> Result<TeamTalkApplied, String> {
     // Resolves the manager's team before the loop that adjusts morale, so an
     // error path never leaves a half-applied team talk behind.
-    let results = ctx
-        .state_manager
-        .update_game(|game| {
-            crate::commands::live_match::apply_team_talk_internal(game, &tone, &context, seed)
-        })
-        .ok_or_else(|| "be.error.noActiveGameSession".to_string())??;
+    let results = crate::commands::live_match::apply_team_talk_on(
+        &ctx.state_manager,
+        ofm_core::state::Career::Active,
+        &tone,
+        &context,
+    )?;
 
     {
         use tauri::Emitter;
         let _ = ctx.app_handle.emit("game-state-changed", ());
     }
 
-    let mut lines = Vec::new();
-    for result in &results {
-        let pid = result["player_id"].as_str().unwrap_or("?");
-        let delta = result["delta"].as_i64().unwrap_or(0);
-        let emoji = if delta > 0 {
-            "📈"
-        } else if delta < 0 {
-            "📉"
-        } else {
-            "➡️"
-        };
-        lines.push(format!("- {} {}: morale {:+}", emoji, pid, delta));
-    }
-
-    let reactions = if lines.is_empty() {
-        "No morale changes.".to_string()
-    } else {
-        lines.join("\n")
-    };
-
-    Ok(format!(
-        "## Team Talk Applied\n\n**Tone**: {}\n**Context**: {}\n\n### Player Reactions\n{}",
-        tone, context, reactions
-    ))
+    Ok(TeamTalkApplied {
+        tone,
+        context,
+        reactions: results
+            .iter()
+            .map(|result| MoraleChange {
+                player_id: result["player_id"].as_str().unwrap_or("?").to_string(),
+                delta: result["delta"].as_i64().unwrap_or(0),
+            })
+            .collect(),
+    })
 }
 
 /// The most answers one press conference may carry.
@@ -227,20 +292,6 @@ struct PressAnswer {
     player_id: String,
 }
 
-/// What a press conference did, once applied: the squad morale it moved and the match it was about.
-#[derive(Debug)]
-struct PressConferenceOutcome {
-    squad_morale_delta: i16,
-    /// How many of the user's players actually ended the conference on a different morale, and
-    /// how many there were. Both effects clamp, so the delta alone says nothing about movement.
-    squad_players_moved: usize,
-    squad_size: usize,
-    home_team_name: String,
-    away_team_name: String,
-    home_score: u8,
-    away_score: u8,
-}
-
 /// Applies a press conference to the game — individual morale, squad morale, and the news article.
 ///
 /// Every failure is resolved before the first mutation. `update_game` cannot roll back a closure
@@ -249,7 +300,7 @@ struct PressConferenceOutcome {
 fn apply_press_conference(
     game: &mut ofm_core::game::Game,
     answers: &[PressAnswer],
-) -> Result<PressConferenceOutcome, String> {
+) -> Result<PressConferenceComplete, String> {
     let today = game.clock.current_date.format("%Y-%m-%d").to_string();
 
     // One conference per game day.
@@ -352,7 +403,7 @@ fn apply_press_conference(
                 _ => 2,
             };
             if let Some(p) = game.players.iter_mut().find(|p| p.id == answer.player_id) {
-                p.morale = ((p.morale as i16) + player_delta).clamp(10, 100) as u8;
+                p.morale = apply_morale_change(p.morale, player_delta);
             }
         }
     }
@@ -361,7 +412,7 @@ fn apply_press_conference(
     if morale_delta != 0 {
         for p in game.players.iter_mut() {
             if p.team_id.as_deref() == Some(&user_team_id) {
-                p.morale = ((p.morale as i16) + morale_delta).clamp(10, 100) as u8;
+                p.morale = apply_morale_change(p.morale, morale_delta);
             }
         }
     }
@@ -409,7 +460,7 @@ fn apply_press_conference(
 
     game.news.push(article);
 
-    Ok(PressConferenceOutcome {
+    Ok(PressConferenceComplete {
         squad_morale_delta: morale_delta,
         squad_players_moved,
         squad_size: squad_before.len(),
@@ -459,10 +510,10 @@ fn check_answer_limits(answers: &[PressAnswer]) -> Result<(), String> {
 fn press_conference_on(
     state: &ofm_core::state::StateManager,
     answers: &[PressAnswer],
-) -> Result<PressConferenceOutcome, String> {
-    state
-        .update_game(|game| apply_press_conference(game, answers))
-        .ok_or_else(|| "be.error.noActiveGameSession".to_string())?
+) -> Result<PressConferenceComplete, String> {
+    state.update_game_for(ofm_core::state::Career::Active, |game| {
+        apply_press_conference(game, answers)
+    })?
 }
 
 /// Submit press conference answers after a match.
@@ -471,7 +522,7 @@ fn press_conference_on(
 pub fn match_press_conference(
     ctx: Arc<McpContext>,
     answers_json: String,
-) -> Result<String, String> {
+) -> Result<PressConferenceComplete, String> {
     let answers: Vec<PressAnswer> =
         serde_json::from_str(&answers_json).map_err(|e| format!("Invalid answers JSON: {}", e))?;
 
@@ -484,33 +535,7 @@ pub fn match_press_conference(
         let _ = ctx.app_handle.emit("game-state-changed", ());
     }
 
-    Ok(format_outcome(&outcome))
-}
-
-/// Renders the outcome for the agent that asked for it.
-///
-/// The movement count is not decoration: a squad already on 100 absorbs a "+3" entirely, and a
-/// `deflect` on a player question moves one player while leaving the squad delta at zero.
-/// Reporting the delta on its own told the caller praise had worked when nothing had happened —
-/// and this call is its only window onto morale, so it would learn the wrong lesson.
-fn format_outcome(outcome: &PressConferenceOutcome) -> String {
-    let emoji = match (outcome.squad_players_moved, outcome.squad_morale_delta) {
-        (0, _) => "➡️",
-        (_, delta) if delta > 0 => "📈",
-        (_, delta) if delta < 0 => "📉",
-        _ => "➡️",
-    };
-    format!(
-        "## Press Conference Complete\n\n{} Squad morale {:+}: {} of {} players moved\n**Match**: {} {} - {} {}",
-        emoji,
-        outcome.squad_morale_delta,
-        outcome.squad_players_moved,
-        outcome.squad_size,
-        outcome.home_team_name,
-        outcome.home_score,
-        outcome.away_score,
-        outcome.away_team_name
-    )
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -681,6 +706,51 @@ mod tests {
         let unnamed = game.players.iter().find(|p| p.id == "p2").unwrap();
         assert_eq!(named.morale, 59, "50 + 5 individual + 4 squad-wide");
         assert_eq!(unnamed.morale, 54, "50 + 4 squad-wide");
+    }
+
+    /// Given the user's squad at morale 3, below the floor of 10 that bad news stops at
+    /// When a confident answer lifts the squad by 3
+    /// Then each player ends at 6, not at 10
+    #[test]
+    fn good_press_lifts_a_very_unhappy_squad_by_what_it_is_worth() {
+        let mut game = game_after_a_match();
+        for player in game
+            .players
+            .iter_mut()
+            .filter(|p| p.team_id.as_deref() == Some("team1"))
+        {
+            player.morale = 3;
+        }
+
+        apply_press_conference(&mut game, &[answer("mood", "confident", "")]).unwrap();
+
+        let squad: Vec<u8> = game
+            .players
+            .iter()
+            .filter(|p| p.team_id.as_deref() == Some("team1"))
+            .map(|p| p.morale)
+            .collect();
+        assert_eq!(squad, vec![6, 6]);
+    }
+
+    /// Given a player at morale 3
+    /// When the manager deflects a question about him, which costs him 1 and the squad nothing
+    /// Then he stays at 3: the knock is no reason to lift him to 10
+    #[test]
+    fn deflecting_a_question_about_a_very_unhappy_player_never_lifts_him() {
+        let mut game = game_after_a_match();
+        game.players
+            .iter_mut()
+            .find(|p| p.id == "p1")
+            .unwrap()
+            .morale = 3;
+
+        apply_press_conference(&mut game, &[answer("player_focus", "deflect", "p1")]).unwrap();
+
+        assert_eq!(
+            game.players.iter().find(|p| p.id == "p1").unwrap().morale,
+            3
+        );
     }
 
     #[test]
@@ -1027,8 +1097,11 @@ mod tests {
         assert_eq!(p1.morale, 49);
     }
 
-    fn outcome_with(squad_morale_delta: i16, squad_players_moved: usize) -> PressConferenceOutcome {
-        PressConferenceOutcome {
+    fn outcome_with(
+        squad_morale_delta: i16,
+        squad_players_moved: usize,
+    ) -> PressConferenceComplete {
+        PressConferenceComplete {
             squad_morale_delta,
             squad_players_moved,
             squad_size: 24,
@@ -1041,11 +1114,158 @@ mod tests {
 
     #[test]
     fn the_report_never_claims_a_change_that_did_not_happen() {
-        assert!(format_outcome(&outcome_with(3, 18)).contains("📈 Squad morale +3: 18 of 24"));
-        assert!(format_outcome(&outcome_with(-2, 24)).contains("📉 Squad morale -2: 24 of 24"));
+        assert!(outcome_with(3, 18)
+            .to_string()
+            .contains("📈 Squad morale +3: 18 of 24"));
+        assert!(outcome_with(-2, 24)
+            .to_string()
+            .contains("📉 Squad morale -2: 24 of 24"));
         // A delta the squad absorbed whole must not read as a rise.
-        assert!(format_outcome(&outcome_with(3, 0)).contains("➡️ Squad morale +3: 0 of 24"));
+        assert!(outcome_with(3, 0)
+            .to_string()
+            .contains("➡️ Squad morale +3: 0 of 24"));
         // And a flat squad delta must not read as nothing happening.
-        assert!(format_outcome(&outcome_with(0, 1)).contains("➡️ Squad morale +0: 1 of 24"));
+        assert!(outcome_with(0, 1)
+            .to_string()
+            .contains("➡️ Squad morale +0: 1 of 24"));
+    }
+
+    /// A league fixture today between team1 (home) and team2, sixteen a side, with the user
+    /// managing `user_team` if it names one.
+    fn game_before_a_match(user_team: Option<&str>) -> ofm_core::game::Game {
+        let clock = ofm_core::clock::GameClock::new(
+            chrono::Utc.with_ymd_and_hms(2026, 3, 14, 12, 0, 0).unwrap(),
+        );
+        let mut manager = domain::manager::Manager::new(
+            "mgr1".to_string(),
+            "Test".to_string(),
+            "Manager".to_string(),
+            "1980-01-01".to_string(),
+            "England".to_string(),
+        );
+        if let Some(team_id) = user_team {
+            manager.hire(team_id.to_string());
+        }
+        let players = ["team1", "team2"]
+            .into_iter()
+            .flat_map(|team_id| {
+                (0..16).map(move |index| player(&format!("{team_id}_p{index}"), team_id))
+            })
+            .collect();
+        let fixture = domain::league::Fixture {
+            id: "fix1".to_string(),
+            matchday: 1,
+            date: "2026-03-14".to_string(),
+            home_team_id: "team1".to_string(),
+            away_team_id: "team2".to_string(),
+            competition: domain::league::FixtureCompetition::League,
+            status: domain::league::FixtureStatus::Scheduled,
+            ..Default::default()
+        };
+        let league = domain::league::League {
+            id: "league1".to_string(),
+            name: "Test League".to_string(),
+            season: 1,
+            fixtures: vec![fixture],
+            ..Default::default()
+        };
+        let mut game = ofm_core::game::Game::new(
+            clock,
+            manager,
+            vec![team("team1", "Test FC"), team("team2", "Rival FC")],
+            players,
+            vec![],
+            vec![],
+        );
+        game.competitions.push(league);
+        game.promote_legacy_league();
+        game
+    }
+
+    /// The match as the user sees it at the start of its shootout, before the first kick.
+    fn snapshot_at_the_shootout(user_team: Option<&str>) -> engine::MatchSnapshot {
+        let game = game_before_a_match(user_team);
+        let mut session = ofm_core::live_match_manager::create_live_match(
+            &game,
+            0,
+            ofm_core::live_match_manager::MatchMode::Live,
+            true,
+        )
+        .expect("the fixture starts");
+        while session.match_state.phase() != engine::MatchPhase::PenaltyShootout {
+            if matches!(
+                session.match_state.phase(),
+                engine::MatchPhase::FullTime | engine::MatchPhase::ExtraTimeEnd
+            ) {
+                session.match_state.test_set_score(0, 0);
+            }
+            session.step();
+        }
+        session.snapshot()
+    }
+
+    /// Given the agent's club at the start of a shootout,
+    /// When the agent reads the match snapshot,
+    /// Then it lists the agent's own players in their kicking order, by name, and how many
+    /// of them kick.
+    #[test]
+    fn an_agents_snapshot_lists_its_own_shootout_order() {
+        let snapshot = snapshot_at_the_shootout(Some("team1"));
+        let engine_order = snapshot
+            .penalty_shootout
+            .as_ref()
+            .and_then(|shootout| shootout.home_order.clone())
+            .expect("the session shows the user's own order");
+
+        let order = snapshot_view(&snapshot)
+            .shootout_order
+            .expect("the agent sees its own order");
+
+        let listed: Vec<&str> = order
+            .players
+            .iter()
+            .map(|kicker| kicker.player_id.as_str())
+            .collect();
+        let expected: Vec<&str> = engine_order.player_ids.iter().map(String::as_str).collect();
+        assert_eq!(listed, expected);
+        assert!(
+            order
+                .players
+                .iter()
+                .all(|kicker| kicker.player_id.starts_with("team1_")
+                    && kicker.name == kicker.player_id),
+            "only the agent's own players, each by name: {:?}",
+            order.players
+        );
+        assert_eq!(order.kickers, engine_order.kickers);
+    }
+
+    /// Given the agent's club at the start of a shootout,
+    /// When the agent reads the match snapshot,
+    /// Then possession is given as shares that add up to one, and its order can still be
+    /// changed.
+    #[test]
+    fn an_agents_snapshot_gives_possession_as_shares_and_a_changeable_order() {
+        let view = snapshot_view(&snapshot_at_the_shootout(Some("team1")));
+        assert!(
+            (0.0..=1.0).contains(&view.home_possession),
+            "{}",
+            view.home_possession
+        );
+        assert!((view.home_possession + view.away_possession - 1.0).abs() < 1e-9);
+        assert!(
+            view.shootout_order
+                .expect("the agent's own order")
+                .changeable
+        );
+    }
+
+    /// Given a match between two clubs the agent does not manage, at the start of its shootout,
+    /// When the agent reads the match snapshot,
+    /// Then it shows no shootout order at all.
+    #[test]
+    fn an_agent_watching_two_other_clubs_sees_no_shootout_order() {
+        let snapshot = snapshot_at_the_shootout(None);
+        assert_eq!(snapshot_view(&snapshot).shootout_order, None);
     }
 }

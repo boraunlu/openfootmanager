@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "recorded_on": "2026-11-05",
+  "upstream_repository": "https://github.com/openfootmanager/openfootmanager",
+  "upstream_base_commit": "862b184e4c00be79b5fe0042385df5ffe6dc3957",
+  "reviewed_through_commit": "862b184e4c00be79b5fe0042385df5ffe6dc3957",
+  "fork_head_at_review": "3cace88de8665c33f6303c7dbfba159be6c41cdc",
+  "tracking_note": "Entries describe selected implementations, not Git merge ancestry or deployment. Publication is determined by fork history and AFM's recorded submodule pin. Future fork commits should carry Backport-ID and Upstream-Commit trailers; resolve the corresponding fork commit from those trailers rather than storing a self-referential commit hash here.",
+  "backports": [
+    {
+      "id": "ofm-pr-1042",
+      "upstream_pr": "https://github.com/openfootmanager/openfootmanager/pull/1042",
+      "upstream_commit": "553be4d786e54e65ea433cb8981b7ba30728d6b2",
+      "method": "selective_patch",
+      "scope": "Defensive play-style modifiers in both engines and seeded regression tests.",
+      "target_files": [
+        "src-tauri/crates/engine/src/engine/resolution.rs",
+        "src-tauri/crates/engine/src/live_match/zone_resolution.rs",
+        "src-tauri/crates/engine/tests/play_style_tests.rs"
+      ],
+      "adaptations": [
+        "Adjusted patch context for AFM's older role-modifier helper; retained upstream behaviour."
+      ]
+    },
+    {
+      "id": "ofm-pr-1120",
+      "upstream_pr": "https://github.com/openfootmanager/openfootmanager/pull/1120",
+      "upstream_commit": "b5a473b3e3911e7ca4806f90df9fabddff72951f",
+      "method": "selective_backport",
+      "scope": "Live-engine empty midfield slots and short-handed defensive cover, with seeded scoring/duel regressions.",
+      "target_files": [
+        "src-tauri/crates/engine/src/types.rs",
+        "src-tauri/crates/engine/src/live_match/helpers.rs",
+        "src-tauri/crates/engine/src/live_match/zone_resolution.rs",
+        "src-tauri/crates/engine/tests/short_handed_tests.rs"
+      ],
+      "adaptations": [
+        "Kept new line-strength helpers crate-private; used AFM-compatible player snapshots and local helper tests."
+      ]
+    },
+    {
+      "id": "ofm-pr-1123",
+      "upstream_pr": "https://github.com/openfootmanager/openfootmanager/pull/1123",
+      "upstream_commit": "a4c80f9d8801bbf5a0e2fa3bce84039ed4fb603d",
+      "method": "adapted_backport",
+      "scope": "Second-yellow dismissals count as both a yellow and a red in team/player reports.",
+      "target_files": [
+        "src-tauri/crates/engine/src/report.rs"
+      ],
+      "adaptations": [
+        "Adapted rating compatibility to AFM's existing contribution-based rating implementation; preserved its prior second-yellow penalty without charging the dismissal twice."
+      ],
+      "not_imported": [
+        "Upstream rating.rs implementation and its separate rating formula."
+      ]
+    },
+    {
+      "id": "ofm-pr-1016",
+      "upstream_pr": "https://github.com/openfootmanager/openfootmanager/pull/1016",
+      "upstream_commit": "562fbdf99e2d53191fe7d0c21fdaef2b345a5e88",
+      "method": "selective_backport",
+      "scope": "Formation changes preserve players' lines, rebalance through adjacent lines and retain lineup order.",
+      "target_files": [
+        "src-tauri/crates/engine/src/live_match/substitution.rs",
+        "src-tauri/crates/engine/tests/live_match_tests.rs"
+      ],
+      "adaptations": [
+        "Imported together with ofm-pr-1124's availability-aware rebalancing."
+      ]
+    },
+    {
+      "id": "ofm-pr-1124",
+      "upstream_pr": "https://github.com/openfootmanager/openfootmanager/pull/1124",
+      "upstream_commit": "266806a7fe9871fdb1e6294e95f6c98dac918ec3",
+      "method": "selective_backport",
+      "scope": "Only players still on the pitch count or move when a formation is rebalanced.",
+      "target_files": [
+        "src-tauri/crates/engine/src/live_match/substitution.rs",
+        "src-tauri/crates/engine/tests/live_match_tests.rs"
+      ],
+      "adaptations": [
+        "Combined with ofm-pr-1016 while retaining AFM's existing substitution/report integration."
+      ]
+    },
+    {
+      "id": "ofm-pr-648",
+      "upstream_pr": "https://github.com/openfootmanager/openfootmanager/pull/648",
+      "upstream_commit": "64fc3dc0c1528788e88cef18cdf0cb1e7a84faf9",
+      "method": "partial_backport_with_host_adaptation",
+      "scope": "Checkpoint coaching, borrowed match observations, tactical dial commands, goalkeeper replacement, complete match periods and the live path for unwatched active club fixtures.",
+      "target_files": [
+        "src-tauri/crates/engine/src/ai.rs",
+        "src-tauri/crates/engine/src/live_match/observation.rs",
+        "src-tauri/crates/engine/src/live_match/mod.rs",
+        "src-tauri/crates/engine/src/live_match/helpers.rs",
+        "src-tauri/crates/engine/src/live_match/simulation.rs",
+        "src-tauri/crates/engine/src/live_match/snapshot.rs",
+        "src-tauri/crates/engine/src/live_match/substitution.rs",
+        "src-tauri/crates/engine/src/types.rs",
+        "src-tauri/crates/engine/src/lib.rs",
+        "src-tauri/crates/engine/tests/ai_decision_tests.rs",
+        "src-tauri/crates/engine/tests/live_match_tests.rs",
+        "src-tauri/crates/ofm_core/src/turn/mod.rs",
+        "src-tauri/crates/ofm_core/src/live_match_manager.rs",
+        "src-tauri/crates/ofm_core/tests/turn_tests.rs",
+        "src-tauri/crates/ofm_core/tests/turn_tests/unwatched.rs"
+      ],
+      "adaptations": [
+        "Observation module and AI decision integration tests copied verbatim from the source commit.",
+        "AI manager implementation reused with a comment adjusted to avoid claiming the deferred between-match blueprint system exists in AFM.",
+        "Reused native creation/session APIs in the day loop while retaining AFM's controlled-club rules, host-owned matchday hooks and transaction boundary.",
+        "Adapted upstream's scoreline-only recovery to the existing native APIs; retained AFM's separate host forfeit handling.",
+        "Added native regression coverage using AFM-compatible game fixtures."
+      ],
+      "not_imported": [
+        "Between-match AI tactical blueprint changes.",
+        "Squad-floor, catch-up, dormant-tier and desktop matchday changes outside this integration.",
+        "Upstream sim-bench CLI additions."
+      ]
+    }
+  ],
+  "afm_only_changes": [
+    {
+      "id": "afm-substitute-minute-accounting",
+      "target_files": [
+        "src-tauri/crates/engine/src/report.rs"
+      ],
+      "scope": "Compute each appearance from entry to exit, including a substitute later substituted off or dismissed.",
+      "reason": "The wider use of substitutions exposed inherited overcounting; this fix was added locally and is not attributed to an adopted upstream commit."
+    }
+  ],
+  "baseline_integration": {
+    "method": "git_merge",
+    "upstream_commit": "862b184e4c00be79b5fe0042385df5ffe6dc3957",
+    "previous_upstream_base_commit": "1891788aba0c677f0141258394983a4e34f15457",
+    "fork_head_before_merge": "3cace88de8665c33f6303c7dbfba159be6c41cdc",
+    "note": "This baseline includes the complete upstream history and supersedes the selective implementations below. Their scope, adaptations and not_imported fields describe the historical backports. Git MERGE_HEAD/ancestry, the parent pin, and release records establish pending merge, adoption, and deployment separately."
+  }
+}

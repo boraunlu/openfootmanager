@@ -1,3 +1,4 @@
+import { createSeasonContext } from "../../test-utils/factories";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 
@@ -8,10 +9,6 @@ import type { CompetitionsView } from "../../services/competitionsService";
 
 vi.mock("../../services/competitionsService", () => ({
   fetchCompetitionsView: vi.fn(),
-}));
-
-vi.mock("../../lib/seasonContext", () => ({
-  resolveSeasonContext: () => ({ phase: "Preseason", season_start: null }),
 }));
 
 const mockedFetch = vi.mocked(fetchCompetitionsView);
@@ -37,6 +34,7 @@ function gameState(over: Partial<GameStateData> = {}): GameStateData {
     players: [],
     competitions: [competition("league-1")],
     active_competition_ids: ["league-1"],
+    season_context: createSeasonContext(),
     ...over,
   } as unknown as GameStateData;
 }
@@ -116,10 +114,7 @@ describe("useTournamentsData", () => {
       ),
     );
 
-    expect(result.current.activeCompetitions.map((c) => c.id)).toEqual([
-      "a",
-      "b",
-    ]);
+    expect(result.current.activeCompetitions.map((c) => c.id)).toEqual(["a", "b"]);
   });
 
   it("shows only the competitions listed as active", () => {
@@ -184,17 +179,14 @@ describe("useTournamentsData", () => {
   // A selection can outlive the competition it points at — a cup ends, a season
   // rolls over — and must not leave the screen pointing at nothing.
   it("moves the selection on when the chosen competition stops being active", () => {
-    const { result, rerender } = renderHook(
-      ({ state }) => useTournamentsData(state),
-      {
-        initialProps: {
-          state: gameState({
-            competitions: [competition("cup"), competition("plate")],
-            active_competition_ids: ["cup", "plate"],
-          }),
-        },
+    const { result, rerender } = renderHook(({ state }) => useTournamentsData(state), {
+      initialProps: {
+        state: gameState({
+          competitions: [competition("cup"), competition("plate")],
+          active_competition_ids: ["cup", "plate"],
+        }),
       },
-    );
+    });
     act(() => result.current.setSelectedCompetitionId("plate"));
     expect(result.current.league?.id).toBe("plate");
 
@@ -211,9 +203,7 @@ describe("useTournamentsData", () => {
   it("names the reigning champion of a World Cup's season", async () => {
     mockedFetch.mockResolvedValue(
       slice({
-        competitions: [
-          competition("wc", { kind: "InternationalNation" } as Partial<LeagueData>),
-        ],
+        competitions: [competition("wc", { kind: "InternationalNation" } as Partial<LeagueData>)],
         active_competition_ids: ["wc"],
         world_cup_champions: [
           { year: 2026, nation_name: "Brazil" },
@@ -224,9 +214,7 @@ describe("useTournamentsData", () => {
 
     const { result } = renderHook(() => useTournamentsData(gameState()));
 
-    await waitFor(() =>
-      expect(result.current.worldCupChampion?.nation_name).toBe("Brazil"),
-    );
+    await waitFor(() => expect(result.current.worldCupChampion?.nation_name).toBe("Brazil"));
   });
 
   it("names no champion for a competition that is not a World Cup", async () => {

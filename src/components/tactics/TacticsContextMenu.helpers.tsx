@@ -17,13 +17,11 @@ import type { ContextMenuItem } from "../ContextMenu";
 import { buildDividerMenuItem } from "../playerActions/playerContextMenuItems";
 import type { PlayerData, TeamMatchRolesData } from "../../store/gameStore";
 import type { SquadSection } from "../squad/SquadTab.helpers";
+import { isMatchDayEligible } from "../../lib/playerSquad";
 
 interface TacticsContextMenuCallbacks {
   onAssignBestFit?: (playerId: string) => void;
-  onAssignMatchRole?: (
-    role: keyof TeamMatchRolesData,
-    playerId: string,
-  ) => void;
+  onAssignMatchRole?: (role: keyof TeamMatchRolesData, playerId: string) => void;
   onClearSelection?: () => void;
   onDemoteStarter?: (playerId: string) => void;
   onOpenProfile: (playerId: string) => void;
@@ -31,8 +29,7 @@ interface TacticsContextMenuCallbacks {
   onTacticalSelect?: (playerId: string, section: SquadSection) => void;
 }
 
-interface BuildTacticsPlayerContextMenuItemsOptions
-  extends TacticsContextMenuCallbacks {
+interface BuildTacticsPlayerContextMenuItemsOptions extends TacticsContextMenuCallbacks {
   isSelected: boolean;
   matchRoles?: TeamMatchRolesData;
   player: PlayerData;
@@ -57,8 +54,8 @@ export function buildTacticsPlayerContextMenuItems({
   t,
 }: BuildTacticsPlayerContextMenuItemsOptions): ContextMenuItem[] {
   const items: ContextMenuItem[] = [];
-  const isUnavailableBenchPlayer = section === "bench" && Boolean(player.injury);
-  const canPromoteBenchPlayer = section === "bench" && !player.injury;
+  const isUnavailableBenchPlayer = section === "bench" && !isMatchDayEligible(player);
+  const canPromoteBenchPlayer = section === "bench" && isMatchDayEligible(player);
 
   if (isSelected && onClearSelection) {
     items.push({
@@ -68,9 +65,7 @@ export function buildTacticsPlayerContextMenuItems({
     });
   } else if (onTacticalSelect && !isUnavailableBenchPlayer) {
     items.push({
-      label: selectedPlayerId
-        ? t("tactics.compareWithSelected")
-        : t("tactics.selectForSwap"),
+      label: selectedPlayerId ? t("tactics.compareWithSelected") : t("tactics.selectForSwap"),
       icon: <Shuffle className="h-4 w-4" />,
       onClick: () => onTacticalSelect(player.id, section),
     });

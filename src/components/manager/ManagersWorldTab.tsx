@@ -1,10 +1,13 @@
 import { Briefcase, Building2, TrendingUp, UserRound, UsersRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 
 import type { GameStateData, ManagerData, TeamData } from "../../store/gameStore";
 import { countryName } from "../../lib/countries";
-import { Badge, Card, CardBody, CardHeader, CountryFlag } from "../ui";
+import { useListView } from "../../hooks/useListView";
+import { Badge, Card, CardBody, CardHeader, CountryFlag, ViewSwitch } from "../ui";
+import { managersDirectory } from "./managerRows";
+import ManagersTables from "./ManagersTables";
 
 interface ManagersWorldTabProps {
   gameState: GameStateData;
@@ -50,16 +53,13 @@ function vacancyEntries(gameState: GameStateData): VacancyEntry[] {
 }
 
 function latestRecordedMatches(team: TeamData): string {
-  const latestSeason = team.history.reduce<TeamData["history"][number] | null>(
-    (latest, record) => {
-      if (!latest || record.season > latest.season) {
-        return record;
-      }
+  const latestSeason = team.history.reduce<TeamData["history"][number] | null>((latest, record) => {
+    if (!latest || record.season > latest.season) {
+      return record;
+    }
 
-      return latest;
-    },
-    null,
-  );
+    return latest;
+  }, null);
 
   return latestSeason ? latestSeason.played.toString() : "-";
 }
@@ -77,21 +77,20 @@ function sortDirectory(entries: DirectoryEntry[]): DirectoryEntry[] {
     const leftManager = (left as ManagerEntry).manager;
     const rightManager = (right as ManagerEntry).manager;
 
-    return rightManager.reputation - leftManager.reputation
-      || leftManager.last_name.localeCompare(rightManager.last_name)
-      || leftManager.first_name.localeCompare(rightManager.first_name);
+    return (
+      rightManager.reputation - leftManager.reputation ||
+      leftManager.last_name.localeCompare(rightManager.last_name) ||
+      leftManager.first_name.localeCompare(rightManager.first_name)
+    );
   });
 }
 
-export default function ManagersWorldTab({
-  gameState,
-  onSelectTeam,
-}: ManagersWorldTabProps) {
+export default function ManagersWorldTab({ gameState, onSelectTeam }: ManagersWorldTabProps) {
   const { t, i18n } = useTranslation();
-  const entries = sortDirectory([
-    ...managerEntries(gameState),
-    ...vacancyEntries(gameState),
-  ]);
+  const [view, setView] = useListView();
+  // Built once per game state, so the table's sort isn't redone on every render.
+  const directory = useMemo(() => managersDirectory(gameState), [gameState]);
+  const entries = sortDirectory([...managerEntries(gameState), ...vacancyEntries(gameState)]);
 
   return (
     <div className="space-y-5">
@@ -106,14 +105,23 @@ export default function ManagersWorldTab({
             </h2>
           </div>
           <div className="flex flex-wrap gap-2 text-xs">
-            <Badge variant="primary" size="md">{t("managersWorld.employed")}</Badge>
-            <Badge variant="neutral" size="md">{t("managersWorld.unemployed")}</Badge>
-            <Badge variant="accent" size="md">{t("managersWorld.vacancy")}</Badge>
+            <Badge variant="primary" size="md">
+              {t("managersWorld.employed")}
+            </Badge>
+            <Badge variant="neutral" size="md">
+              {t("managersWorld.unemployed")}
+            </Badge>
+            <Badge variant="accent" size="md">
+              {t("managersWorld.vacancy")}
+            </Badge>
+            <ViewSwitch value={view} onChange={setView} />
           </div>
         </CardBody>
       </Card>
 
-      {entries.length === 0 ? (
+      {entries.length > 0 && view === "table" ? (
+        <ManagersTables directory={directory} onSelectTeam={onSelectTeam} />
+      ) : entries.length === 0 ? (
         <Card>
           <CardBody className="py-12 text-center text-sm text-gray-500 dark:text-gray-400">
             {t("managersWorld.noManagers")}
@@ -170,10 +178,7 @@ export default function ManagersWorldTab({
             const isEmployed = team != null;
 
             return (
-              <Card
-                key={manager.id}
-                accent={isEmployed ? "primary" : "none"}
-              >
+              <Card key={manager.id} accent={isEmployed ? "primary" : "none"}>
                 <CardHeader
                   action={
                     <Badge variant={isEmployed ? "primary" : "neutral"}>
@@ -181,7 +186,7 @@ export default function ManagersWorldTab({
                     </Badge>
                   }
                 >
-                  {`${manager.first_name} ${manager.last_name}`}
+                  {manager.display_name}
                 </CardHeader>
                 <CardBody className="space-y-4">
                   <div className="flex items-start justify-between gap-4">
@@ -255,9 +260,7 @@ function StatTile({ icon, label, value }: StatTileProps) {
           {label}
         </span>
       </div>
-      <p className="text-lg font-heading font-bold text-gray-800 dark:text-gray-100">
-        {value}
-      </p>
+      <p className="text-lg font-heading font-bold text-gray-800 dark:text-gray-100">{value}</p>
     </div>
   );
 }

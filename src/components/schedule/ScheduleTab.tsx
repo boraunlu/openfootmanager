@@ -1,11 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  Calendar as CalendarIcon,
-  Globe,
-  TableProperties,
-  Trophy,
-} from "lucide-react";
+import { Calendar as CalendarIcon, Globe, TableProperties, Trophy } from "lucide-react";
 
 import {
   getActiveCompetitions,
@@ -14,10 +9,10 @@ import {
   getPromotionRelegationZones,
   getTeamName,
   formatMatchDate,
+  getFixtureDisplayLabel,
   getUserCalledUpPlayers,
   nationalTeamDisplayName,
 } from "../../lib/helpers";
-import { resolveSeasonContext } from "../../lib/seasonContext";
 import { competitionDisplayName } from "../../lib/competitionName";
 import type { GameStateData, LeagueData } from "../../store/gameStore";
 import {
@@ -29,6 +24,7 @@ import { getErrorMessage, resolveTranslatedErrorMessage } from "../../utils/erro
 import ContextMenu, { type ContextMenuItem } from "../ContextMenu";
 import { Badge, Card, CardBody, Select } from "../ui";
 import ScheduleCalendarGrid from "./ScheduleCalendarGrid";
+import MovedFromNote from "./MovedFromNote";
 
 interface ScheduleTabProps {
   gameState: GameStateData;
@@ -66,7 +62,7 @@ export default function ScheduleTab({ gameState, onSelectTeam }: ScheduleTabProp
   const nationalFixtures = getNationalTeamFixtures(gameState);
   const hasInternational = nationalFixtures.length > 0;
   const calledUpPlayers = getUserCalledUpPlayers(gameState);
-  const seasonContext = resolveSeasonContext(gameState);
+  const seasonContext = gameState.season_context;
   const isPreseason = seasonContext.phase === "Preseason";
 
   // Resolve which competition to show.
@@ -77,6 +73,10 @@ export default function ScheduleTab({ gameState, onSelectTeam }: ScheduleTabProp
     userCompetitions[0] ??
     activeCompetitions[0] ??
     null;
+  const sliceCompetition = activeCompetitions.find((c) => c.id === slice?.competition_id);
+  const sliceCompetitionName = sliceCompetition
+    ? competitionDisplayName(sliceCompetition, t)
+    : (slice?.competition_name ?? "");
 
   // Initialise the competition selection.
   useEffect(() => {
@@ -143,9 +143,7 @@ export default function ScheduleTab({ gameState, onSelectTeam }: ScheduleTabProp
 
   if (activeCompetitions.length === 0) {
     return (
-      <p className="py-8 text-center text-gray-500 dark:text-gray-400">
-        {t("schedule.noLeague")}
-      </p>
+      <p className="py-8 text-center text-gray-500 dark:text-gray-400">{t("schedule.noLeague")}</p>
     );
   }
 
@@ -202,10 +200,7 @@ export default function ScheduleTab({ gameState, onSelectTeam }: ScheduleTabProp
           {t("schedule.standings")}
         </ViewButton>
         {hasInternational && (
-          <ViewButton
-            active={view === "international"}
-            onClick={() => setView("international")}
-          >
+          <ViewButton active={view === "international"} onClick={() => setView("international")}>
             <Globe className="mr-1.5 inline h-4 w-4 -mt-0.5" />
             {t("schedule.international")}
           </ViewButton>
@@ -222,6 +217,7 @@ export default function ScheduleTab({ gameState, onSelectTeam }: ScheduleTabProp
       {view === "calendar" && (
         <CalendarView
           slice={slice}
+          competitionName={sliceCompetitionName}
           userTeamId={userTeamId ?? null}
           groupRefs={groupRefs}
           visiblePastCount={visiblePastCount}
@@ -236,6 +232,7 @@ export default function ScheduleTab({ gameState, onSelectTeam }: ScheduleTabProp
       {view === "fixtures" && (
         <FixturesListView
           slice={slice}
+          competitionName={sliceCompetitionName}
           userTeamId={userTeamId ?? null}
           groupRefs={groupRefs}
           onSelectTeam={onSelectTeam}
@@ -282,6 +279,7 @@ function ViewButton({
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       className={`rounded-lg px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider transition-all ${
         active
@@ -296,6 +294,7 @@ function ViewButton({
 
 function CalendarView({
   slice,
+  competitionName,
   userTeamId,
   groupRefs,
   visiblePastCount,
@@ -306,6 +305,7 @@ function CalendarView({
   t,
 }: {
   slice: ScheduleSlice | null;
+  competitionName: string;
   userTeamId: string | null;
   groupRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
   visiblePastCount: number;
@@ -339,7 +339,7 @@ function CalendarView({
               group={group}
               userTeamId={userTeamId}
               groupRefs={groupRefs}
-              competitionName={slice.competition_name}
+              competitionName={competitionName}
               onSelectTeam={onSelectTeam}
               buildTeamMenuItem={buildTeamMenuItem}
               t={t}
@@ -369,7 +369,7 @@ function CalendarView({
                 group={group}
                 userTeamId={userTeamId}
                 groupRefs={groupRefs}
-                competitionName={slice.competition_name}
+                competitionName={competitionName}
                 dimmed
                 onSelectTeam={onSelectTeam}
                 buildTeamMenuItem={buildTeamMenuItem}
@@ -379,6 +379,7 @@ function CalendarView({
           </div>
           {slice.past_groups.length > visiblePastCount && (
             <button
+              type="button"
               onClick={onShowMorePast}
               className="mx-auto mt-1 rounded-lg border border-gray-200 bg-white px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider text-gray-500 transition-all hover:text-gray-700 dark:border-navy-600 dark:bg-navy-800 dark:text-gray-400 dark:hover:text-gray-200"
             >
@@ -393,6 +394,7 @@ function CalendarView({
 
 function FixturesListView({
   slice,
+  competitionName,
   userTeamId,
   groupRefs,
   onSelectTeam,
@@ -400,6 +402,7 @@ function FixturesListView({
   t,
 }: {
   slice: ScheduleSlice | null;
+  competitionName: string;
   userTeamId: string | null;
   groupRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
   onSelectTeam: (id: string) => void;
@@ -412,9 +415,7 @@ function FixturesListView({
 
   if (allGroups.length === 0) {
     return (
-      <p className="py-8 text-center text-gray-500 dark:text-gray-400">
-        {t("schedule.noLeague")}
-      </p>
+      <p className="py-8 text-center text-gray-500 dark:text-gray-400">{t("schedule.noLeague")}</p>
     );
   }
 
@@ -426,7 +427,7 @@ function FixturesListView({
           group={group}
           userTeamId={userTeamId}
           groupRefs={groupRefs}
-          competitionName={slice.competition_name}
+          competitionName={competitionName}
           onSelectTeam={onSelectTeam}
           buildTeamMenuItem={buildTeamMenuItem}
           t={t}
@@ -441,16 +442,16 @@ function groupLabel(
   competitionName: string,
   t: ReturnType<typeof useTranslation>["t"],
 ): string {
-  if (group.competition === "League" && group.matchday > 0) {
-    return `${competitionName} – ${t("schedule.matchday", { number: group.matchday })} – ${formatMatchDate(group.date)}`;
+  const date = formatMatchDate(group.date);
+  if (group.competition === "League" && group.matchday <= 0) {
+    return `${competitionName} – ${date}`;
   }
-  if (group.competition === "PreseasonTournament") {
-    return `${competitionName} – ${t("season.preseasonTournament", "Pre-season")} – ${formatMatchDate(group.date)}`;
+  const label = getFixtureDisplayLabel(t, group, competitionName);
+  // A friendly belongs to no competition, and a cup's label already is its name.
+  if (group.competition === "Friendly" || label === competitionName) {
+    return `${label} – ${date}`;
   }
-  if (group.competition === "Friendly") {
-    return `${t("season.friendly", "Friendly")} – ${formatMatchDate(group.date)}`;
-  }
-  return `${competitionName} – ${formatMatchDate(group.date)}`;
+  return `${competitionName} – ${label} – ${date}`;
 }
 
 function MatchdayGroupCard({
@@ -499,8 +500,7 @@ function MatchdayGroupCard({
           <div className="divide-y divide-gray-100 dark:divide-navy-600">
             {group.fixtures.map((fixture) => {
               const isUserMatch =
-                fixture.home_team_id === userTeamId ||
-                fixture.away_team_id === userTeamId;
+                fixture.home_team_id === userTeamId || fixture.away_team_id === userTeamId;
               const completed = fixture.status === "Completed";
               const contextItems = [
                 buildTeamMenuItem(
@@ -541,6 +541,12 @@ function MatchdayGroupCard({
                           vs
                         </Badge>
                       )}
+                      {fixture.rescheduled_from && (
+                        <MovedFromNote
+                          originalDate={fixture.rescheduled_from}
+                          testId={`moved-from-${fixture.id}`}
+                        />
+                      )}
                     </div>
                     <span
                       onClick={() => onSelectTeam(fixture.away_team_id)}
@@ -574,10 +580,7 @@ function InternationalView({
   nationalFixtures: ReturnType<typeof getNationalTeamFixtures>;
   t: ReturnType<typeof useTranslation>["t"];
 }) {
-  const internationalByDate = new Map<
-    string,
-    typeof nationalFixtures
-  >();
+  const internationalByDate = new Map<string, typeof nationalFixtures>();
   [...nationalFixtures]
     .sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id))
     .forEach((fixture) => {
@@ -598,20 +601,22 @@ function InternationalView({
           </div>
           <CardBody className="p-0">
             <div className="divide-y divide-gray-100 dark:divide-navy-600">
-              {calledUpPlayers.map(({ player, nationalTeamId, nationalTeamName, nationalTeamNameKey }) => (
-                <div
-                  key={`${player.id}-${nationalTeamId}`}
-                  className="flex items-center justify-between px-5 py-2.5"
-                  data-testid={`schedule-callup-${player.id}`}
-                >
-                  <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">
-                    {player.match_name}
-                  </span>
-                  <Badge variant="neutral" size="sm">
-                    {nationalTeamDisplayName(nationalTeamNameKey, nationalTeamName, t)}
-                  </Badge>
-                </div>
-              ))}
+              {calledUpPlayers.map(
+                ({ player, nationalTeamId, nationalTeamName, nationalTeamNameKey }) => (
+                  <div
+                    key={`${player.id}-${nationalTeamId}`}
+                    className="flex items-center justify-between px-5 py-2.5"
+                    data-testid={`schedule-callup-${player.id}`}
+                  >
+                    <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">
+                      {player.match_name}
+                    </span>
+                    <Badge variant="neutral" size="sm">
+                      {nationalTeamDisplayName(nationalTeamNameKey, nationalTeamName, t)}
+                    </Badge>
+                  </div>
+                ),
+              )}
             </div>
           </CardBody>
         </Card>
@@ -675,7 +680,7 @@ function StandingsView({
   competition: LeagueData | null;
   userTeamId: string | null;
   isPreseason: boolean;
-  seasonContext: ReturnType<typeof resolveSeasonContext>;
+  seasonContext: GameStateData["season_context"];
   onSelectTeam: (id: string) => void;
   buildTeamMenuItem: (label: string, teamId: string) => ContextMenuItem;
   gameState: GameStateData;
@@ -711,8 +716,7 @@ function StandingsView({
       <div className="rounded-t-xl border-b border-gray-100 bg-gradient-to-r from-navy-700 to-navy-800 p-5 dark:border-navy-600">
         <h3 className="flex items-center gap-2 font-heading text-lg font-bold uppercase tracking-wide text-white">
           <Trophy className="h-5 w-5 text-accent-400" />
-          {(competition && competitionDisplayName(competition, t)) ||
-            t("schedule.fixtures")} –{" "}
+          {(competition && competitionDisplayName(competition, t)) || t("schedule.fixtures")} –{" "}
           {t("schedule.season", { number: competition?.season ?? 0 })}
         </h3>
       </div>
@@ -727,16 +731,25 @@ function StandingsView({
           <table className="w-full border-collapse text-left">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-xs dark:border-navy-600 dark:bg-navy-800">
-                {["#", t("common.team"), t("common.played"), t("common.won"), t("common.drawn"), t("common.lost"), t("common.gf"), t("common.ga"), t("common.gd"), t("common.pts")].map(
-                  (header, idx) => (
-                    <th
-                      key={idx}
-                      className={`px-4 py-3 font-heading font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400 ${idx === 0 ? "w-8" : ""} ${idx >= 2 ? "text-center" : ""}`}
-                    >
-                      {header}
-                    </th>
-                  ),
-                )}
+                {[
+                  "#",
+                  t("common.team"),
+                  t("common.played"),
+                  t("common.won"),
+                  t("common.drawn"),
+                  t("common.lost"),
+                  t("common.gf"),
+                  t("common.ga"),
+                  t("common.gd"),
+                  t("common.pts"),
+                ].map((header, idx) => (
+                  <th
+                    key={idx}
+                    className={`px-4 py-3 font-heading font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400 ${idx === 0 ? "w-8" : ""} ${idx >= 2 ? "text-center" : ""}`}
+                  >
+                    {header}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-navy-600">
@@ -745,8 +758,7 @@ function StandingsView({
                 const gd = entry.goals_for - entry.goals_against;
                 const inPromotionZone = index < zones.promotionSlots;
                 const inRelegationZone =
-                  zones.relegationSlots > 0 &&
-                  index >= standings.length - zones.relegationSlots;
+                  zones.relegationSlots > 0 && index >= standings.length - zones.relegationSlots;
                 const contextItems = [buildTeamMenuItem(t("common.viewTeam"), entry.team_id)];
 
                 return (
@@ -787,16 +799,28 @@ function StandingsView({
                       >
                         {getTeamName(gameState.teams, entry.team_id)}
                       </td>
-                      {[entry.played, entry.won, entry.drawn, entry.lost, entry.goals_for, entry.goals_against].map(
-                        (val, i) => (
-                          <td key={i} className="px-4 py-3 text-center text-sm tabular-nums text-gray-600 dark:text-gray-400">
-                            {val}
-                          </td>
-                        ),
-                      )}
+                      {[
+                        entry.played,
+                        entry.won,
+                        entry.drawn,
+                        entry.lost,
+                        entry.goals_for,
+                        entry.goals_against,
+                      ].map((val, i) => (
+                        <td
+                          key={i}
+                          className="px-4 py-3 text-center text-sm tabular-nums text-gray-600 dark:text-gray-400"
+                        >
+                          {val}
+                        </td>
+                      ))}
                       <td
                         className={`px-4 py-3 text-center text-sm font-semibold tabular-nums ${
-                          gd > 0 ? "text-primary-500" : gd < 0 ? "text-red-500" : "text-gray-500 dark:text-gray-400"
+                          gd > 0
+                            ? "text-primary-500"
+                            : gd < 0
+                              ? "text-red-500"
+                              : "text-gray-500 dark:text-gray-400"
                         }`}
                       >
                         {gd > 0 ? `+${gd}` : gd}
@@ -836,10 +860,7 @@ function LoadingPlaceholder() {
   return (
     <div className="flex flex-col gap-4">
       {[1, 2, 3].map((n) => (
-        <div
-          key={n}
-          className="h-32 rounded-xl bg-gray-100 dark:bg-navy-800 animate-pulse"
-        />
+        <div key={n} className="h-32 rounded-xl bg-gray-100 dark:bg-navy-800 animate-pulse" />
       ))}
     </div>
   );

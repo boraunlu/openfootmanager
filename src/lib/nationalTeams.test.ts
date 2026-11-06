@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type {
-  FixtureData,
-  GameStateData,
-  NationalTeamData,
-  PlayerData,
-} from "../store/gameStore";
+import type { FixtureData, GameStateData, NationalTeamData, PlayerData } from "../store/gameStore";
 import {
   getNationalTeamFixtures,
   getNationalTeamName,
@@ -14,6 +9,8 @@ import {
 
 function ntFixture(overrides: Partial<FixtureData> = {}): FixtureData {
   return {
+    competitive: true,
+    advancing_team_id: null,
     id: "ntf-1",
     competition_id: "international-friendlies",
     matchday: 1,

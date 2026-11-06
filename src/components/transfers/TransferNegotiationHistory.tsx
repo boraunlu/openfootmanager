@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import type { TransferOfferData } from "../../store/gameStore";
-import { formatVal } from "../../lib/helpers";
+import { formatExactMoney } from "../../lib/helpers";
 
 interface TransferNegotiationHistoryProps {
   offer: TransferOfferData | null;
@@ -14,18 +14,14 @@ export default function TransferNegotiationHistory({
 }: TransferNegotiationHistoryProps) {
   const { t } = useTranslation();
 
-  if (!offer || offer.negotiation_round < 2) {
+  if (!offer) {
     return null;
   }
 
   const managerLabel =
-    mode === "outgoing"
-      ? t("transfers.lastBidLabel")
-      : t("transfers.lastCounterLabel");
+    mode === "outgoing" ? t("transfers.lastBidLabel") : t("transfers.lastCounterLabel");
   const clubLabel =
-    mode === "outgoing"
-      ? t("transfers.lastClubSignalLabel")
-      : t("transfers.currentOfferLabel");
+    mode === "outgoing" ? t("transfers.lastClubSignalLabel") : t("transfers.currentOfferLabel");
   const managerFee = offer.last_manager_fee;
   const clubFee = offer.suggested_counter_fee ?? offer.fee;
 
@@ -38,14 +34,14 @@ export default function TransferNegotiationHistory({
         <div className="flex items-center justify-between gap-3 text-xs text-gray-600 dark:text-gray-300">
           <span>{managerLabel}</span>
           <span className="font-semibold tabular-nums text-gray-900 dark:text-gray-100">
-            {formatVal(managerFee)}
+            {formatExactMoney(managerFee)}
           </span>
         </div>
       ) : null}
       <div className="flex items-center justify-between gap-3 text-xs text-gray-600 dark:text-gray-300">
         <span>{clubLabel}</span>
         <span className="font-semibold tabular-nums text-gray-900 dark:text-gray-100">
-          {formatVal(clubFee)}
+          {formatExactMoney(clubFee)}
         </span>
       </div>
     </div>

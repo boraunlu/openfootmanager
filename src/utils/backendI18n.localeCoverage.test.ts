@@ -1,34 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  collectMissingKeys,
-  type LocaleTree,
-} from "../i18n/i18nTestHelpers";
-import cs from "../i18n/locales/cs.json";
-import de from "../i18n/locales/de.json";
-import en from "../i18n/locales/en.json";
-import es from "../i18n/locales/es.json";
-import fr from "../i18n/locales/fr.json";
-import itLocale from "../i18n/locales/it.json";
-import ptBR from "../i18n/locales/pt-BR.json";
-import pt from "../i18n/locales/pt.json";
-import ru from "../i18n/locales/ru.json";
-import tr from "../i18n/locales/tr.json";
-import zhCN from "../i18n/locales/zh-CN.json";
+import { collectMissingKeys, LOCALE_FILES, localeValue } from "../i18n/i18nTestHelpers";
 
-const LOCALES: Record<string, LocaleTree> = {
-  cs,
-  de,
-  en,
-  es,
-  fr,
-  it: itLocale,
-  pt,
-  "pt-BR": ptBR,
-  ru,
-  tr,
-  "zh-CN": zhCN,
-};
+// Derived, not listed. This file used to import eleven locales by hand and was
+// missing Indonesian, so it silently checked one locale fewer than it claimed.
+const LOCALES = LOCALE_FILES;
+const en = LOCALE_FILES.en;
 
 const REQUIRED_KEYS = [
   "be.sender.assistantManager",
@@ -108,6 +85,7 @@ const REQUIRED_KEYS = [
   "be.error.staffMemberNotFound",
   "be.error.staffMemberAlreadyEmployed",
   "be.error.noActiveLiveMatch",
+  "be.error.liveMatch.inProgress",
   "be.error.seasonNotComplete",
   "be.error.managedTeamNotFound",
   "be.error.unknownFacilityType",
@@ -122,6 +100,8 @@ const REQUIRED_KEYS = [
   "be.error.finance.facilityUpgradeInsufficientFunds",
   "be.error.finance.facilityUpgradeOverBudget",
   "be.error.finance.facilityUpgradeCritical",
+  "be.error.finance.amountOverflow",
+  "be.error.finance.openingBalanceReserved",
   "be.error.createManager.nameRequired",
   "be.error.createManager.nameMaxLength",
   "be.error.createManager.nationalityRequired",
@@ -138,42 +118,31 @@ const REQUIRED_KEYS = [
   "boardObjectives.objective.FinancialStability",
 ] as const;
 
-function getNestedValue(tree: LocaleTree, keyPath: string): unknown {
-  return keyPath
-    .split(".")
-    .reduce<unknown>((value, segment) => {
-      if (value === null || typeof value !== "object") {
-        return undefined;
-      }
-
-      return (value as Record<string, unknown>)[segment];
-    }, tree);
-}
-
 describe("backend i18n locale coverage", () => {
   it("keeps required backend-facing translation keys in every supported locale", () => {
-    const missingKeysByLocale = Object.entries(LOCALES).reduce<
-      Record<string, string[]>
-    >((accumulator, [localeCode, translations]) => {
-      const missingKeys = REQUIRED_KEYS.filter((keyPath) => {
-        return getNestedValue(translations, keyPath) === undefined;
-      });
+    const missingKeysByLocale = Object.entries(LOCALES).reduce<Record<string, string[]>>(
+      (accumulator, [localeCode, translations]) => {
+        const missingKeys = REQUIRED_KEYS.filter((keyPath) => {
+          return localeValue(translations, keyPath) === undefined;
+        });
 
-      if (missingKeys.length > 0) {
-        accumulator[localeCode] = missingKeys;
-      }
+        if (missingKeys.length > 0) {
+          accumulator[localeCode] = missingKeys;
+        }
 
-      return accumulator;
-    }, {});
+        return accumulator;
+      },
+      {},
+    );
 
     expect(missingKeysByLocale).toEqual({});
   });
 
   it("keeps zh-CN aligned with the English translation key set", () => {
-    expect(collectMissingKeys(en, zhCN)).toEqual([]);
+    expect(collectMissingKeys(en, LOCALE_FILES["zh-CN"])).toEqual([]);
   });
 
   it("keeps ru aligned with the English translation key set", () => {
-    expect(collectMissingKeys(en, ru)).toEqual([]);
+    expect(collectMissingKeys(en, LOCALE_FILES.ru)).toEqual([]);
   });
 });

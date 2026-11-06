@@ -1,72 +1,91 @@
 export type LocaleTree = Record<string, unknown>;
 
+/**
+ * Every locale file on disk, keyed by its code.
+ *
+ * Read from the directory rather than listed by hand. Three test files used to
+ * keep their own list of imports, and a locale missing from one of them was
+ * simply not checked by it — silently, because a shorter list still passes.
+ * Deriving the set here means a new locale is covered by every suite the day
+ * its file lands, and `localeCoverage` asserts this set and
+ * `SUPPORTED_LANGUAGES` name exactly the same locales.
+ */
+const localeModules = import.meta.glob<{ default: LocaleTree }>("./locales/*.json", {
+  eager: true,
+});
+
+export const LOCALE_FILES: Record<string, LocaleTree> = Object.fromEntries(
+  Object.entries(localeModules).map(([path, module]) => [
+    path.replace("./locales/", "").replace(/\.json$/, ""),
+    module.default,
+  ]),
+);
+
+/** The locales checked against English, which is the reference and so excluded. */
+export const NON_ENGLISH_LOCALES: Record<string, LocaleTree> = Object.fromEntries(
+  Object.entries(LOCALE_FILES).filter(([code]) => code !== "en"),
+);
+
 type LeafResult = string[];
 
 function traverseLocaleTree(
-    reference: LocaleTree,
-    candidate: LocaleTree,
-    path: string[],
-    onLeaf: (
-        key: string,
-        refValue: unknown,
-        candidateValue: unknown,
-        path: string[],
-    ) => LeafResult,
+  reference: LocaleTree,
+  candidate: LocaleTree,
+  path: string[],
+  onLeaf: (key: string, refValue: unknown, candidateValue: unknown, path: string[]) => LeafResult,
 ): LeafResult {
-    return Object.entries(reference).flatMap(([key, value]) => {
-        const nextPath = [...path, key];
-        const candidateValue = candidate[key];
+  return Object.entries(reference).flatMap(([key, value]) => {
+    const nextPath = [...path, key];
+    const candidateValue = candidate[key];
 
-        if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-            if (
-                candidateValue !== null &&
-                typeof candidateValue === "object" &&
-                !Array.isArray(candidateValue)
-            ) {
-                return traverseLocaleTree(
-                    value as LocaleTree,
-                    candidateValue as LocaleTree,
-                    nextPath,
-                    onLeaf,
-                );
-            }
-            return onLeaf(key, value, candidateValue, nextPath);
-        }
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      if (
+        candidateValue !== null &&
+        typeof candidateValue === "object" &&
+        !Array.isArray(candidateValue)
+      ) {
+        return traverseLocaleTree(
+          value as LocaleTree,
+          candidateValue as LocaleTree,
+          nextPath,
+          onLeaf,
+        );
+      }
+      return onLeaf(key, value, candidateValue, nextPath);
+    }
 
-        return onLeaf(key, value, candidateValue, nextPath);
-    });
+    return onLeaf(key, value, candidateValue, nextPath);
+  });
 }
 
 export function collectMissingKeys(
-    reference: LocaleTree,
-    candidate: LocaleTree,
-    path: string[] = [],
+  reference: LocaleTree,
+  candidate: LocaleTree,
+  path: string[] = [],
 ): string[] {
-    return traverseLocaleTree(reference, candidate, path, (_key, value, candidateValue, nextPath) => {
-        if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-            return [nextPath.join(".")];
-        }
-        return candidateValue == null || typeof candidateValue !== "string"
-            ? [nextPath.join(".")]
-            : [];
-    });
+  return traverseLocaleTree(reference, candidate, path, (_key, value, candidateValue, nextPath) => {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      return [nextPath.join(".")];
+    }
+    return candidateValue == null || typeof candidateValue !== "string" ? [nextPath.join(".")] : [];
+  });
 }
 
 export function collectUntranslatedKeys(
-    reference: LocaleTree,
-    candidate: LocaleTree,
-    path: string[] = [],
+  reference: LocaleTree,
+  candidate: LocaleTree,
+  path: string[] = [],
 ): string[] {
-    return traverseLocaleTree(reference, candidate, path, (_key, value, candidateValue, nextPath) => {
-        if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-            return [];
-        }
-        return typeof value === "string" &&
-            typeof candidateValue === "string" &&
-            candidateValue === value
-            ? [nextPath.join(".")]
-            : [];
-    });
+  return traverseLocaleTree(reference, candidate, path, (_key, value, candidateValue, nextPath) => {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      return [];
+    }
+    return typeof value === "string" &&
+      typeof candidateValue === "string" &&
+      candidateValue === value
+      ? [nextPath.join(".")]
+      : [];
+  });
 }
 
 /**
@@ -77,58 +96,73 @@ export function collectUntranslatedKeys(
  * being reachable.
  */
 export function collectOrphanKeys(
-    reference: LocaleTree,
-    candidate: LocaleTree,
-    path: string[] = [],
+  reference: LocaleTree,
+  candidate: LocaleTree,
+  path: string[] = [],
 ): string[] {
-    return Object.entries(candidate).flatMap(([key, value]) => {
-        const nextPath = [...path, key];
-        // `reference[key]` would also find `Object.prototype` members, so a locale
-        // key literally named `constructor` or `toString` would look present in
-        // English and escape the check.
-        const referenceHasKey = Object.prototype.hasOwnProperty.call(reference, key);
-        const referenceValue = reference[key];
+  return Object.entries(candidate).flatMap(([key, value]) => {
+    const nextPath = [...path, key];
+    // `reference[key]` would also find `Object.prototype` members, so a locale
+    // key literally named `constructor` or `toString` would look present in
+    // English and escape the check.
+    // Biome offers `Object.hasOwn` here and it does not compile: `tsconfig.json` sets
+    // `lib: ["ES2020", ...]` and `Object.hasOwn` is ES2022. Raising the lib is a
+    // compiler-wide decision and does not belong in a lint sweep, so the call stays as it is.
+    // biome-ignore lint/suspicious/noPrototypeBuiltins: ES2022 API unavailable at this lib level.
+    const referenceHasKey = Object.prototype.hasOwnProperty.call(reference, key);
+    const referenceValue = reference[key];
 
-        if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-            if (
-                referenceHasKey &&
-                referenceValue !== null &&
-                typeof referenceValue === "object" &&
-                !Array.isArray(referenceValue)
-            ) {
-                return collectOrphanKeys(
-                    referenceValue as LocaleTree,
-                    value as LocaleTree,
-                    nextPath,
-                );
-            }
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      if (
+        referenceHasKey &&
+        referenceValue !== null &&
+        typeof referenceValue === "object" &&
+        !Array.isArray(referenceValue)
+      ) {
+        return collectOrphanKeys(referenceValue as LocaleTree, value as LocaleTree, nextPath);
+      }
 
-            // English has no table here, so every leaf beneath it is orphaned. An
-            // empty table has no leaves to name, so the table itself is the orphan.
-            const orphanedLeaves = collectOrphanKeys({}, value as LocaleTree, nextPath);
-            return orphanedLeaves.length > 0 ? orphanedLeaves : [nextPath.join(".")];
-        }
+      // English has no table here, so every leaf beneath it is orphaned. An
+      // empty table has no leaves to name, so the table itself is the orphan.
+      const orphanedLeaves = collectOrphanKeys({}, value as LocaleTree, nextPath);
+      return orphanedLeaves.length > 0 ? orphanedLeaves : [nextPath.join(".")];
+    }
 
-        return referenceHasKey ? [] : [nextPath.join(".")];
-    });
+    return referenceHasKey ? [] : [nextPath.join(".")];
+  });
+}
+
+/**
+ * The value a dotted key path resolves to in a locale tree, or `undefined`.
+ *
+ * One walker, because there were three: this one, a looser copy in the
+ * backend-key suite, and a third in the Package Editor's tests. Two of them
+ * would happily return a table or a number where a leaf was expected, which is
+ * the kind of difference nobody notices until the assertions disagree.
+ *
+ * Callers decide what counts: `hasLocaleKey` wants a string, while a test
+ * asserting a label is present wants any truthy value so an empty string still
+ * fails.
+ */
+export function localeValue(locale: LocaleTree, keyPath: string): unknown {
+  let current: unknown = locale;
+
+  for (const segment of keyPath.split(".")) {
+    if (
+      current === null ||
+      typeof current !== "object" ||
+      Array.isArray(current) ||
+      !(segment in current)
+    ) {
+      return undefined;
+    }
+
+    current = (current as LocaleTree)[segment];
+  }
+
+  return current;
 }
 
 export function hasLocaleKey(locale: LocaleTree, keyPath: string): boolean {
-    const segments = keyPath.split(".");
-    let current: unknown = locale;
-
-    for (const segment of segments) {
-        if (
-            current === null ||
-            typeof current !== "object" ||
-            Array.isArray(current) ||
-            !(segment in current)
-        ) {
-            return false;
-        }
-
-        current = (current as LocaleTree)[segment];
-    }
-
-    return typeof current === "string";
+  return typeof localeValue(locale, keyPath) === "string";
 }

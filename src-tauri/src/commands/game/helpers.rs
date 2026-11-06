@@ -1,7 +1,12 @@
 //! Small shared helpers for the game commands: error shaping, and the
 //! defaults a new career is created with.
 
+// Runtime commands persist stats via persist_active_game; this helper is
+// only used by command tests. Drop the cfg(test) gates if a production
+// command needs it again.
+#[cfg(test)]
 use domain::stats::StatsState;
+#[cfg(test)]
 use ofm_core::state::StateManager;
 
 /// Surface the first concrete validation error (e.g. *which* country is unknown)
@@ -39,28 +44,15 @@ fn encode_error_param(value: &str) -> String {
 pub(super) fn map_save_manager_lock_error<T>(
     result: std::sync::LockResult<T>,
 ) -> Result<T, String> {
-    result.map_err(|_| "be.error.saveManagerUnavailable".to_string())
+    result.map_err(|_| crate::SAVE_MANAGER_UNAVAILABLE_ERROR.to_string())
 }
 
+#[cfg(test)]
 pub(super) fn require_active_stats_state(state: &StateManager) -> Result<StatsState, String> {
     state
         .get_stats_state(|stats| stats.clone())
         .ok_or("be.error.noActiveStatsSession".to_string())
 }
-
-/// Stored on the generated league as its locale-neutral `name`, and shown only
-/// when a client cannot resolve [`DEFAULT_LEAGUE_NAME_KEY`].
-pub(super) const DEFAULT_LEAGUE_NAME: &str = "Premier Division";
-
-/// What the UI actually displays, via `League::name_key` and the `league`
-/// message param. Mirrors `division_tier_name` / `division_tier_name_key`.
-pub(super) const DEFAULT_LEAGUE_NAME_KEY: &str = "tournaments.competitions.premierDivision";
-
-/// The date format for backend-generated dates handed to the frontend: an
-/// unambiguous, locale-neutral ISO day. `src/lib/dateFormatting.ts` renders it
-/// in the player's own locale — a `%B` month name here would be English
-/// whatever language they picked.
-pub(super) const ISO_DATE_FORMAT: &str = "%Y-%m-%d";
 
 /// The name a new career's save file gets, as a translation key plus the
 /// manager's name — the same `key?param=value` convention
@@ -130,6 +122,6 @@ mod tests {
 
         let result = map_save_manager_lock_error(mutex.lock());
 
-        assert_eq!(result.unwrap_err(), "be.error.saveManagerUnavailable");
+        assert_eq!(result.unwrap_err(), crate::SAVE_MANAGER_UNAVAILABLE_ERROR);
     }
 }

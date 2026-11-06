@@ -56,7 +56,7 @@ pub struct PlayerMatchStats {
     pub fouls_committed: u8,
     pub yellow_cards: u8,
     pub red_cards: u8,
-    /// Match rating 1.0–10.0, computed after the match; 0.0 means unrated.
+    /// Match rating 0.0–10.0, computed after the match.
     pub rating: f32,
 }
 
@@ -305,11 +305,22 @@ impl MatchReport {
                         ps.fouls_committed += 1;
                     }
                 }
-                EventType::YellowCard | EventType::SecondYellow => {
+                EventType::YellowCard => {
                     stats.yellow_cards += 1;
                     if !pid.is_empty() {
                         let ps = player_stats.entry(pid.to_string()).or_default();
                         ps.yellow_cards += 1;
+                    }
+                }
+                // A second yellow is a booking and a sending-off: the red-card tally is how the
+                // season stats and the post-match morale see a dismissal.
+                EventType::SecondYellow => {
+                    stats.yellow_cards += 1;
+                    stats.red_cards += 1;
+                    if !pid.is_empty() {
+                        let ps = player_stats.entry(pid.to_string()).or_default();
+                        ps.yellow_cards += 1;
+                        ps.red_cards += 1;
                     }
                 }
                 EventType::RedCard => {
@@ -342,7 +353,6 @@ impl MatchReport {
             &tracked_player_ids,
             &mut player_stats,
         );
-        calculate_match_ratings(&events, &mut player_stats);
 
         let total_poss = home_possession_ticks + away_possession_ticks;
         let home_possession = if total_poss > 0 {
@@ -367,202 +377,87 @@ impl MatchReport {
     }
 }
 
-/// Deterministic v1 assessment of recorded contributions. Zero is an unrated
-/// sentinel, never a bad performance. No ability, reputation or random inputs.
-fn calculate_match_ratings(events: &[MatchEvent], players: &mut HashMap<String, PlayerMatchStats>) {
-    use crate::event::{DangerBand, EventDetail, SaveQuality};
-    #[derive(Default)]
-    struct Extra {
-        carrying: f32,
-        clearances: f32,
-        saves: f32,
-        misses: f32,
-        penalties: f32,
-        dismissal: f32,
-    }
-    let mut extras: HashMap<&str, Extra> = HashMap::new();
-    for event in events {
-        if let Some(id) = event.player_id.as_deref() {
-            let extra = extras.entry(id).or_default();
-            match event.event_type {
-                EventType::Dribble => extra.carrying += 0.04,
-                EventType::DribbleTackled => extra.carrying -= 0.05,
-                EventType::Clearance => extra.clearances += 0.06,
-                EventType::PenaltyGoal => extra.penalties += 0.35,
-                EventType::PenaltyMiss => extra.misses += 0.65,
-                EventType::SecondYellow => extra.dismissal += 1.2,
-                EventType::ShotOffTarget | EventType::ShotBlocked => {
-                    extra.misses += if matches!(
-                        event.detail,
-                        Some(EventDetail::Shot {
-                            danger: DangerBand::BigChance
-                        })
-                    ) {
-                        0.20
-                    } else {
-                        0.03
-                    }
-                }
-                _ => {}
-            }
-        }
-        // ShotSaved's primary player is the shooter. New events explicitly
-        // identify the saving goalkeeper as secondary; never guess for old logs.
-        if event.event_type == EventType::ShotSaved
-            && let Some(keeper) = event.secondary_player_id.as_deref()
-        {
-            extras.entry(keeper).or_default().saves += match event.detail {
-                Some(EventDetail::Save {
-                    quality: SaveQuality::WorldClass,
-                }) => 0.35,
-                Some(EventDetail::Save {
-                    quality: SaveQuality::Strong,
-                }) => 0.25,
-                _ => 0.18,
-            };
-        }
-    }
-    for (id, stats) in players {
-        // A same-minute cameo has too little recorded playing time to rate.
-        if stats.minutes_played == 0 {
-            stats.rating = 0.0;
-            continue;
-        }
-        let extra = extras.get(id.as_str());
-        let failed_passes = stats
-            .passes_attempted
-            .saturating_sub(stats.passes_completed);
-        let passing = (f32::from(stats.passes_completed) * 0.025 - f32::from(failed_passes) * 0.04)
-            .clamp(-0.7, 0.6);
-        let defending = (f32::from(stats.tackles_won) * 0.1
-            + f32::from(stats.interceptions) * 0.12
-            + extra.map_or(0.0, |e| e.clearances))
-        .min(1.2);
-        let discipline = (f32::from(stats.fouls_committed) * 0.05).min(0.4)
-            + f32::from(stats.yellow_cards) * 0.2
-            + f32::from(stats.red_cards) * 1.4
-            + extra.map_or(0.0, |e| e.dismissal);
-        let value = 6.3
-            + f32::from(stats.goals)
-            + f32::from(stats.assists) * 0.6
-            + passing
-            + defending
-            + extra.map_or(0.0, |e| {
-                e.carrying.clamp(-0.6, 0.4) + e.saves.min(2.2) - e.misses.min(1.5) - e.penalties
-            })
-            - discipline;
-        stats.rating = (value.clamp(1.0, 10.0) * 10.0).round() / 10.0;
-    }
-}
-
 fn populate_minutes_played(
     events: &[MatchEvent],
     total_minutes: u8,
     tracked_player_ids: &[String],
     player_stats: &mut HashMap<String, PlayerMatchStats>,
 ) {
-    let mut minutes_by_player: HashMap<String, u8> = tracked_player_ids
+    // The tracked list is the finishing XI. Substitution events also identify
+    // departed starters and a substitute's actual entry time. Keep both ends of
+    // each stint: using the exit minute alone overcharges a substitute who is
+    // later taken off or sent off.
+    let mut stints: HashMap<String, (u8, u8)> = tracked_player_ids
         .iter()
         .cloned()
-        .map(|player_id| (player_id, total_minutes))
+        .map(|id| (id, (0, total_minutes)))
         .collect();
 
     for event in events {
+        let minute = event.minute.min(total_minutes);
         match event.event_type {
             EventType::Substitution => {
-                if let Some(ref player_off_id) = event.secondary_player_id {
-                    minutes_by_player
-                        .insert(player_off_id.clone(), event.minute.min(total_minutes));
+                if let Some(id) = &event.secondary_player_id {
+                    let stint = stints.entry(id.clone()).or_insert((0, total_minutes));
+                    stint.1 = stint.1.min(minute);
                 }
-                if let Some(ref player_on_id) = event.player_id {
-                    minutes_by_player.insert(
-                        player_on_id.clone(),
-                        total_minutes.saturating_sub(event.minute),
-                    );
+                if let Some(id) = &event.player_id {
+                    stints
+                        .entry(id.clone())
+                        .or_insert((minute, total_minutes))
+                        .0 = minute;
                 }
             }
             EventType::RedCard | EventType::SecondYellow => {
-                if let Some(ref player_id) = event.player_id {
-                    let dismissed_at = event.minute.min(total_minutes);
-                    minutes_by_player
-                        .entry(player_id.clone())
-                        .and_modify(|minutes| *minutes = (*minutes).min(dismissed_at))
-                        .or_insert(dismissed_at);
+                if let Some(id) = &event.player_id {
+                    let stint = stints.entry(id.clone()).or_insert((0, total_minutes));
+                    stint.1 = stint.1.min(minute);
                 }
             }
             _ => {}
         }
     }
 
-    for (player_id, minutes_played) in minutes_by_player {
-        player_stats.entry(player_id).or_default().minutes_played = minutes_played;
+    for (id, (started, ended)) in stints {
+        player_stats.entry(id).or_default().minutes_played = ended.saturating_sub(started);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn ratings_reward_contributions_and_penalize_discipline_without_ability_input() {
+    fn a_substitute_taken_off_is_charged_only_for_his_time_on_the_pitch() {
         let events = vec![
-            event(10, EventType::Goal, Side::Home, "scorer").with_secondary("creator"),
-            event(20, EventType::Tackle, Side::Home, "defender"),
-            event(30, EventType::Interception, Side::Home, "defender"),
-            event(40, EventType::Clearance, Side::Home, "defender"),
-            event(50, EventType::RedCard, Side::Home, "dismissed"),
+            event(20, EventType::Substitution, Side::Home, "substitute").with_secondary("starter"),
+            event(50, EventType::Substitution, Side::Home, "replacement")
+                .with_secondary("substitute"),
         ];
-        let ids = ["quiet", "scorer", "creator", "defender", "dismissed"]
-            .map(String::from)
-            .to_vec();
-        let report = MatchReport::from_events_with_players(events, 50, 50, 90, ids);
-        let rating = |id: &str| report.player_stats[id].rating;
-        assert!((6.0..=7.0).contains(&rating("quiet")));
-        for id in ["scorer", "creator", "defender"] {
-            assert!(rating(id) > rating("quiet"));
+        let report =
+            MatchReport::from_events_with_players(events, 50, 50, 90, vec!["replacement".into()]);
+        assert_eq!(report.player_stats["starter"].minutes_played, 20);
+        assert_eq!(report.player_stats["substitute"].minutes_played, 30);
+        assert_eq!(report.player_stats["replacement"].minutes_played, 40);
+    }
+
+    #[test]
+    fn a_substitute_sent_off_is_charged_only_until_his_dismissal() {
+        for dismissal in [EventType::RedCard, EventType::SecondYellow] {
+            let events = vec![
+                event(20, EventType::Substitution, Side::Home, "substitute")
+                    .with_secondary("starter"),
+                event(50, dismissal, Side::Home, "substitute"),
+            ];
+            let report = MatchReport::from_events_with_players(
+                events,
+                50,
+                50,
+                90,
+                vec!["substitute".into()],
+            );
+            assert_eq!(report.player_stats["starter"].minutes_played, 20);
+            assert_eq!(report.player_stats["substitute"].minutes_played, 30);
         }
-        assert!(rating("dismissed") < rating("quiet"));
-    }
-
-    #[test]
-    fn ratings_credit_recorded_keeper_and_ignore_shootouts() {
-        let ids = ["shooter", "keeper", "quiet"].map(String::from).to_vec();
-        let save = event(10, EventType::ShotSaved, Side::Home, "shooter").with_secondary("keeper");
-        let before =
-            MatchReport::from_events_with_players(vec![save.clone()], 50, 50, 90, ids.clone());
-        let after = MatchReport::from_events_with_players(
-            vec![
-                save,
-                event(120, EventType::ShootoutGoal, Side::Home, "shooter"),
-            ],
-            50,
-            50,
-            90,
-            ids,
-        );
-        assert!(before.player_stats["keeper"].rating > before.player_stats["quiet"].rating);
-        assert!(before.player_stats["shooter"].rating <= before.player_stats["quiet"].rating);
-        assert_eq!(
-            before.player_stats["shooter"].rating,
-            after.player_stats["shooter"].rating
-        );
-    }
-
-    #[test]
-    fn ratings_are_bounded_deterministic_and_zero_minutes_remain_unrated() {
-        let events = (1..40)
-            .map(|minute| event(minute, EventType::Goal, Side::Home, "scorer"))
-            .collect::<Vec<_>>();
-        let ids = vec!["scorer".into()];
-        let a = MatchReport::from_events_with_players(events.clone(), 50, 50, 90, ids.clone());
-        let b = MatchReport::from_events_with_players(events, 50, 50, 90, ids);
-        assert!((1.0..=10.0).contains(&a.player_stats["scorer"].rating));
-        assert_eq!(
-            a.player_stats["scorer"].rating,
-            b.player_stats["scorer"].rating
-        );
-        let empty = MatchReport::from_events_with_players(vec![], 0, 0, 0, vec!["unused".into()]);
-        assert_eq!(empty.player_stats["unused"].rating, 0.0);
     }
 
     fn event(minute: u8, event_type: EventType, side: Side, player: &str) -> MatchEvent {
@@ -600,5 +495,25 @@ mod tests {
         );
         // In-match penalties still count.
         assert_eq!(report.goals[1].goal_source, GoalSource::Penalty);
+    }
+
+    /// Given a player booked at 20' and shown a second yellow at 60',
+    /// When the match report is built,
+    /// Then he has two yellow cards and one red, and so has his side: a second yellow is a
+    /// sending-off, and the red-card tally is how the season stats and morale see one.
+    #[test]
+    fn a_second_yellow_is_a_red_card_in_the_report() {
+        let events = vec![
+            event(20, EventType::YellowCard, Side::Home, "h1"),
+            event(60, EventType::SecondYellow, Side::Home, "h1"),
+        ];
+        let report = MatchReport::from_events(events, 50, 50, 90);
+
+        let sent_off = &report.player_stats["h1"];
+        assert_eq!((sent_off.yellow_cards, sent_off.red_cards), (2, 1));
+        assert_eq!(
+            (report.home_stats.yellow_cards, report.home_stats.red_cards),
+            (2, 1)
+        );
     }
 }

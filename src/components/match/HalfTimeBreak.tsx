@@ -1,29 +1,26 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
-import { GameStateData } from "../../store/gameStore";
+import type { GameStateData } from "../../store/gameStore";
 import {
-  MatchSnapshot,
-  MatchEvent,
+  type MatchSnapshot,
+  type SubstitutionOutcome,
+  type SubstitutionSwap,
+  type MatchEvent,
   FORMATIONS,
   PLAY_STYLES,
   getTeamTalkOptions,
-  TeamTalkTone,
+  type TeamTalkTone,
 } from "./types";
+import MatchEventSideBadge from "./MatchEventSideBadge";
 import { getEventDisplay, getPlayerName, makeTeamFallback } from "./helpers";
 import { getTalkIcon } from "./TeamTalkIcons";
 import { SubPanel } from "./SubPanel";
+import { applyRoleChange } from "./applyRoleChange";
+import { sendMatchCommand } from "./matchCommands";
+import { applySubstitutions } from "./applySubstitutions";
 import { Badge, TeamLogo, ThemeToggle } from "../ui";
-import {
-  Play,
-  RefreshCw,
-  Shield,
-  Zap,
-  Target,
-  Crosshair,
-  Flag,
-  MessageCircle,
-} from "lucide-react";
+import { Play, RefreshCw, Shield, Zap, Target, Crosshair, Flag, MessageCircle } from "lucide-react";
+import { invokeForCareer } from "../../services/careerInvoke";
 
 interface HalfTimeBreakProps {
   snapshot: MatchSnapshot;
@@ -58,6 +55,8 @@ export default function HalfTimeBreak({
   const [selectedTalk, setSelectedTalk] = useState<TeamTalkTone | null>(null);
   const [showSubPanel, setShowSubPanel] = useState(false);
   const [talkDelivered, setTalkDelivered] = useState(false);
+  const [talkPending, setTalkPending] = useState(false);
+  const [talkError, setTalkError] = useState<string | null>(null);
   const [talkResults, setTalkResults] = useState<
     {
       player_id: string;
@@ -70,11 +69,12 @@ export default function HalfTimeBreak({
 
   const homeFullTeam = gameState.teams.find((t) => t.id === snapshot.home_team.id);
   const awayFullTeam = gameState.teams.find((t) => t.id === snapshot.away_team.id);
+  const homeTeam = homeFullTeam ?? makeTeamFallback(snapshot.home_team.name);
+  const awayTeam = awayFullTeam ?? makeTeamFallback(snapshot.away_team.name);
   const homeTeamColor = homeFullTeam?.colors?.primary || "#10b981";
   const awayTeamColor = awayFullTeam?.colors?.primary || "#6366f1";
 
-  const userTeam =
-    userSide === "Home" ? snapshot.home_team : snapshot.away_team;
+  const userTeam = userSide === "Home" ? snapshot.home_team : snapshot.away_team;
 
   // First half key events
   const firstHalfEvents = importantEvents.filter((e) =>
@@ -91,19 +91,20 @@ export default function HalfTimeBreak({
 
   const handleFormationChange = async (formation: string) => {
     try {
-      const snap = await invoke<MatchSnapshot>("apply_match_command", {
-        command: { ChangeFormation: { side: userSide, formation } },
-      });
+      const snap = await sendMatchCommand({ ChangeFormation: { side: userSide, formation } });
       onUpdateSnapshot(snap);
     } catch (err) {
       console.error("Formation change failed:", err);
     }
   };
 
+  const handleRoleChange = (playerId: string, role: string) =>
+    applyRoleChange(userSide, playerId, role, onUpdateSnapshot);
+
   const handlePlayStyleChange = async (playStyle: string) => {
     try {
-      const snap = await invoke<MatchSnapshot>("apply_match_command", {
-        command: { ChangePlayStyle: { side: userSide, play_style: playStyle } },
+      const snap = await sendMatchCommand({
+        ChangePlayStyle: { side: userSide, play_style: playStyle },
       });
       onUpdateSnapshot(snap);
     } catch (err) {
@@ -111,41 +112,23 @@ export default function HalfTimeBreak({
     }
   };
 
-  const handleSubstitution = async (
-    playerOffId: string,
-    playerOnId: string,
-  ) => {
-    try {
-      const snap = await invoke<MatchSnapshot>("apply_match_command", {
-        command: {
-          Substitute: {
-            side: userSide,
-            player_off_id: playerOffId,
-            player_on_id: playerOnId,
-          },
-        },
-      });
-      onUpdateSnapshot(snap);
+  const handleSubstitutions = async (swaps: SubstitutionSwap[]): Promise<SubstitutionOutcome> => {
+    const outcome = await applySubstitutions(userSide, swaps, onUpdateSnapshot);
+    if (outcome.applied) {
       setShowSubPanel(false);
-    } catch (err) {
-      console.error("Substitution failed:", err);
     }
+    return outcome;
   };
 
   const handleDeliverTalk = async () => {
-    if (!selectedTalk) return;
-    const userScore =
-      userSide === "Home" ? snapshot.home_score : snapshot.away_score;
-    const oppScore =
-      userSide === "Home" ? snapshot.away_score : snapshot.home_score;
-    const context =
-      userScore > oppScore
-        ? "winning"
-        : userScore < oppScore
-          ? "losing"
-          : "drawing";
+    if (!selectedTalk || talkPending) return;
+    const userScore = userSide === "Home" ? snapshot.home_score : snapshot.away_score;
+    const oppScore = userSide === "Home" ? snapshot.away_score : snapshot.home_score;
+    const context = userScore > oppScore ? "winning" : userScore < oppScore ? "losing" : "drawing";
+    setTalkPending(true);
+    setTalkError(null);
     try {
-      const results = await invoke<
+      const results = await invokeForCareer<
         {
           player_id: string;
           player_name: string;
@@ -155,10 +138,15 @@ export default function HalfTimeBreak({
         }[]
       >("apply_team_talk", { tone: selectedTalk, context });
       setTalkResults(results);
+      // Delivered only once the backend applied it: a refused talk (the career changed, say)
+      // moved no morale, so the choices must stay for another try.
+      setTalkDelivered(true);
     } catch (err) {
       console.error("Team talk failed:", err);
+      setTalkError(t("match.teamTalkFailed"));
+    } finally {
+      setTalkPending(false);
     }
-    setTalkDelivered(true);
   };
 
   return (
@@ -168,6 +156,7 @@ export default function HalfTimeBreak({
         <div className="relative">
           <div className="absolute right-0 top-0 flex items-center gap-3">
             <button
+              type="button"
               onClick={onResume}
               className="flex items-center gap-2 px-6 py-2.5 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 rounded-xl font-heading font-bold uppercase tracking-wider text-sm text-white shadow-lg shadow-primary-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
             >
@@ -179,11 +168,11 @@ export default function HalfTimeBreak({
           <div className="flex items-center justify-center gap-8">
             <div className="flex items-center gap-3">
               <TeamLogo
-                team={homeFullTeam ?? makeTeamFallback(snapshot.home_team.name)}
+                team={homeTeam}
                 className="w-12 h-12 rounded-xl flex items-center justify-center font-heading font-bold overflow-hidden"
                 imageClassName="h-9 w-9 object-contain drop-shadow"
                 style={{
-                  backgroundColor: homeTeamColor + "30",
+                  backgroundColor: `${homeTeamColor}30`,
                   borderColor: homeTeamColor,
                   borderWidth: 2,
                 }}
@@ -217,11 +206,11 @@ export default function HalfTimeBreak({
                 {snapshot.away_team.name}
               </p>
               <TeamLogo
-                team={awayFullTeam ?? makeTeamFallback(snapshot.away_team.name)}
+                team={awayTeam}
                 className="w-12 h-12 rounded-xl flex items-center justify-center font-heading font-bold overflow-hidden"
                 imageClassName="h-9 w-9 object-contain drop-shadow"
                 style={{
-                  backgroundColor: awayTeamColor + "30",
+                  backgroundColor: `${awayTeamColor}30`,
                   borderColor: awayTeamColor,
                   borderWidth: 2,
                 }}
@@ -276,19 +265,14 @@ export default function HalfTimeBreak({
                           {evt.minute}'
                         </span>
                         <span>{display.icon}</span>
-                        <span
-                          className={`${display.color} font-medium truncate`}
-                        >
+                        <span className={`${display.color} font-medium truncate`}>
                           {getPlayerName(snapshot, evt.player_id)}
                         </span>
-                        <Badge
-                          variant={evt.side === "Home" ? "primary" : "accent"}
-                          size="sm"
-                        >
-                          {evt.side === "Home"
-                            ? snapshot.home_team.name.substring(0, 3)
-                            : snapshot.away_team.name.substring(0, 3)}
-                        </Badge>
+                        <MatchEventSideBadge
+                          side={evt.side}
+                          homeTeam={homeTeam}
+                          awayTeam={awayTeam}
+                        />
                       </div>
                     );
                   })}
@@ -316,6 +300,7 @@ export default function HalfTimeBreak({
                     <div className="flex flex-col gap-2">
                       {teamTalkOptions.map((opt) => (
                         <button
+                          type="button"
                           key={opt.id}
                           onClick={() => setSelectedTalk(opt.id)}
                           className={`flex items-center gap-3 p-3 rounded-lg text-left transition-all ${
@@ -324,33 +309,38 @@ export default function HalfTimeBreak({
                               : "bg-gray-100 hover:bg-gray-200 dark:bg-navy-700/50 dark:hover:bg-navy-700"
                           }`}
                         >
-                          <span className="text-xl">
-                            {getTalkIcon(opt.icon)}
-                          </span>
+                          <span className="text-xl">{getTalkIcon(opt.icon)}</span>
                           <div>
                             <p
-                                className={`text-sm font-heading font-bold ${
-                                  selectedTalk === opt.id
-                                    ? "text-primary-400"
-                                    : "text-gray-800 dark:text-gray-200"
-                                }`}
-                              >
-                                {opt.label}
-                              </p>
-                              <p className="text-[11px] text-gray-500 dark:text-gray-400">
-                                {opt.description}
-                              </p>
+                              className={`text-sm font-heading font-bold ${
+                                selectedTalk === opt.id
+                                  ? "text-primary-400"
+                                  : "text-gray-800 dark:text-gray-200"
+                              }`}
+                            >
+                              {opt.label}
+                            </p>
+                            <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                              {opt.description}
+                            </p>
                           </div>
                         </button>
                       ))}
                     </div>
                     {selectedTalk && (
                       <button
+                        type="button"
                         onClick={handleDeliverTalk}
-                        className="w-full mt-3 py-2.5 bg-primary-500/20 hover:bg-primary-500/30 text-primary-400 rounded-lg font-heading font-bold text-sm uppercase tracking-wider transition-colors"
+                        disabled={talkPending}
+                        className="w-full mt-3 py-2.5 bg-primary-500/20 hover:bg-primary-500/30 text-primary-400 rounded-lg font-heading font-bold text-sm uppercase tracking-wider transition-colors disabled:opacity-50"
                       >
                         {t("match.deliverTeamTalk")}
                       </button>
+                    )}
+                    {talkError && (
+                      <p role="alert" className="text-sm text-danger mt-2">
+                        {talkError}
+                      </p>
                     )}
                   </>
                 ) : (
@@ -358,10 +348,7 @@ export default function HalfTimeBreak({
                     <div className="flex items-center gap-2 mb-1">
                       {getTalkIcon(selectedTalk || "")}
                       <p className="text-sm font-heading font-bold text-primary-400">
-                        {
-                          teamTalkOptions.find((o) => o.id === selectedTalk)
-                            ?.label
-                        }
+                        {teamTalkOptions.find((o) => o.id === selectedTalk)?.label}
                       </p>
                       <Badge variant="success" size="sm">
                         {t("match.delivered")}
@@ -423,6 +410,7 @@ export default function HalfTimeBreak({
                   <div className="grid grid-cols-3 gap-1.5">
                     {FORMATIONS.map((f) => (
                       <button
+                        type="button"
                         key={f}
                         onClick={() => handleFormationChange(f)}
                         className={`py-2 rounded-lg text-xs font-heading font-bold transition-all ${
@@ -445,6 +433,7 @@ export default function HalfTimeBreak({
                   <div className="grid grid-cols-2 gap-1.5">
                     {PLAY_STYLES.map((style) => (
                       <button
+                        type="button"
                         key={style}
                         onClick={() => handlePlayStyleChange(style)}
                         className={`flex items-center gap-1.5 py-2 px-3 rounded-lg text-xs font-heading font-bold transition-all ${
@@ -467,14 +456,13 @@ export default function HalfTimeBreak({
                       {t("match.substitutions")}
                     </h3>
                     <Badge variant="neutral" size="sm">
-                      {userSide === "Home"
-                        ? snapshot.home_subs_made
-                        : snapshot.away_subs_made}
-                      /{snapshot.max_subs}
+                      {userSide === "Home" ? snapshot.home_subs_made : snapshot.away_subs_made}/
+                      {snapshot.max_subs}
                     </Badge>
                   </div>
 
                   <button
+                    type="button"
                     onClick={() => setShowSubPanel(true)}
                     className="w-full flex items-center justify-center gap-2 py-2.5 bg-gray-200 hover:bg-gray-300 dark:bg-navy-700 dark:hover:bg-navy-600 rounded-lg text-sm font-heading uppercase tracking-wider text-gray-700 dark:text-gray-300 transition-colors"
                   >
@@ -493,9 +481,10 @@ export default function HalfTimeBreak({
         <SubPanel
           snapshot={snapshot}
           side={userSide}
-          onSubstitute={handleSubstitution}
+          onSubstitute={handleSubstitutions}
           onFormationChange={handleFormationChange}
           onPlayStyleChange={handlePlayStyleChange}
+          onChangeRole={handleRoleChange}
           onClose={() => setShowSubPanel(false)}
         />
       )}

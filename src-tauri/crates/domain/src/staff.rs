@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Staff {
     pub id: String,
     pub first_name: String,
@@ -26,9 +27,18 @@ pub struct Staff {
     pub wage: u32,
     #[serde(default)]
     pub contract_end: Option<String>,
+
+    /// What they are called when it differs from their name ("Pep" for Josep Guardiola i Sala).
+    #[serde(default)]
+    pub known_as: Option<String>,
+    /// The one name to show for them: `known_as` if set, else first and last name. Kept up to
+    /// date by [`Staff::new`], [`Staff::set_known_as`] and the loader, so a reader renders it
+    /// as it is and never decides between the names itself.
+    #[serde(default)]
+    pub display_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub enum StaffRole {
     AssistantManager,
     Coach,
@@ -36,7 +46,19 @@ pub enum StaffRole {
     Physio,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl StaffRole {
+    /// Every role, in the order the enum declares them, so a table over roles cannot miss one. A new
+    /// variant breaks the exhaustive match in `staff_role_all_lists_every_variant_once`; add it to
+    /// that match and to this list.
+    pub const ALL: [StaffRole; 4] = [
+        StaffRole::AssistantManager,
+        StaffRole::Coach,
+        StaffRole::Scout,
+        StaffRole::Physio,
+    ];
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub enum CoachingSpecialization {
     Fitness,     // Boosts Physical training
     Technique,   // Boosts Technical training
@@ -47,7 +69,7 @@ pub enum CoachingSpecialization {
     Youth,       // Boosts young player development
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 // camelCase matches the package convention (see SCHEMA_REFERENCE) and the World
 // Editor frontend, so authored staff attributes round-trip both ways. The
 // snake_case aliases keep existing saves (serialized before this change) and
@@ -85,13 +107,97 @@ impl Staff {
             specialization: None,
             wage: 0,
             contract_end: None,
+            known_as: None,
+            display_name: String::new(),
         }
+        .with_display_name_refreshed()
+    }
+
+    fn with_display_name_refreshed(mut self) -> Self {
+        self.refresh_display_name();
+        self
+    }
+
+    /// First and last name together.
+    pub fn full_name(&self) -> String {
+        crate::identity::display_name(None, &self.first_name, &self.last_name)
+    }
+
+    /// Sets what they are called; blank means nothing in particular.
+    pub fn set_known_as(&mut self, known_as: Option<String>) {
+        self.known_as = known_as;
+        self.refresh_display_name();
+    }
+
+    /// Tidies `known_as` and recomputes `display_name` from the names it depends on. Every way a
+    /// record enters the game (a setter, a world file, a save) ends here, so a blank known-as
+    /// can never survive as a blank display name.
+    pub fn refresh_display_name(&mut self) {
+        self.known_as = crate::identity::tidy_known_as(self.known_as.take());
+        self.display_name = crate::identity::display_name(
+            self.known_as.as_deref(),
+            &self.first_name,
+            &self.last_name,
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::StaffAttributes;
+    use super::{Staff, StaffAttributes, StaffRole};
+
+    /// Given the list of every staff role and an exhaustive numbering of the enum's variants
+    /// When the list is checked against it
+    /// Then it has one entry per number, in order: a role added to the enum breaks the numbering
+    ///      until it gets one, and the list is short until it is added to it too.
+    #[test]
+    fn staff_role_all_lists_every_variant_once() {
+        fn number(role: &StaffRole) -> usize {
+            match role {
+                StaffRole::AssistantManager => 0,
+                StaffRole::Coach => 1,
+                StaffRole::Scout => 2,
+                StaffRole::Physio => 3,
+            }
+        }
+
+        let numbers: Vec<usize> = StaffRole::ALL.iter().map(number).collect();
+
+        assert_eq!(numbers, vec![0, 1, 2, 3]);
+    }
+
+    fn staff() -> Staff {
+        Staff::new(
+            "s1".into(),
+            "Josep".into(),
+            "Guardiola i Sala".into(),
+            "1971-01-18".into(),
+            StaffRole::Coach,
+            StaffAttributes {
+                coaching: 80,
+                judging_ability: 50,
+                judging_potential: 50,
+                physiotherapy: 10,
+            },
+        )
+    }
+
+    /// Given a staff member with and without a known-as name (#557)
+    /// When their display name is read
+    /// Then it is the known-as name when set, else the full name, and a blank known-as is none.
+    #[test]
+    fn the_display_name_is_the_known_as_name_or_the_full_name() {
+        let mut member = staff();
+        assert_eq!(member.display_name, "Josep Guardiola i Sala");
+
+        member.set_known_as(Some("Pep Guardiola".into()));
+        assert_eq!(member.display_name, "Pep Guardiola");
+        assert_eq!(member.full_name(), "Josep Guardiola i Sala");
+
+        member.set_known_as(Some("   ".into()));
+        assert_eq!(member.known_as, None);
+        assert_eq!(member.display_name, "Josep Guardiola i Sala");
+    }
 
     #[test]
     fn deserializes_camelcase_attributes() {

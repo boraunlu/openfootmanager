@@ -1,4 +1,5 @@
 mod helpers;
+mod observation;
 mod penalty;
 mod simulation;
 mod snapshot;
@@ -9,9 +10,13 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+pub(crate) use observation::AiObservation;
+
 use crate::event::MatchEvent;
 use crate::report::MatchReport;
-use crate::types::{MatchConfig, PlayStyle, PlayerData, PlayerRole, Side, TeamData, Zone};
+use crate::types::{
+    MatchConfig, PlayStyle, PlayerData, PlayerRole, Side, TacticalDial, TeamData, Zone,
+};
 
 // ---------------------------------------------------------------------------
 // MatchPhase — tracks where we are in the match lifecycle
@@ -77,6 +82,36 @@ pub enum MatchCommand {
         player_id: String,
         role: PlayerRole,
     },
+    /// Turn one of the nine tactical dials, leaving the other eight alone.
+    ChangeTacticalDial {
+        side: Side,
+        dial: TacticalDial,
+    },
+    /// Set the order a side takes its shootout kicks in: every eligible player, reordered.
+    /// Accepted only once the shootout has started and before its first kick.
+    SetShootoutOrder {
+        side: Side,
+        player_ids: Vec<String>,
+    },
+}
+
+impl MatchCommand {
+    /// The side the command is for. Every command names one: a manager's orders go to a team.
+    pub fn side(&self) -> Side {
+        match self {
+            Self::Substitute { side, .. }
+            | Self::ChangeFormation { side, .. }
+            | Self::ChangePlayStyle { side, .. }
+            | Self::SetFreeKickTaker { side, .. }
+            | Self::SetCornerTaker { side, .. }
+            | Self::SetPenaltyTaker { side, .. }
+            | Self::SetCaptain { side, .. }
+            | Self::PreMatchSwap { side, .. }
+            | Self::ChangePlayerRole { side, .. }
+            | Self::ChangeTacticalDial { side, .. }
+            | Self::SetShootoutOrder { side, .. } => *side,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +184,10 @@ pub struct MatchSnapshot {
     pub away_yellows: HashMap<String, u8>,
     pub sent_off: HashSet<String>,
     pub penalty_shootout: Option<PenaltyShootoutSnapshot>,
+    /// Marks out of ten for everyone who played, filled once the match is over;
+    /// empty while it is live so a snapshot stays cheap to build every minute.
+    #[serde(default)]
+    pub player_ratings: HashMap<String, f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +201,21 @@ pub struct PenaltyShootoutSnapshot {
     pub home_scored: u8,
     pub away_scored: u8,
     pub sudden_death: bool,
+    /// A side's planned order, for the manager of that side only. The engine's own snapshot
+    /// never fills these: the live session fills in its user's side, so the opponent's order
+    /// stays hidden until each kick is taken.
+    #[serde(default)]
+    pub home_order: Option<ShootoutOrderSnapshot>,
+    #[serde(default)]
+    pub away_order: Option<ShootoutOrderSnapshot>,
+}
+
+/// One side's shootout order: everyone eligible to kick, in the order they will kick, and how
+/// many of them kick. The players after the first `kickers` sit out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShootoutOrderSnapshot {
+    pub player_ids: Vec<String>,
+    pub kickers: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +231,14 @@ struct PenaltyShootoutState {
     home_scored: u8,
     away_scored: u8,
     sudden_death: bool,
+    /// Each side's order: the ids of everyone on the pitch at the final whistle, in the order
+    /// they kick. A manager may reorder it before the first kick.
+    home_order: Vec<String>,
+    away_order: Vec<String>,
+    /// How many of each order kick: the length of the shorter one. Kick `n` of a side is taken
+    /// by entry `n % kickers`, so everyone kicks once before anyone kicks twice, and the
+    /// entries after `kickers` sit out.
+    kickers: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +265,9 @@ pub struct LiveMatchState {
 
     // Events log
     events: Vec<MatchEvent>,
+    /// Events a command created between minutes. The live feed is built from each minute's
+    /// results, so they are handed to the next minute's results, once, as well as logged.
+    unreported_events: Vec<MatchEvent>,
 
     // Possession tracking
     home_possession_ticks: u32,
@@ -234,6 +299,10 @@ pub struct LiveMatchState {
     second_half_stoppage: u8,
     et_first_half_stoppage: u8,
     et_second_half_stoppage: u8,
+    /// The minute the period being played kicked off. The clock runs on through
+    /// stoppage, so a period's end is measured from here rather than from a
+    /// fixed minute: see `check_phase_end`.
+    period_started_at: u8,
 
     // Per-minute stamina depletion tracking (player_id → current effective condition)
     player_conditions: HashMap<String, f64>,
@@ -273,6 +342,7 @@ impl LiveMatchState {
             ball_zone: Zone::Midfield,
             possession: Side::Home,
             events: Vec::with_capacity(300),
+            unreported_events: Vec::new(),
             home_possession_ticks: 0,
             away_possession_ticks: 0,
             yellows: HashMap::new(),
@@ -290,6 +360,7 @@ impl LiveMatchState {
             second_half_stoppage: 0,
             et_first_half_stoppage: 0,
             et_second_half_stoppage: 0,
+            period_started_at: 0,
             player_conditions,
             penalty_state: PenaltyShootoutState::default(),
             recent_zones: VecDeque::with_capacity(10),
@@ -298,6 +369,16 @@ impl LiveMatchState {
 
     /// Step one minute forward. Returns the events that occurred.
     pub fn step_minute<R: Rng>(&mut self, rng: &mut R) -> MinuteResult {
+        let mut result = self.play_phase(rng);
+        if !self.unreported_events.is_empty() {
+            let mut events = std::mem::take(&mut self.unreported_events);
+            events.append(&mut result.events);
+            result.events = events;
+        }
+        result
+    }
+
+    fn play_phase<R: Rng>(&mut self, rng: &mut R) -> MinuteResult {
         match self.phase {
             MatchPhase::PreKickOff => self.start_match(rng),
             MatchPhase::FirstHalf => self.play_minute(rng),
@@ -355,24 +436,42 @@ impl LiveMatchState {
                 }
                 self.do_pre_match_swap(side, &player_off_id, &player_on_id)
             }
+            MatchCommand::ChangeTacticalDial { side, dial } => {
+                dial.set_on(&mut self.team_mut(side).tactics);
+                Ok(())
+            }
+            MatchCommand::SetShootoutOrder { side, player_ids } => {
+                self.set_shootout_order(side, player_ids)
+            }
             MatchCommand::ChangePlayerRole {
                 side,
                 player_id,
                 role,
             } => {
-                let team = self.team_mut(side);
-                if let Some(p) = team.players.iter_mut().find(|p| p.id == player_id)
-                    && is_role_valid_for_position(role, p.position)
-                {
-                    p.role = role;
+                let player = self
+                    .team_mut(side)
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == player_id)
+                    .ok_or("be.error.liveMatch.playerNotOnPitch")?;
+                if !is_role_valid_for_position(role, player.position) {
+                    return Err("be.error.roleNotValidForPosition".into());
                 }
+                player.role = role;
                 Ok(())
             }
         }
     }
 
     /// Convert the finished match into a MatchReport.
-    pub fn into_report(self) -> MatchReport {
+    pub fn into_report(mut self) -> MatchReport {
+        let events = std::mem::take(&mut self.events);
+        self.report_from(events)
+    }
+
+    /// The report for the match as it stands, rated; `events` is passed in so
+    /// `into_report` can move them instead of cloning.
+    pub(crate) fn report_from(&self, events: Vec<MatchEvent>) -> MatchReport {
         let tracked_player_ids = self
             .home
             .players
@@ -382,7 +481,7 @@ impl LiveMatchState {
             .collect();
 
         let mut report = MatchReport::from_events_with_players(
-            self.events,
+            events,
             self.home_possession_ticks,
             self.away_possession_ticks,
             self.current_minute,
@@ -392,6 +491,13 @@ impl LiveMatchState {
             report.home_penalties = Some(self.penalty_state.home_scored);
             report.away_penalties = Some(self.penalty_state.away_scored);
         }
+        // Substituted-off players sit on the bench, so both lists together are
+        // everyone who could have played.
+        let home_squad: Vec<&PlayerData> =
+            self.home.players.iter().chain(&self.home_bench).collect();
+        let away_squad: Vec<&PlayerData> =
+            self.away.players.iter().chain(&self.away_bench).collect();
+        report.assign_ratings(&home_squad, &away_squad);
         report
     }
 
@@ -410,13 +516,9 @@ impl LiveMatchState {
         self.current_minute
     }
 
-    /// Rolling window of the last ≤10 ball_zone values (oldest first).
-    ///
-    /// Crate-private and iterator-shaped: only the AI reads this, and only to
-    /// count zones. Handing out the `VecDeque` published a container choice
-    /// that nothing outside the engine has any business depending on.
-    pub(crate) fn recent_zones(&self) -> impl Iterator<Item = Zone> + '_ {
-        self.recent_zones.iter().copied()
+    /// The side on the pitch, in slot order: entry i of its players plays its formation's slot i.
+    pub fn team(&self, side: Side) -> &TeamData {
+        self.team_ref(side)
     }
 
     /// Get the bench for a side
@@ -429,8 +531,20 @@ impl LiveMatchState {
 
     /// Simulate a red card for a player (adds to sent_off set).
     /// Primarily used for testing substitution guards.
+    #[doc(hidden)]
     pub fn test_send_off(&mut self, player_id: &str) {
         self.sent_off.insert(player_id.to_string());
+    }
+
+    /// Put a scoreline on the board without playing the match that produced it.
+    ///
+    /// For tests about what a manager does when he is two down with twenty
+    /// minutes left. Reaching that position by simulation would make the test
+    /// about the seed rather than about the decision.
+    #[doc(hidden)]
+    pub fn test_set_score(&mut self, home: u8, away: u8) {
+        self.home_score = home;
+        self.away_score = away;
     }
 }
 

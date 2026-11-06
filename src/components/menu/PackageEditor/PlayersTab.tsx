@@ -10,6 +10,7 @@ import { useKeepRevealed } from "./entityList.reveal";
 import { filterPlayerRows, positionFilterGroups, type PositionFilter } from "./PlayersTab.helpers";
 import { Select } from "../../ui/Select";
 import type { PlayerDef, Position, TeamDef } from "./types";
+import { usePositionTable } from "../../../hooks/usePositionGroups";
 
 interface PlayerAvatarCellProps {
   player: PlayerDef;
@@ -38,7 +39,9 @@ function PlayerAvatarCell({ player, posAbbr, projectDir }: PlayerAvatarCellProps
           className="w-9 h-9"
         />
       )}
-      <span className={`absolute -bottom-0.5 -right-0.5 text-[7px] font-bold text-white px-0.5 rounded leading-tight ${posColor}`}>
+      <span
+        className={`absolute -bottom-0.5 -right-0.5 text-[7px] font-bold text-white px-0.5 rounded leading-tight ${posColor}`}
+      >
         {posAbbr}
       </span>
     </div>
@@ -59,8 +62,21 @@ interface PlayersTabProps {
   youthOnly?: boolean;
 }
 
-export function PlayersTab({ players, teams, onAdd, onEdit, onDelete, onDuplicate, onExportCsv, selectedIndex, onSelect, projectDir, youthOnly }: PlayersTabProps) {
+export function PlayersTab({
+  players,
+  teams,
+  onAdd,
+  onEdit,
+  onDelete,
+  onDuplicate,
+  onExportCsv,
+  selectedIndex,
+  onSelect,
+  projectDir,
+  youthOnly,
+}: PlayersTabProps) {
   const { t } = useTranslation();
+  const positions = usePositionTable();
   const positionFilterId = useId();
   const positionFilterCaptionId = useId();
   const [query, setQuery] = useState("");
@@ -70,8 +86,8 @@ export function PlayersTab({ players, teams, onAdd, onEdit, onDelete, onDuplicat
 
   const teamNames = useMemo(() => buildTeamNameMap(teams), [teams]);
   const { scoped, filtered } = useMemo(
-    () => filterPlayerRows({ players, youthOnly, positionFilter, query, teamNames }),
-    [players, youthOnly, positionFilter, query, teamNames],
+    () => filterPlayerRows({ players, youthOnly, positionFilter, query, teamNames, positions }),
+    [players, youthOnly, positionFilter, query, teamNames, positions],
   );
   const { visible } = capRows(
     filtered,
@@ -127,33 +143,33 @@ export function PlayersTab({ players, teams, onAdd, onEdit, onDelete, onDuplicat
                 <span id={positionFilterCaptionId} className="sr-only">
                   {t("worldEditor.filterByPosition")}
                 </span>
-              <Select
-                selectSize="sm"
-                fullWidth
-                id={positionFilterId}
-                value={positionFilter}
-                onChange={(e) => handlePositionFilterChange(e.target.value)}
-                // Named after the caption *and* itself, the way CountryCombobox
-                // does it, so it reads "<field>, <current value>": a bare
-                // aria-label would replace the button's contents, which is
-                // where the chosen position is.
-                aria-labelledby={`${positionFilterCaptionId} ${positionFilterId}`}
-              >
-                {/*
+                <Select
+                  selectSize="sm"
+                  fullWidth
+                  id={positionFilterId}
+                  value={positionFilter}
+                  onChange={(e) => handlePositionFilterChange(e.target.value)}
+                  // Named after the caption *and* itself, the way CountryCombobox
+                  // does it, so it reads "<field>, <current value>": a bare
+                  // aria-label would replace the button's contents, which is
+                  // where the chosen position is.
+                  aria-labelledby={`${positionFilterCaptionId} ${positionFilterId}`}
+                >
+                  {/*
                   Flat children, never a fragment: Select reads its options out
                   of `children` and does not descend into one.
                 */}
-                <option value="All">{t("worldEditor.allPositions")}</option>
-                {positionFilterGroups().map((group) => (
-                  <optgroup key={group.labelKey} label={t(group.labelKey)}>
-                    {group.options.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {t(option.labelKey)}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </Select>
+                  <option value="All">{t("worldEditor.allPositions")}</option>
+                  {positionFilterGroups(positions.lines()).map((group) => (
+                    <optgroup key={group.labelKey} label={t(group.labelKey)}>
+                      {group.options.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {t(option.labelKey)}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </Select>
               </>
             )}
           </div>
@@ -175,11 +191,15 @@ export function PlayersTab({ players, teams, onAdd, onEdit, onDelete, onDuplicat
           subtitle={[
             t(`common.positions.${player.position}`),
             player.club ? (teamNames.get(player.club) ?? player.club) : null,
-          ].filter(Boolean).join(" · ")}
+          ]
+            .filter(Boolean)
+            .join(" · ")}
           badge={
             <PlayerAvatarCell
               player={player}
-              posAbbr={t(`common.posAbbr.${player.position as Position}`, { defaultValue: player.position.slice(0, 2).toUpperCase() })}
+              posAbbr={t(`common.posAbbr.${player.position as Position}`, {
+                defaultValue: player.position.slice(0, 2).toUpperCase(),
+              })}
               projectDir={projectDir}
             />
           }

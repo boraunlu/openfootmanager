@@ -8,12 +8,12 @@ import {
 } from "../playerProfile/PlayerProfile.renewal";
 import type { GameStateData, PlayerData, TeamData } from "../../store/gameStore";
 import {
+  getFreeAgentOpeningOffer,
   offerFreeAgentContract,
   previewFreeAgentContractImpact,
   type FreeAgentContractProjection,
   type FreeAgentContractResponseData,
 } from "../../services/freeAgentService";
-import { calcAgeOnDate } from "../../lib/valueFormatting";
 import { resolveBackendError } from "../../utils/backendI18n";
 
 interface UseFreeAgentContractFlowArgs {
@@ -21,8 +21,6 @@ interface UseFreeAgentContractFlowArgs {
   onGameUpdate?: (game: GameStateData) => void;
 }
 
-const MARKET_VALUE_TO_WAGE_RATIO = 200;
-const MINIMUM_DEFAULT_WAGE = 500;
 const MAX_CONTRACT_YEARS = 5;
 
 interface UseFreeAgentContractFlowResult {
@@ -45,46 +43,28 @@ interface UseFreeAgentContractFlowResult {
   submitFreeAgentContract: () => Promise<void>;
 }
 
-type TranslateFn = (
-  key: string,
-  options?: Record<string, string | number>,
-) => string;
-
-function defaultContractYears(dateOfBirth: string, asOfDate: string): string {
-  const age = calcAgeOnDate(dateOfBirth, asOfDate);
-
-  if (age <= 28) return "3";
-  if (age <= 32) return "2";
-  return "1";
-}
-
-function defaultContractWage(player: PlayerData): string {
-  const baseline =
-    player.wage > 0
-      ? player.wage
-      : Math.max(
-        Math.round(player.market_value / MARKET_VALUE_TO_WAGE_RATIO),
-        MINIMUM_DEFAULT_WAGE,
-      );
-  return String(Math.ceil(baseline / 1000) * 1000);
-}
+type TranslateFn = (key: string, options?: Record<string, string | number>) => string;
 
 export function useFreeAgentContractFlow({
   gameState,
   onGameUpdate,
 }: UseFreeAgentContractFlowArgs): UseFreeAgentContractFlowResult {
-  const myTeam = gameState.teams.find(
-    (team) => team.id === gameState.manager.team_id,
-  ) ?? null;
-  const [freeAgentTarget, setFreeAgentTarget] = useState<PlayerData | null>(null);
+  const myTeam = gameState.teams.find((team) => team.id === gameState.manager.team_id) ?? null;
+  // The id, not the player: read from the game state each render (see `useTransferBidFlow`).
+  const [freeAgentTargetId, setFreeAgentTargetId] = useState<string | null>(null);
+  const freeAgentTarget =
+    freeAgentTargetId === null
+      ? null
+      : (gameState.players.find((player) => player.id === freeAgentTargetId) ?? null);
   const [contractWage, setContractWage] = useState("");
   const [contractLength, setContractLength] = useState("");
   const [contractStatus, setContractStatus] = useState<RenewalStatus>("idle");
   const [contractError, setContractError] = useState<string | null>(null);
   const [contractFeedback, setContractFeedback] =
     useState<FreeAgentContractResponseData["feedback"]>(null);
-  const [contractProjection, setContractProjection] =
-    useState<FreeAgentContractProjection | null>(null);
+  const [contractProjection, setContractProjection] = useState<FreeAgentContractProjection | null>(
+    null,
+  );
   const [contractSubmitting, setContractSubmitting] = useState(false);
   const [contractSessionStatus, setContractSessionStatus] =
     useState<FreeAgentContractResponseData["session_status"]>("idle");
@@ -96,13 +76,9 @@ export function useFreeAgentContractFlow({
   const offeredYears = Number(contractLength);
   const isContractWageValid = Number.isFinite(offeredWage) && offeredWage > 0;
   const isContractLengthValid =
-    Number.isInteger(offeredYears) &&
-    offeredYears > 0 &&
-    offeredYears <= MAX_CONTRACT_YEARS;
+    Number.isInteger(offeredYears) && offeredYears > 0 && offeredYears <= MAX_CONTRACT_YEARS;
   const contractViolatesSoftCap =
-    isContractWageValid &&
-    contractProjection !== null &&
-    !contractProjection.policy_allows;
+    isContractWageValid && contractProjection !== null && !contractProjection.policy_allows;
 
   useEffect(() => {
     if (!freeAgentTarget || !isContractWageValid) {
@@ -114,10 +90,7 @@ export function useFreeAgentContractFlow({
 
     const loadProjection = async (): Promise<void> => {
       try {
-        const result = await previewFreeAgentContractImpact(
-          freeAgentTarget.id,
-          offeredWage,
-        );
+        const result = await previewFreeAgentContractImpact(freeAgentTarget.id, offeredWage);
 
         if (!cancelled) {
           setContractProjection(result.projection ?? null);
@@ -136,10 +109,41 @@ export function useFreeAgentContractFlow({
     };
   }, [freeAgentTarget, isContractWageValid, offeredWage]);
 
+  useEffect(() => {
+    if (freeAgentTargetId === null) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadOpeningOffer = async (): Promise<void> => {
+      try {
+        const offer = await getFreeAgentOpeningOffer(freeAgentTargetId);
+
+        if (!cancelled) {
+          // Only a field still empty takes the offer: the manager may have typed while it loaded.
+          setContractWage((typed) => typed || String(offer.weekly_wage));
+          setContractLength((typed) => typed || String(offer.contract_years));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setContractStatus("error");
+          setContractError(resolveBackendError(error));
+        }
+      }
+    };
+
+    void loadOpeningOffer();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [freeAgentTargetId]);
+
   const openFreeAgentContract = (player: PlayerData): void => {
-    setFreeAgentTarget(player);
-    setContractWage(defaultContractWage(player));
-    setContractLength(defaultContractYears(player.date_of_birth, gameState.clock.current_date));
+    setFreeAgentTargetId(player.id);
+    setContractWage("");
+    setContractLength("");
     setContractStatus("idle");
     setContractError(null);
     setContractFeedback(null);
@@ -155,7 +159,7 @@ export function useFreeAgentContractFlow({
       return;
     }
 
-    setFreeAgentTarget(null);
+    setFreeAgentTargetId(null);
     setContractWage("");
     setContractLength("");
     setContractStatus("idle");
@@ -178,11 +182,7 @@ export function useFreeAgentContractFlow({
     setContractError(null);
 
     try {
-      const result = await offerFreeAgentContract(
-        freeAgentTarget.id,
-        offeredWage,
-        offeredYears,
-      );
+      const result = await offerFreeAgentContract(freeAgentTarget.id, offeredWage, offeredYears);
 
       onGameUpdate?.(result.game);
       setContractStatus(result.outcome);
@@ -200,7 +200,6 @@ export function useFreeAgentContractFlow({
           setContractLength(String(result.suggested_years));
         }
       }
-
     } catch (error) {
       setContractStatus("error");
       setContractError(resolveBackendError(error));

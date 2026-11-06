@@ -4,17 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Optional nightly tag override
+        description: Optional exact nightly tag (no refs/tags/ or __VERSION__ aliases)
         required: false
         type: string
   push:
     branches:
       - develop
 
-# Every build shares the one rolling `nightly` tag, so runs must not overlap.
+# Stable-tag overrides share the stable workflow's queue, so neither can publish while the
+# other is still uploading. Ordinary nightlies keep cancelling superseded builds.
 concurrency:
-  group: nightly-release
-  cancel-in-progress: true
+  group: ${{ startsWith(inputs.release_tag, 'v') && 'stable-release' || 'nightly-release' }}
+  cancel-in-progress: ${{ !startsWith(inputs.release_tag, 'v') }}
 
 jobs:
   prepare-nightly:
@@ -29,7 +30,7 @@ jobs:
     steps:
       # Read-only job: reads tauri.conf.json and calls gh api via GH_TOKEN, never
       # touches git, so the checkout credentials are not needed.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -42,17 +43,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Fixed rolling tag: exactly one nightly release ever exists, so the
-          # releases page stays legible regardless of how GitHub sorts it.
-          tag="${INPUT_RELEASE_TAG:-nightly}"
           nightly_date="$(date -u +%F)"
           compact_date="$(date -u +%Y%m%d)"
           short_sha="${GITHUB_SHA::7}"
+
+          # One release per build, not one release forever. The previous fixed `nightly` tag
+          # meant every run edited the *same* release: its `published_at` never advanced, so the
+          # releases page showed one entry dated whenever it was first created, and the history
+          # of what shipped each night did not exist anywhere. The commit sha is in the tag
+          # because `develop` can take more than one push in a day.
+          tag="${INPUT_RELEASE_TAG:-nightly-${compact_date}-${short_sha}}"
+          # Validate raw overrides before writing outputs: newline injection must not change
+          # a nightly-group input into a stable-group tag. Also reject already public tags early.
+          RELEASE_TAG="$tag" bash scripts/check-release-state.sh
           base_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           display_version="${base_version}-nightly.${compact_date}+${short_sha}"
 
-          # The date/sha live in the release name because a rolling tag's
-          # published_at never advances.
           release_name="Openfoot Manager Nightly ${display_version}"
 
           compare_line=""
@@ -76,7 +82,7 @@ jobs:
               echo "$compare_line"
             fi
             echo ""
-            echo "This tag is replaced on every push to \`develop\`; the assets below always reflect the newest build."
+            echo "Each nightly gets its own tag and release; this one is the build of \`${short_sha}\`."
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -89,6 +95,7 @@ jobs:
   # environment grants, and putting it behind the environment's protection rules would
   # gate the tests on the approval rather than the other way round.
   verify:
+    needs: prepare-nightly
     uses: ./.github/workflows/build-check.yml
 
   publish-tauri-nightly:
@@ -113,7 +120,12 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Nothing in this job pushes with git: tauri-action and check-release-state.sh take the
+        # token from env. A persisted token would sit in .git/config while npm ci runs install
+        # scripts in a job that can write releases.
+        with:
+          persist-credentials: false
 
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-22.04-arm'
@@ -122,7 +134,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: setup node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: lts/*
           cache: "npm"
@@ -133,14 +145,22 @@ jobs:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust cache
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "./src-tauri -> target"
 
       - name: install frontend dependencies
         run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
+      # Same-day reruns and overrides can resolve to an already published tag. Check the
+      # prepared tag directly, including on individual matrix-job retries.
+      - name: Refuse a published nightly tag before upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare-nightly.outputs.tag }}
+        run: bash scripts/check-release-state.sh
+
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Bakes the channel into the bundled frontend so the in-app version
@@ -155,33 +175,58 @@ jobs:
           tagName: ${{ needs.prepare-nightly.outputs.tag }}
           releaseName: ${{ needs.prepare-nightly.outputs.release_name }}
           releaseBody: ${{ needs.prepare-nightly.outputs.release_body }}
-          releaseDraft: false
+          # Published by `finalize-nightly`, not here. With per-build tags a cancelled run — and
+          # `cancel-in-progress` above means a second push cancels the first — used to leave a
+          # *published* release carrying whichever platforms had uploaded before the axe fell,
+          # with no manifest and no checksums, sitting on the releases page forever looking like
+          # a complete build. The rolling tag repaired that on the next run; a per-build tag has
+          # no next run. A draft is invisible until something says every platform finished.
+          releaseDraft: true
           prerelease: true
           args: ${{ matrix.args }}
 
-  # The `nightly` release is upserted, never deleted: a failed build must not
-  # destroy the last known-good nightly. The cost is that re-uploading assets to
-  # an existing release does not re-fire `release: published`, so the metadata
-  # pipeline is dispatched explicitly here.
+      # #281. If this AppImage ships its own libwayland-client, WebKit shows a white window on any
+      # machine using Mesa with a newer libwayland (AMD, Intel, rolling distros). The details are
+      # in docs/LINUX_GRAPHICS.md. Failing here keeps new nightlies drafts: `finalize-nightly`
+      # only publishes when every platform succeeded.
+      - name: AppImage must not bundle libwayland-client (ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-22.04-arm'
+        run: scripts/check-appimage-libs.sh src-tauri/target/release/bundle/appimage
+
+  # Nothing is ever deleted here: a failed build must not remove a previous good nightly. A
+  # build that fails or is cancelled leaves a *draft*, which nobody sees, rather than replacing
+  # the last known-good release the way the rolling tag used to.
+  #
+  # The metadata pipeline is still dispatched explicitly rather than left to `release:
+  # published`. That event fires when the *first* platform creates the release, with four
+  # platforms' assets still uploading, so a manifest built from it would describe a release that
+  # does not exist yet.
   finalize-nightly:
     needs: [prepare-nightly, publish-tauri-nightly]
-    # `fail-fast: false` means one platform can fail while the others upload new
-    # assets. Finalizing anyway keeps the release name and, more importantly, the
-    # published checksums consistent with the assets that *did* land — skipping
-    # would leave nightly-checksums.txt describing files that no longer exist.
-    if: ${{ !cancelled() && needs.prepare-nightly.result == 'success' && needs.publish-tauri-nightly.result != 'skipped' }}
+    # Every platform must have succeeded. `fail-fast: false` lets one fail while the others
+    # upload, and the previous condition here (`result != 'skipped'`) was *true* for a failed
+    # matrix — so a build missing its macOS bundles would still have been published, with
+    # checksums describing a set of assets nobody can download in full. That is the thing the
+    # draft was introduced to prevent one commit ago, and the condition did not honour it.
+    #
+    # A failed or cancelled build now simply stays a draft: invisible, harmless, and still there
+    # to look at. Nothing is deleted, so the last good nightly is untouched.
+    if: ${{ needs.prepare-nightly.result == 'success' && needs.publish-tauri-nightly.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
-      # contents:write to force-move the rolling tag and edit the release below;
-      # actions:write to dispatch nightly-release-manifest.yml.
+      # contents:write to edit the release below; actions:write to dispatch
+      # nightly-release-manifest.yml.
       contents: write
       actions: write
     steps:
-      # persist-credentials stays on (the default): the git push below relies on
-      # the credential helper this step configures.
-      - uses: actions/checkout@v4
+      # `persist-credentials: false` because nothing in this job pushes any more. The rolling
+      # tag used to be force-moved from here, which needed the credential helper; a per-build tag
+      # is created by tauri-action at the commit it built, so there is nothing left to move.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Move rolling tag and refresh release metadata
+      - name: Publish the release and refresh its metadata
         id: finalize
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -201,13 +246,14 @@ jobs:
 
           echo "released=true" >> "$GITHUB_OUTPUT"
 
-          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
-          git push -f origin "refs/tags/$RELEASE_TAG"
-
+          # The tag already points at this commit — tauri-action created it there. This step is
+          # what makes the release public, which is the point: reaching here means every platform
+          # in the matrix has finished, so the assets, the notes and the checksums describe the
+          # same build.
           gh release edit "$RELEASE_TAG" \
             --title "$RELEASE_NAME" \
             --notes "$RELEASE_BODY" \
-            --target "$GITHUB_SHA" \
+            --draft=false \
             --prerelease
 
       - name: Dispatch nightly metadata workflow

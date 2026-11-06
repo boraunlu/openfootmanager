@@ -1,15 +1,12 @@
 import { useTranslation } from "react-i18next";
 import { User } from "lucide-react";
-import { Card, CardHeader, CardBody, Badge } from "../ui";
-import {
-  formatExactMoney,
-  formatVal,
-  positionBadgeVariant,
-} from "../../lib/helpers";
-import { annualAmountToWeeklyCommitment } from "../../lib/finance";
+import { Card, CardHeader, CardBody } from "../ui";
+import { formatExactMoney, formatVal } from "../../lib/helpers";
+import { weeklyWageAmount } from "../../lib/finance";
+import { naturalPositionOf } from "../../lib/positions";
 import type { PlayerData, PlayerSelectionOptions } from "../../store/gameStore";
 import ContextMenu from "../ContextMenu";
-import { translatePositionAbbreviation } from "../squad/SquadTab.helpers";
+import PlayerPositionBadge from "../PlayerPositionBadge";
 
 interface FinancesPayrollTableProps {
   roster: PlayerData[];
@@ -54,24 +51,28 @@ export default function FinancesPayrollTable({
                 .map((p) => {
                   const contextItems = onSelectPlayer
                     ? [
-                      {
-                        label: t("squad.viewProfile"),
-                        icon: <User className="w-4 h-4" />,
-                        onClick: () => onSelectPlayer(p.id),
-                      },
-                    ]
+                        {
+                          label: t("squad.viewProfile"),
+                          icon: <User className="w-4 h-4" />,
+                          onClick: () => onSelectPlayer(p.id),
+                        },
+                      ]
                     : [];
 
                   const row = (
                     <tr
                       key={p.id}
                       onClick={() => onSelectPlayer?.(p.id)}
-                      onKeyDown={onSelectPlayer ? (event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          onSelectPlayer(p.id);
-                        }
-                      } : undefined}
+                      onKeyDown={
+                        onSelectPlayer
+                          ? (event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                onSelectPlayer(p.id);
+                              }
+                            }
+                          : undefined
+                      }
                       role={onSelectPlayer ? "button" : undefined}
                       tabIndex={onSelectPlayer ? 0 : undefined}
                       className={`hover:bg-gray-50 dark:hover:bg-navy-700/50 transition-colors ${onSelectPlayer ? "cursor-pointer group" : ""}`}
@@ -82,12 +83,10 @@ export default function FinancesPayrollTable({
                         </span>
                       </td>
                       <td className="py-3 px-5">
-                        <Badge variant={positionBadgeVariant(p.position)}>
-                          {translatePositionAbbreviation(t, p.position)}
-                        </Badge>
+                        <PlayerPositionBadge position={naturalPositionOf(p)} />
                       </td>
                       <td className="py-3 px-5 text-sm font-medium text-gray-700 dark:text-gray-300">
-                        {formatExactMoney(annualAmountToWeeklyCommitment(p.wage))}
+                        {formatExactMoney(weeklyWageAmount(p.wage))}
                       </td>
                       <td className="py-3 px-5 text-sm text-gray-600 dark:text-gray-400">
                         {formatVal(p.market_value)}
@@ -95,8 +94,8 @@ export default function FinancesPayrollTable({
                       <td className="py-3 px-5 text-sm text-gray-500 dark:text-gray-400">
                         {p.contract_end
                           ? t("finances.until", {
-                            year: p.contract_end.substring(0, 4),
-                          })
+                              year: p.contract_end.substring(0, 4),
+                            })
                           : "—"}
                       </td>
                     </tr>

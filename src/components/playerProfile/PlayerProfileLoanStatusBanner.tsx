@@ -2,7 +2,7 @@ import { ArrowRightLeft, BadgeEuro, CalendarDays, Percent } from "lucide-react";
 import type { TOptions } from "i18next";
 
 import { formatDate } from "../../lib/dateFormatting";
-import { formatVal } from "../../lib/helpers";
+import { formatExactMoney } from "../../lib/helpers";
 import type { ActiveLoanData, TeamData } from "../../store/gameStore";
 import { Card, CardBody } from "../ui";
 import { getPlayerTeamName } from "./PlayerProfile.helpers";
@@ -36,9 +36,9 @@ export default function PlayerProfileLoanStatusBanner({
       : managerTeamId === loan.loan_team_id
         ? t("playerProfile.loanedInFrom", { team: parentTeamName })
         : t("playerProfile.loanBetweenClubs", {
-          parent: parentTeamName,
-          loanTeam: loanTeamName,
-        });
+            parent: parentTeamName,
+            loanTeam: loanTeamName,
+          });
 
   return (
     <Card accent="primary" className="mb-5">
@@ -74,7 +74,7 @@ export default function PlayerProfileLoanStatusBanner({
               <span className="inline-flex items-center gap-1 sm:justify-end">
                 <BadgeEuro className="h-3.5 w-3.5" />
                 {t("playerProfile.loanBuyOption", {
-                  fee: formatVal(loan.buy_option_fee),
+                  fee: formatExactMoney(loan.buy_option_fee),
                 })}
               </span>
             ) : null}

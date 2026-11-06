@@ -17,17 +17,15 @@
         "height": 800,
         "minWidth": 960,
         "minHeight": 640,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "visible": false
       }
     ],
     "security": {
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": [
-          "$APPDATA/generated-player-portraits/**",
-          "$APPDATA/package-assets/**"
-        ]
+        "scope": ["$APPDATA/generated-player-portraits/**", "$APPDATA/package-assets/**"]
       }
     }
   },

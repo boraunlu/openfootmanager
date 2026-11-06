@@ -1,6 +1,8 @@
+mod ai_path;
 mod builder;
 mod html;
 mod stats;
+mod targets;
 mod terminal;
 
 use std::path::PathBuf;
@@ -74,6 +76,17 @@ struct Cli {
     /// shots for/against and goals. Tuning aid for the dial magnitudes.
     #[arg(long)]
     phase_sweep: bool,
+
+    /// AI-path A/B: run the same 22-man squads through the instant path (whole
+    /// squad, no manager) and the live path (XI + bench, `ai_decide` on both
+    /// sides), and tabulate who actually played, what the managers did, and how
+    /// much condition the production wear formula would charge for it.
+    ///
+    /// Both sides are mirrors: Balanced, on the home rating and formation.
+    /// `--home-style`, `--away-style`, `--away-rating` and `--away-formation` do
+    /// not apply, because an A/B of two paths wants the matchup held fixed.
+    #[arg(long)]
+    ai_path_ab: bool,
 
     // ── MatchConfig overrides ────────────────────────────────────────────────
     #[arg(long, help = "Home advantage multiplier (default 1.08)")]
@@ -175,6 +188,17 @@ fn main() {
         return;
     }
 
+    if cli.ai_path_ab {
+        ai_path::run(
+            &config,
+            cli.games,
+            cli.seed,
+            cli.home_rating,
+            &cli.home_formation,
+        );
+        return;
+    }
+
     // Derive a base seed: explicit or from system clock
     let base_seed = cli.seed.unwrap_or_else(|| {
         SystemTime::now()
@@ -215,6 +239,10 @@ fn main() {
     }
 
     bench_stats.total_time_secs = start.elapsed().as_secs_f64();
+    let verdicts = targets::evaluate(&bench_stats).unwrap_or_else(|error| {
+        eprintln!("calibration table: {error}");
+        std::process::exit(1);
+    });
 
     // ── Terminal output ────────────────────────────────────────────────────────
     if cli.verbose {
@@ -230,7 +258,7 @@ fn main() {
             goal_conversion_base: config.goal_conversion_base,
             seed: Some(base_seed),
         };
-        terminal::print_report(&bench_stats, &run_cfg);
+        terminal::print_report(&bench_stats, &run_cfg, &verdicts);
     }
 
     // ── HTML output ───────────────────────────────────────────────────────────
@@ -247,13 +275,13 @@ fn main() {
             goal_conversion_base: config.goal_conversion_base,
             seed: Some(base_seed),
         };
-        let content = html::generate_html(&bench_stats, &run_cfg);
+        let content = html::generate_html(&bench_stats, &run_cfg, &verdicts);
         std::fs::write(html_path, content).expect("Failed to write HTML report");
         eprintln!("HTML report → {}", html_path.display());
     }
 
     // ── JSON output ───────────────────────────────────────────────────────────
-    let json_summary = bench_stats.to_json(config.goal_conversion_base);
+    let json_summary = bench_stats.to_json(config.goal_conversion_base, verdicts);
     let json = serde_json::to_string_pretty(&json_summary).expect("JSON serialization failed");
 
     if let Some(ref out_path) = cli.out {

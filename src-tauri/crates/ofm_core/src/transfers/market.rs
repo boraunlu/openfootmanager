@@ -6,15 +6,8 @@
 
 use super::*;
 
-/// Broad position group index (0=GK, 1=DEF, 2=MID, 3=FWD) for squad-depth maths.
-pub(crate) fn position_group_index(position: &domain::player::Position) -> usize {
-    match position.to_group_position() {
-        domain::player::Position::Goalkeeper => 0,
-        domain::player::Position::Defender => 1,
-        domain::player::Position::Midfielder => 2,
-        _ => 3,
-    }
-}
+use crate::squad_floor::group_index as position_group_index;
+
 /// Whether a club has a realistic reason to pursue a target: it isn't far below
 /// the player's current club in stature, and it isn't already overloaded in the
 /// player's position group.
@@ -28,18 +21,13 @@ pub(crate) fn buyer_has_genuine_interest(
         && buyer_position_depth < POSITION_GROUP_SURPLUS_THRESHOLD
 }
 /// Current squad depth per club and broad position group, computed once so the
-/// market sweep doesn't re-scan every roster.
+/// market sweep doesn't re-scan every roster. The same count the squad floor
+/// keeps, owned so the sweep can go on to move players.
 pub(crate) fn squad_position_depths(game: &Game) -> std::collections::HashMap<String, [usize; 4]> {
-    let mut depths: std::collections::HashMap<String, [usize; 4]> =
-        std::collections::HashMap::new();
-    for player in &game.players {
-        let Some(team_id) = player.team_id.as_deref() else {
-            continue;
-        };
-        let slot = position_group_index(&player.natural_position);
-        depths.entry(team_id.to_string()).or_default()[slot] += 1;
-    }
-    depths
+    crate::squad_floor::registered_by_club(game)
+        .into_iter()
+        .map(|(team_id, depths)| (team_id.to_string(), depths))
+        .collect()
 }
 pub(crate) fn contract_days_remaining(
     current_date: NaiveDate,
@@ -71,9 +59,7 @@ pub(crate) fn minimum_acceptable_fee(
 ) -> u64 {
     let mut multiplier: f64 = if player.transfer_listed { 0.8 } else { 1.2 };
 
-    if let Some(days_remaining) =
-        contract_days_remaining(current_date, player.contract_end.as_deref())
-    {
+    if let Some(days_remaining) = contract_days_remaining(current_date, player.contract_end()) {
         if days_remaining <= 60 {
             multiplier -= 0.25;
         } else if days_remaining <= 180 {
@@ -123,9 +109,7 @@ pub(crate) fn player_move_openness_score(
         score += 8;
     }
 
-    if let Some(days_remaining) =
-        contract_days_remaining(current_date, player.contract_end.as_deref())
-    {
+    if let Some(days_remaining) = contract_days_remaining(current_date, player.contract_end()) {
         if days_remaining <= 180 {
             score += 20;
         } else if days_remaining <= 365 {
@@ -178,19 +162,14 @@ pub(crate) fn award_leaderboard_player_ids(game: &Game) -> HashSet<String> {
         .collect()
 }
 pub fn evaluate_transfer_market(game: &mut Game) {
-    evaluate_transfer_market_with_reservations(game, &mut std::collections::HashMap::new());
+    evaluate_transfer_market_with_policy(game, &mut Default::default(), &Default::default());
 }
-
-/// Host-owned live proposals reserve spending without changing the bank balance.
-/// Newly generated bids also consume availability for the remainder of this sweep.
 pub fn evaluate_transfer_market_with_reservations(
     game: &mut Game,
     reserved: &mut std::collections::HashMap<String, u64>,
 ) {
-    evaluate_transfer_market_with_policy(game, reserved, &HashSet::new());
+    evaluate_transfer_market_with_policy(game, reserved, &Default::default());
 }
-
-/// Protect host-owned proposals from the native game-date expiry authority.
 pub fn evaluate_transfer_market_with_policy(
     game: &mut Game,
     reserved: &mut std::collections::HashMap<String, u64>,
@@ -215,6 +194,18 @@ pub fn evaluate_transfer_market_with_policy(
         .map(|team| (team.id.clone(), team.reputation))
         .collect();
     let position_depths = squad_position_depths(game);
+    // Every club's wage bill, read once: a buyer's check needs its own, and finding one scans
+    // every player. The sweep moves players, so the two clubs of a completed transfer are
+    // recounted below.
+    let mut wage_bills = crate::finances::wage_bills_by_club(game);
+    // Where each target sits in `game.players`, so the buyer's wage check need not search.
+    // The sweep moves players between clubs but never adds or removes one.
+    let player_index: std::collections::HashMap<String, usize> = game
+        .players
+        .iter()
+        .enumerate()
+        .map(|(index, player)| (player.id.clone(), index))
+        .collect();
 
     // In a multi-competition world only the player's active scope shops the
     // market each day; dormant clubs are handled by lighter periodic passes.
@@ -286,6 +277,19 @@ pub fn evaluate_transfer_market_with_policy(
         if player_has_pending_registration(player) {
             continue;
         }
+        // An AI club at the floor in his group will not sell him, so no buyer
+        // should spend its approach on him. `execute_transfer` refuses the sale
+        // regardless; this keeps the refusal from costing a buyer its day. The
+        // player's own club is left to decide for itself.
+        let is_user_owned = game.is_controlled(owner_team_id);
+        if !is_user_owned
+            && player.squad_role == domain::player::SquadRole::Senior
+            && position_depths
+                .get(owner_team_id)
+                .is_some_and(|depths| !crate::squad_floor::can_spare_one(*depths, &player.position))
+        {
+            continue;
+        }
         let mut score = incoming_interest_score(current_date, player);
         if award_leaderboards.contains(&player.id) {
             score += AWARD_LEADERBOARD_INTEREST_BONUS;
@@ -293,14 +297,13 @@ pub fn evaluate_transfer_market_with_policy(
         if score < 35 {
             continue;
         }
-        let is_user_owned = game.is_controlled(owner_team_id);
         shortlist.push(MarketTarget {
             player_id: player.id.clone(),
             owner_team_id: owner_team_id.to_string(),
             is_user_owned,
             score,
             fee: suggested_incoming_fee(current_date, player),
-            position_group_index: position_group_index(&player.natural_position),
+            position_group_index: position_group_index(&player.position),
             owner_reputation: team_reputation.get(owner_team_id).copied().unwrap_or(0),
         });
     }
@@ -350,6 +353,8 @@ pub fn evaluate_transfer_market_with_policy(
 
         // The list is score-sorted, so the first target clearing this club's
         // filters is its highest-appeal eligible signing.
+        // Worked out once for this buyer, and only if a target gets as far as needing it.
+        let mut buyer_wage_facts: Option<BuyerWageFacts> = None;
         let chosen = shortlist.iter().find(|target| {
             if target.owner_team_id == buyer_id || moved_player_ids.contains(&target.player_id) {
                 return false;
@@ -383,9 +388,26 @@ pub fn evaluate_transfer_market_with_policy(
             ) {
                 return false;
             }
-            let held = reserved.get(&buyer_id).copied().unwrap_or(0);
-            (buyer_team.transfer_budget.max(0) as u64).saturating_sub(held) >= target.fee
-                && (buyer_team.finance.max(0) as u64).saturating_sub(held) >= target.fee
+            (buyer_team.transfer_budget.max(0) as u64)
+                .saturating_sub(reserved.get(&buyer_id).copied().unwrap_or(0))
+                >= target.fee
+                && (buyer_team.finance.max(0) as u64)
+                    .saturating_sub(reserved.get(&buyer_id).copied().unwrap_or(0))
+                    >= target.fee
+                && player_index.get(&target.player_id).is_some_and(|&index| {
+                    let facts = buyer_wage_facts.get_or_insert_with(|| {
+                        BuyerWageFacts::new(
+                            wage_bills.get(&buyer_id).copied().unwrap_or(0),
+                            buyer_depths,
+                        )
+                    });
+                    buyer_can_pay_standard_wage(
+                        &game.players[index],
+                        &buyer_team,
+                        facts,
+                        current_date,
+                    )
+                })
         });
 
         let Some(target) = chosen else {
@@ -399,10 +421,12 @@ pub fn evaluate_transfer_market_with_policy(
         };
 
         if game.is_controlled(&candidate.owner_team_id) {
-            let original = game.manager.team_id.clone().expect("managed club");
+            let original = game.manager.team_id.clone();
             game.swap_controlled(&candidate.owner_team_id);
             create_incoming_user_offer(game, &candidate, &buyer_id, &buyer_team.name, &today);
-            game.swap_controlled(&original);
+            if let Some(original) = original {
+                game.swap_controlled(&original);
+            }
             let held = reserved.entry(buyer_id.clone()).or_default();
             *held = held.saturating_add(candidate.fee);
             *new_offers_per_player
@@ -431,6 +455,13 @@ pub fn evaluate_transfer_market_with_policy(
         {
             moved_player_ids.insert(candidate.player_id);
             completed_ai_transfers += 1;
+            // Only the seller is recounted: a club that has just bought has had its turn (each
+            // club is a buyer once a sweep), so its new bill is never read again today, while
+            // the seller may still buy and is held to the bill it has after the sale.
+            wage_bills.insert(
+                candidate.owner_team_id.clone(),
+                calc_wages(game, &candidate.owner_team_id),
+            );
         }
     }
 }

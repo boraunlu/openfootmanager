@@ -6,8 +6,11 @@ import { getCompetitionStatus } from "./CompetitionsOverview";
 function fixture(
   status: "Scheduled" | "Completed",
   competition: FixtureData["competition"] = "League",
+  competitive = true,
 ): FixtureData {
   return {
+    competitive,
+    advancing_team_id: null,
     id: `f-${Math.random()}`,
     matchday: 1,
     date: "2026-08-01",
@@ -15,7 +18,10 @@ function fixture(
     away_team_id: "t2",
     competition,
     status,
-    result: status === "Completed" ? { home_goals: 1, away_goals: 0, home_scorers: [], away_scorers: [] } : null,
+    result:
+      status === "Completed"
+        ? { home_goals: 1, away_goals: 0, home_scorers: [], away_scorers: [] }
+        : null,
   };
 }
 
@@ -72,7 +78,20 @@ describe("getCompetitionStatus", () => {
     // Only a Friendly is present — no competitive fixtures → notStarted
     expect(
       getCompetitionStatus({
-        fixtures: [fixture("Completed", "Friendly")],
+        fixtures: [fixture("Completed", "Friendly", false)],
+        id: "c1",
+        name: "X",
+        season: 1,
+        standings: [],
+      } as never),
+    ).toBe("notStarted");
+  });
+
+  it("ignores FriendlyCup fixtures when determining status", () => {
+    // A friendly cup is not competitive either (the backend says so on the fixture)
+    expect(
+      getCompetitionStatus({
+        fixtures: [fixture("Completed", "FriendlyCup", false), fixture("Scheduled")],
         id: "c1",
         name: "X",
         season: 1,
@@ -85,10 +104,7 @@ describe("getCompetitionStatus", () => {
     // Preseason completed + one real scheduled → notStarted (preseason not counted)
     expect(
       getCompetitionStatus({
-        fixtures: [
-          fixture("Completed", "PreseasonTournament"),
-          fixture("Scheduled"),
-        ],
+        fixtures: [fixture("Completed", "PreseasonTournament", false), fixture("Scheduled")],
         id: "c1",
         name: "X",
         season: 1,

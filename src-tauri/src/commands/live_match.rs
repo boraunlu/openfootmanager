@@ -1,4 +1,5 @@
 use log::info;
+use ofm_core::morale::apply_morale_change;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,7 +10,8 @@ pub use crate::application::live_match::FinishLiveMatchResponse;
 use crate::application::live_match::{
     apply_match_command as apply_match_command_service,
     finish_live_match as finish_live_match_service,
-    get_match_snapshot as get_match_snapshot_service, start_live_match as start_live_match_service,
+    get_match_snapshot as get_match_snapshot_service,
+    start_live_match_with_identity as start_live_match_service,
     step_live_match as step_live_match_service,
 };
 use crate::application::press_conference::{
@@ -18,7 +20,7 @@ use crate::application::press_conference::{
 use crate::application::team_talk::apply_team_talk as apply_team_talk_service;
 use crate::commands::util::user_team_id;
 use ofm_core::game::Game;
-use ofm_core::state::StateManager;
+use ofm_core::state::{Career, StateManager};
 
 #[derive(Debug, Deserialize)]
 pub struct PressConferenceAnswer {
@@ -49,8 +51,29 @@ struct LocalizedPressQuote {
 // Live Match Commands
 // ---------------------------------------------------------------------------
 
-pub fn finish_live_match_internal(state: &StateManager) -> Result<FinishLiveMatchResponse, String> {
-    finish_live_match_service(state)
+pub fn finish_live_match_internal(
+    state: &StateManager,
+    career: Career,
+) -> Result<FinishLiveMatchResponse, String> {
+    finish_live_match_service(state, career)
+}
+
+/// The seed a team talk's morale swings are drawn from: the game's, for this tone and this
+/// moment of the match, so the same talk in the same spot replays the same way.
+/// The seed for a talk given in a named phase of the match (half-time, full-time): the same tone in the same score line is a different talk at each, and must not draw the
+/// same swings twice.
+pub(crate) fn team_talk_seed_in_phase(game: &Game, tone: &str, context: &str, phase: &str) -> u64 {
+    use rand::RngExt;
+    game.rng_today(&format!("team-talk/{tone}/{context}/{phase}"))
+        .random()
+}
+
+/// The phase the live match is in, as a tag for [`team_talk_seed_in_phase`]; empty when there
+/// is no live match.
+pub(crate) fn live_phase_tag(state: &ofm_core::state::StateManager) -> String {
+    state
+        .with_live_match(|session| format!("{:?}", session.match_state.phase()))
+        .unwrap_or_default()
 }
 
 pub fn apply_team_talk_internal(
@@ -62,6 +85,29 @@ pub fn apply_team_talk_internal(
     apply_team_talk_service(game, tone, context, seed)
 }
 
+/// Shared command path for GUI restoration and MCP match starts.
+/// The application service derives extra-time eligibility from the selected fixture;
+/// `allows_extra_time` is retained only for existing callers' compatibility.
+pub fn start_live_match_internal(
+    state: &StateManager,
+    career: Career,
+    fixture_index: usize,
+    mode: &str,
+    allows_extra_time: bool,
+    competition_id: Option<&str>,
+    fixture_id: Option<&str>,
+) -> Result<engine::MatchSnapshot, String> {
+    start_live_match_service(
+        state,
+        career,
+        fixture_index,
+        mode,
+        allows_extra_time,
+        competition_id,
+        fixture_id,
+    )
+}
+
 /// Start a live match for a given fixture.
 /// mode: "live" | "spectator" | "instant"
 #[tauri::command]
@@ -70,16 +116,21 @@ pub fn start_live_match(
     fixture_index: usize,
     mode: String,
     allows_extra_time: bool,
-    home_team_id: Option<String>,
-    away_team_id: Option<String>,
+    competition_id: Option<String>,
+    fixture_id: Option<String>,
+    career_token: u64,
 ) -> Result<engine::MatchSnapshot, String> {
-    start_live_match_service(
+    if competition_id.is_none() || fixture_id.is_none() {
+        return Err("be.error.liveMatch.fixtureNotFound".to_string());
+    }
+    start_live_match_internal(
         &state,
+        Career::Token(career_token),
         fixture_index,
         &mode,
         allows_extra_time,
-        home_team_id.as_deref(),
-        away_team_id.as_deref(),
+        competition_id.as_deref(),
+        fixture_id.as_deref(),
     )
 }
 
@@ -88,8 +139,9 @@ pub fn start_live_match(
 pub fn step_live_match(
     state: State<'_, Arc<StateManager>>,
     minutes: u16,
+    career_token: u64,
 ) -> Result<Vec<engine::MinuteResult>, String> {
-    step_live_match_service(&state, minutes)
+    step_live_match_service(&state, Career::Token(career_token), minutes)
 }
 
 /// Apply a match command (substitution, tactic change, set piece taker, etc.)
@@ -97,8 +149,9 @@ pub fn step_live_match(
 pub fn apply_match_command(
     state: State<'_, Arc<StateManager>>,
     command: engine::MatchCommand,
+    career_token: u64,
 ) -> Result<engine::MatchSnapshot, String> {
-    apply_match_command_service(&state, command)
+    apply_match_command_service(&state, Career::Token(career_token), command)
 }
 
 /// Get current match snapshot without advancing time.
@@ -113,8 +166,9 @@ pub fn get_match_snapshot(
 #[tauri::command]
 pub fn finish_live_match(
     state: State<'_, Arc<StateManager>>,
+    career_token: u64,
 ) -> Result<FinishLiveMatchResponse, String> {
-    finish_live_match_internal(&state)
+    finish_live_match_internal(&state, Career::Token(career_token))
 }
 
 /// Apply a team talk and return per-player morale changes.
@@ -125,13 +179,28 @@ pub fn apply_team_talk(
     state: State<'_, Arc<StateManager>>,
     tone: String,
     context: String,
+    career_token: u64,
 ) -> Result<Vec<serde_json::Value>, String> {
     info!("[cmd] apply_team_talk: tone={}, context={}", tone, context);
-    let seed = rand::rng().random::<u64>();
+    apply_team_talk_on(&state, Career::Token(career_token), &tone, &context)
+}
+
+/// Applies a team talk to the career `career` names and returns the morale changes; refused if
+/// another career is active. The command and the MCP tool share it.
+pub fn apply_team_talk_on(
+    state: &StateManager,
+    career: Career,
+    tone: &str,
+    context: &str,
+) -> Result<Vec<serde_json::Value>, String> {
     // apply_team_talk validates (team assigned) before mutating morale.
+    let phase = live_phase_tag(state);
     state
-        .update_game(|game| apply_team_talk_internal(game, &tone, &context, seed))
-        .unwrap_or_else(|| Err("be.error.noActiveGameSession".to_string()))
+        .update_game_for(career, |game| {
+            let seed = team_talk_seed_in_phase(game, tone, context, &phase);
+            apply_team_talk_internal(game, tone, context, seed)
+        })
+        .and_then(|talk| talk)
 }
 
 /// Process press conference answers: generate news article, affect squad morale.
@@ -139,11 +208,22 @@ pub fn apply_team_talk(
 pub fn submit_press_conference(
     state: State<'_, Arc<StateManager>>,
     answers: Vec<PressConferenceAnswer>,
+    career_token: u64,
 ) -> Result<serde_json::Value, String> {
     info!("[cmd] submit_press_conference: {} answers", answers.len());
+    submit_press_conference_on(&state, Career::Token(career_token), &answers)
+}
+
+/// Applies press conference answers to the career `career` names; refused if another career is
+/// active.
+pub fn submit_press_conference_on(
+    state: &StateManager,
+    career: Career,
+    answers: &[PressConferenceAnswer],
+) -> Result<serde_json::Value, String> {
     state
-        .update_game(|game| apply_press_conference(game, &answers))
-        .unwrap_or_else(|| Err("be.error.noActiveGameSession".to_string()))
+        .update_game_for(career, |game| apply_press_conference(game, answers))
+        .and_then(|conference| conference)
 }
 
 /// Applies a press conference to the game: individual morale, squad morale, and the news article.
@@ -200,7 +280,7 @@ fn apply_press_conference(
 
     // Past this point nothing returns `Err` — see the note above.
     let today = game.clock.current_date.format("%Y-%m-%d").to_string();
-    let mut rng = rand::rng();
+    let mut rng = game.rng_today("press-conference");
 
     // Build news article from press conference answers
     let mut quotes: Vec<String> = Vec::new();
@@ -252,7 +332,7 @@ fn apply_press_conference(
                 _ => rng.random_range(0..=3),
             };
             if let Some(p) = game.players.iter_mut().find(|p| p.id == answer.player_id) {
-                p.morale = ((p.morale as i16) + player_delta).clamp(10, 100) as u8;
+                p.morale = apply_morale_change(p.morale, player_delta);
             }
         }
     }
@@ -262,7 +342,7 @@ fn apply_press_conference(
     if morale_delta != 0 {
         for p in game.players.iter_mut() {
             if p.team_id.as_deref() == Some(&user_team_id) {
-                p.morale = ((p.morale as i16) + morale_delta).clamp(10, 100) as u8;
+                p.morale = apply_morale_change(p.morale, morale_delta);
             }
         }
     }
@@ -457,6 +537,7 @@ mod tests {
             season: 1,
             fixtures: vec![
                 Fixture {
+                    postponement: None,
                     id: "fix1".to_string(),
                     competition_id: "league1".to_string(),
                     matchday: 1,
@@ -468,6 +549,7 @@ mod tests {
                     result: None,
                 },
                 Fixture {
+                    postponement: None,
                     id: "fix2".to_string(),
                     competition_id: "league1".to_string(),
                     matchday: 1,
@@ -558,6 +640,170 @@ mod tests {
         }
     }
 
+    fn morale_after_a_press_conference(seed: u64) -> Vec<u8> {
+        let mut game = game_after_a_match();
+        game.seed = seed;
+        apply_press_conference(
+            &mut game,
+            &[
+                press_answer("q1", "confident", ""),
+                press_answer("q2", "demanding", ""),
+            ],
+        )
+        .expect("press conference applied");
+        morale_snapshot(&game)
+    }
+
+    /// The user's squad after a match, every player at one morale.
+    fn squad_at(morale: u8) -> Game {
+        let mut game = game_after_a_match();
+        for player in game
+            .players
+            .iter_mut()
+            .filter(|player| player.team_id.as_deref() == Some("team1"))
+        {
+            player.morale = morale;
+        }
+        game
+    }
+
+    /// Each user's player's morale, by id.
+    fn squad_morale(game: &Game) -> Vec<(String, u8)> {
+        game.players
+            .iter()
+            .filter(|player| player.team_id.as_deref() == Some("team1"))
+            .map(|player| (player.id.clone(), player.morale))
+            .collect()
+    }
+
+    /// Where each player at 0 should end, from where the same player went from 50: up by what
+    /// the news was worth, or nowhere if it was bad.
+    fn expected_from_zero(steady: &Game) -> Vec<(String, u8)> {
+        squad_morale(steady)
+            .into_iter()
+            .map(|(id, morale)| (id, morale.saturating_sub(50)))
+            .collect()
+    }
+
+    /// Given the user's squad at morale 50, and the same squad at morale 0
+    /// When the same team talk is given to both, from the same seed
+    /// Then each player at 0 rises by what the talk gave the same player at 50, or stays at 0 if
+    ///      the talk went badly: no talk lifts a player to 10 whatever he hears
+    #[test]
+    fn a_team_talk_moves_a_very_unhappy_player_by_what_it_is_worth_and_no_more() {
+        let mut steady = squad_at(50);
+        let mut unhappy = squad_at(0);
+
+        apply_team_talk_internal(&mut steady, "aggressive", "losing", 7).unwrap();
+        apply_team_talk_internal(&mut unhappy, "aggressive", "losing", 7).unwrap();
+
+        let expected = expected_from_zero(&steady);
+        assert!(
+            expected.iter().any(|(_, morale)| *morale < 10),
+            "the talk must move someone by less than 10 to tell the floor apart: {expected:?}"
+        );
+        assert_eq!(squad_morale(&unhappy), expected);
+    }
+
+    /// Given the user's squad at morale 50, and the same squad at morale 0
+    /// When the same upbeat press conference is held for both, from the same seed, praising one
+    ///      player by name
+    /// Then each player at 0 rises by exactly what the same player at 50 rose, not to 10
+    #[test]
+    fn good_press_moves_a_very_unhappy_squad_by_what_it_is_worth_and_no_more() {
+        let answers = [press_answer("player_focus", "praise", "t1_mid0")];
+        let mut steady = squad_at(50);
+        steady.seed = 11;
+        let mut unhappy = squad_at(0);
+        unhappy.seed = 11;
+
+        apply_press_conference(&mut steady, &answers).expect("press conference applied");
+        apply_press_conference(&mut unhappy, &answers).expect("press conference applied");
+
+        assert_eq!(squad_morale(&unhappy), expected_from_zero(&steady));
+    }
+
+    /// Given the user's squad at morale 50, and the same squad at morale 3
+    /// When the same curt press conference is held for both, from the same seed
+    /// Then the squad at 50 drops and the squad at 3 stays at 3: bad press lifts nobody to 10
+    #[test]
+    fn bad_press_never_lifts_a_squad_whose_morale_is_below_ten() {
+        let answers = [
+            press_answer("q1", "curt", ""),
+            press_answer("q2", "evasive", ""),
+        ];
+        let seed = (0..)
+            .find(|&seed| {
+                let mut probe = squad_at(50);
+                probe.seed = seed;
+                apply_press_conference(&mut probe, &answers).expect("press conference applied");
+                squad_morale(&probe).iter().all(|(_, morale)| *morale < 50)
+            })
+            .expect("some seed makes the answers cost morale");
+        let mut unhappy = squad_at(3);
+        unhappy.seed = seed;
+
+        apply_press_conference(&mut unhappy, &answers).expect("press conference applied");
+
+        let unhappy_morale = squad_morale(&unhappy);
+        assert!(
+            unhappy_morale.iter().all(|(_, morale)| *morale == 3),
+            "{unhappy_morale:?}"
+        );
+    }
+
+    /// Given a club after a match,
+    /// When the same press conference is held twice from the same seed,
+    /// Then the squad's mood moves the same way both times, and the seed is what decides by
+    ///      how much.
+    #[test]
+    fn a_press_conference_moves_morale_the_same_way_from_the_same_seed() {
+        for seed in 0..20 {
+            assert_eq!(
+                morale_after_a_press_conference(seed),
+                morale_after_a_press_conference(seed),
+                "seed {seed}"
+            );
+        }
+        let outcomes: std::collections::BTreeSet<Vec<u8>> =
+            (0..40).map(morale_after_a_press_conference).collect();
+        assert!(outcomes.len() > 1, "forty seeds all moved the squad alike");
+    }
+
+    /// Given a game and a team talk,
+    /// When its seed is asked for twice,
+    /// Then it is the same; and another tone, another moment or another game's seed asks
+    ///      for another.
+    #[test]
+    fn a_team_talks_seed_comes_from_the_game() {
+        let mut game = game_after_a_match();
+        game.seed = 5;
+        let seed = super::team_talk_seed_in_phase(&game, "calm", "losing", "HalfTime");
+
+        assert_eq!(
+            seed,
+            super::team_talk_seed_in_phase(&game, "calm", "losing", "HalfTime")
+        );
+        assert_ne!(
+            seed,
+            super::team_talk_seed_in_phase(&game, "aggressive", "losing", "HalfTime")
+        );
+        assert_ne!(
+            seed,
+            super::team_talk_seed_in_phase(&game, "calm", "winning", "HalfTime")
+        );
+        assert_ne!(
+            seed,
+            super::team_talk_seed_in_phase(&game, "calm", "losing", "FullTime"),
+            "the same talk at half-time and at full-time is two talks"
+        );
+        game.seed = 6;
+        assert_ne!(
+            seed,
+            super::team_talk_seed_in_phase(&game, "calm", "losing", "HalfTime")
+        );
+    }
+
     #[test]
     fn praising_a_player_from_another_club_is_rejected() {
         // The player id used to be resolved against every player in the world, so a stale or
@@ -604,6 +850,7 @@ mod tests {
             name: "Test Cup".to_string(),
             season: 1,
             fixtures: vec![Fixture {
+                postponement: None,
                 id: "cup_fix1".to_string(),
                 competition_id: "cup1".to_string(),
                 matchday: 1,
@@ -699,7 +946,8 @@ mod tests {
         state.set_game(game);
         state.set_live_match(session);
 
-        finish_live_match_internal(&state).expect("finish live match response");
+        finish_live_match_internal(&state, ofm_core::state::Career::Active)
+            .expect("finish live match response");
 
         // Assert against the persisted state — not just the cloned response.game
         // — so a missing state.set_game() call would surface here.
@@ -768,12 +1016,33 @@ mod tests {
         state.set_game(game);
         state.set_live_match(session);
 
-        let response = finish_live_match_internal(&state).expect("finish live match response");
+        let response = finish_live_match_internal(&state, ofm_core::state::Career::Active)
+            .expect("finish live match response");
 
         let round_summary = response.round_summary.expect("round summary response");
         assert!(round_summary.is_complete);
         assert_eq!(round_summary.pending_fixture_count, 0);
         assert_eq!(round_summary.completed_results.len(), 2);
+        // The digest exists to show movement, so at least one club has to have moved. Taking the
+        // baseline at finish time instead of at session creation makes every delta zero — the
+        // round has already been played by then — and the assertions above all still pass.
+        assert!(
+            round_summary
+                .standings_delta
+                .iter()
+                .any(|delta| delta.points_delta != 0),
+            "a played round must move somebody: {:?}",
+            round_summary
+                .standings_delta
+                .iter()
+                .map(|delta| (
+                    delta.team_id.as_str(),
+                    delta.previous_position,
+                    delta.current_position,
+                    delta.points_delta
+                ))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             response
                 .game
@@ -803,7 +1072,8 @@ mod tests {
         state.set_game(game);
         state.set_live_match(session);
 
-        finish_live_match_internal(&state).expect("finish live match");
+        finish_live_match_internal(&state, ofm_core::state::Career::Active)
+            .expect("finish live match");
 
         let fixture = state
             .get_game(|g| g.competitions[0].fixtures[0].clone())
@@ -821,6 +1091,186 @@ mod tests {
         );
     }
 
+    /// Given a league fixture tied at regulation time, when a caller requests extra time,
+    /// then the fixture ends as a draw without extra time or a shootout.
+    #[test]
+    fn a_drawn_league_match_ignores_a_callers_extra_time_request() {
+        let mut session = level_at_regulation_full_time(|seed| {
+            let state = StateManager::new();
+            let mut game = make_game_with_round();
+            game.seed = seed;
+            state.set_game(game);
+            super::start_live_match_internal(
+                &state,
+                ofm_core::state::Career::Active,
+                0,
+                "spectator",
+                true,
+                Some("league1"),
+                Some("fix1"),
+            )
+            .expect("start league fixture");
+            state.take_live_match().unwrap()
+        });
+        let remainder = session.run_to_completion();
+        assert!(
+            remainder
+                .iter()
+                .all(|minute| minute.phase == engine::MatchPhase::Finished),
+            "a league draw must finish without entering extra time"
+        );
+        assert_eq!(session.snapshot().home_score, session.snapshot().away_score);
+        assert!(session.snapshot().penalty_shootout.is_none());
+    }
+
+    /// The fixture `start` kicks off for a game seed, at regulation full time, for the first seed
+    /// in 1..=200 where it is level then. The scenario is a draw, not any one seed: a change to
+    /// how often the engine scores moves which seeds draw (#1132 did).
+    fn level_at_regulation_full_time(
+        start: impl Fn(u64) -> live_match_manager::LiveMatchSession,
+    ) -> live_match_manager::LiveMatchSession {
+        for seed in 1..=200 {
+            let mut session = start(seed);
+            advance_to_regulation_end(&mut session);
+            let regulation = session.snapshot();
+            if regulation.home_score == regulation.away_score {
+                return session;
+            }
+        }
+        panic!("no seed in 1..=200 is level at regulation full time");
+    }
+
+    fn advance_to_regulation_end(session: &mut live_match_manager::LiveMatchSession) {
+        for _ in 0..200 {
+            if session.snapshot().phase == engine::MatchPhase::FullTime {
+                return;
+            }
+            session.step();
+        }
+        panic!("the fixture must reach regulation full time");
+    }
+
+    /// Given a cup tie between the league fixture's clubs and a domestic mirror,
+    /// when the tie is selected by stable identity with extra time disabled by the caller,
+    /// then its regulation draw continues to extra time and yields one winner in that cup.
+    #[test]
+    fn a_knockout_draw_uses_its_own_competition_despite_a_callers_flag() {
+        let mut session = level_at_regulation_full_time(|seed| {
+            let state = StateManager::new();
+            let mut game = make_game_with_round();
+            game.seed = seed;
+            let mut cup = make_knockout_cup("2025-06-15");
+            cup.fixtures[0].away_team_id = "team2".to_string();
+            game.competitions.push(cup);
+            state.set_game(game);
+            super::start_live_match_internal(
+                &state,
+                ofm_core::state::Career::Active,
+                1,
+                "spectator",
+                false,
+                Some("cup1"),
+                Some("cupfix1"),
+            )
+            .expect("stable identity selects the cup, not the raw league index");
+            state.take_live_match().unwrap()
+        });
+        assert_eq!(session.competition_id, "cup1");
+        assert_eq!(session.fixture_id, "cupfix1");
+        assert_eq!(session.snapshot().home_score, session.snapshot().away_score);
+        let remainder = session.run_to_completion();
+        assert!(
+            remainder
+                .iter()
+                .any(|minute| minute.phase == engine::MatchPhase::ExtraTimeFirstHalf),
+            "a knockout draw must enter extra time"
+        );
+        let final_score = session.snapshot();
+        assert!(
+            final_score.home_score != final_score.away_score
+                || final_score
+                    .penalty_shootout
+                    .as_ref()
+                    .is_some_and(|shootout| shootout.home_scored != shootout.away_scored),
+            "the tie must produce one winner"
+        );
+    }
+
+    /// Given a league or knockout fixture and any supported match mode,
+    /// when it starts with a contradictory caller flag, then fixture rules decide eligibility.
+    #[test]
+    fn live_spectator_and_instant_use_the_same_fixture_eligibility() {
+        for mode in ["live", "spectator", "instant"] {
+            for knockout in [false, true] {
+                for stable_identity in [false, true] {
+                    let state = StateManager::new();
+                    let mut game = make_game_with_round();
+                    if knockout {
+                        let cup = make_knockout_cup("2025-06-15");
+                        if !stable_identity {
+                            game.league = Some(cup.clone());
+                        }
+                        game.competitions.push(cup);
+                    }
+                    state.set_game(game);
+                    let (competition, fixture) = if !stable_identity {
+                        (None, None)
+                    } else if knockout {
+                        (Some("cup1"), Some("cupfix1"))
+                    } else {
+                        (Some("league1"), Some("fix1"))
+                    };
+                    let snapshot = super::start_live_match_internal(
+                        &state,
+                        ofm_core::state::Career::Active,
+                        0,
+                        mode,
+                        !knockout,
+                        competition,
+                        fixture,
+                    )
+                    .expect("fixture starts");
+                    assert_eq!(
+                        snapshot.allows_extra_time, knockout,
+                        "mode {mode}, stable identity {stable_identity}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Given a serialized career with a cup fixture and a domestic mirror,
+    /// when loaded and started by the saved competition/fixture identity,
+    /// then the cup's extra-time eligibility survives loading.
+    #[test]
+    fn a_loaded_cup_fixture_keeps_its_extra_time_eligibility() {
+        let state = StateManager::new();
+        let mut game = make_game_with_round();
+        game.competitions.push(make_knockout_cup("2025-06-15"));
+        let loaded = serde_json::from_value(serde_json::to_value(game).unwrap()).unwrap();
+        state.set_game(loaded);
+        let snapshot = super::start_live_match_internal(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "live",
+            false,
+            Some("cup1"),
+            Some("cupfix1"),
+        )
+        .expect("loaded cup fixture starts");
+        assert!(
+            snapshot.allows_extra_time,
+            "the loaded cup must allow a decider"
+        );
+        assert_eq!(
+            state
+                .with_live_match(|session| session.fixture_id.clone())
+                .as_deref(),
+            Some("cupfix1")
+        );
+    }
+
     // Regression: MCP match_start called start_live_match directly, which
     // never simulated the day's other fixtures; match_finish then advanced
     // the clock, stranding them Scheduled in the past forever.
@@ -829,8 +1279,16 @@ mod tests {
         let state = StateManager::new();
         state.set_game(make_game_with_round());
 
-        crate::application::live_match::start_live_match(&state, 0, "spectator", false, None, None)
-            .expect("start live match");
+        super::start_live_match_internal(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "spectator",
+            false,
+            None,
+            None,
+        )
+        .expect("start live match");
 
         let (user_fixture, other_fixture) = state
             .get_game(|g| {
@@ -858,16 +1316,257 @@ mod tests {
             .unwrap();
         assert_eq!(competition_fixture.status, FixtureStatus::Completed);
 
-        // Session restore: starting again must not re-simulate completed
-        // fixtures (simulate_other_matches only touches Scheduled ones).
-        crate::application::live_match::start_live_match(&state, 0, "spectator", false, None, None)
-            .expect("restore live match");
+        // Reconstructing a session requires that no live session exists.
+        // Completed same-day fixtures must still not be re-simulated.
+        state.take_live_match().expect("clear transient session");
+        super::start_live_match_internal(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "spectator",
+            false,
+            None,
+            None,
+        )
+        .expect("restore live match");
         let restored_result = state
             .get_game(|g| g.league.as_ref().unwrap().fixtures[1].result.clone())
             .unwrap()
             .expect("result still present");
         assert_eq!(restored_result.home_goals, first_result.home_goals);
         assert_eq!(restored_result.away_goals, first_result.away_goals);
+    }
+
+    #[test]
+    fn live_match_refuses_mcp_style_replay_after_finish() {
+        let state = StateManager::new();
+        state.set_game(make_game_with_round());
+
+        // MCP supplies only the raw fixture index, without team IDs.
+        super::start_live_match_internal(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "instant",
+            false,
+            None,
+            None,
+        )
+        .expect("first start");
+        finish_live_match_internal(&state, ofm_core::state::Career::Active).expect("first finish");
+        let before = state.get_game(|game| game.clone()).unwrap();
+
+        let error = super::start_live_match_internal(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "instant",
+            false,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error, "be.error.liveMatch.fixtureNotScheduled");
+        let after = state.get_game(|game| game.clone()).unwrap();
+        assert_eq!(after.clock.current_date, before.clock.current_date);
+        assert_eq!(
+            serde_json::to_value(&after.competitions[0].standings).unwrap(),
+            serde_json::to_value(&before.competitions[0].standings).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&after.competitions[0].fixtures[0].result).unwrap(),
+            serde_json::to_value(&before.competitions[0].fixtures[0].result).unwrap()
+        );
+    }
+
+    #[test]
+    fn live_match_refuses_command_start_for_completed_fixture() {
+        let state = StateManager::new();
+        let mut game = make_game_with_round();
+        game.league.as_mut().unwrap().fixtures[0].status = FixtureStatus::Completed;
+        game.competitions[0].fixtures[0].status = FixtureStatus::Completed;
+        state.set_game(game);
+
+        // Command callers supply stable fixture identity on restore.
+        let error = crate::application::live_match::start_live_match_with_identity(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "live",
+            false,
+            Some("league1"),
+            Some("fix1"),
+        )
+        .unwrap_err();
+        assert_eq!(error, "be.error.liveMatch.fixtureNotScheduled");
+    }
+
+    #[test]
+    fn live_match_refuses_start_when_legacy_mirror_is_stale() {
+        let state = StateManager::new();
+        let mut game = make_game_with_round();
+        game.competitions[0].fixtures[0].status = FixtureStatus::Completed;
+        // The legacy mirror still says Scheduled. MCP passes no team IDs and
+        // must not be allowed to replay a fixture completed in the source of truth.
+        state.set_game(game);
+
+        let error = super::start_live_match_internal(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "instant",
+            false,
+            None,
+            None,
+        )
+        .expect_err("completed authoritative fixture must be rejected");
+        assert_eq!(error, "be.error.liveMatch.fixtureNotScheduled");
+    }
+
+    #[test]
+    fn live_match_refuses_fallback_to_another_scheduled_fixture() {
+        let state = StateManager::new();
+        let mut game = make_game_with_round();
+        game.league.as_mut().unwrap().fixtures[0].status = FixtureStatus::Completed;
+        game.competitions[0].fixtures[0].status = FixtureStatus::Completed;
+        state.set_game(game);
+
+        let error = super::start_live_match_internal(
+            &state,
+            ofm_core::state::Career::Active,
+            1,
+            "live",
+            false,
+            Some("team1"),
+            Some("team2"),
+        )
+        .expect_err("team-identified command must not start another fixture by raw index");
+        assert_eq!(error, "be.error.liveMatch.fixtureNotFound");
+    }
+
+    #[test]
+    fn live_match_refuses_ambiguous_same_team_restore_without_fixture_identity() {
+        let state = StateManager::new();
+        let mut game = make_game_with_round();
+        game.league.as_mut().unwrap().fixtures[0].status = FixtureStatus::Completed;
+        game.competitions[0].fixtures[0].status = FixtureStatus::Completed;
+        let mut cup = make_knockout_cup("2025-06-15");
+        cup.fixtures[0].away_team_id = "team2".to_string();
+        game.competitions.push(cup);
+        state.set_game(game);
+
+        // The requested domestic fixture is done, but a cup tie between the
+        // same clubs is still Scheduled. Team IDs alone cannot restore it.
+        let result = super::start_live_match_internal(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "live",
+            false,
+            Some("team1"),
+            Some("team2"),
+        );
+        assert!(
+            matches!(result, Err(ref error) if error == "be.error.liveMatch.fixtureNotFound"),
+            "ambiguous restore must be rejected"
+        );
+    }
+
+    #[test]
+    fn live_match_restores_exact_cup_fixture_with_same_teams() {
+        let state = StateManager::new();
+        let mut game = make_game_with_round();
+        let mut cup = make_knockout_cup("2025-06-15");
+        cup.fixtures[0].away_team_id = "team2".to_string();
+        game.competitions.push(cup);
+        state.set_game(game);
+
+        crate::application::live_match::start_live_match_with_identity(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "live",
+            true,
+            Some("cup1"),
+            Some("cupfix1"),
+        )
+        .expect("cup fixture selected by stable identity");
+        let session = state.take_live_match().expect("active cup session");
+        assert_eq!(session.competition_id, "cup1");
+        assert_eq!(session.fixture_id, "cupfix1");
+    }
+
+    #[test]
+    fn live_match_refuses_finish_when_fixture_id_changes_under_session() {
+        let state = StateManager::new();
+        let mut game = make_game_with_round();
+        let session = live_match_manager::create_live_match(&game, 0, MatchMode::Instant, false)
+            .expect("scheduled fixture creates session");
+        game.competitions[0].fixtures[0].id = "replacement-fix1".to_string();
+        game.league.as_mut().unwrap().fixtures[0].id = "replacement-fix1".to_string();
+        state.set_game(game);
+        state.set_live_match(session);
+        let before = state.get_game(|game| game.clone()).unwrap();
+
+        let error =
+            finish_live_match_internal(&state, ofm_core::state::Career::Active).unwrap_err();
+        assert_eq!(error, "be.error.liveMatch.fixtureNotFound");
+        let after = state.get_game(|game| game.clone()).unwrap();
+        assert_eq!(after.clock.current_date, before.clock.current_date);
+        assert_eq!(after.competitions[0].fixtures[0].id, "replacement-fix1");
+        assert_eq!(
+            after.competitions[0].fixtures[0].status,
+            FixtureStatus::Scheduled
+        );
+    }
+
+    #[test]
+    fn live_match_refuses_finish_when_fixture_teams_change_under_session() {
+        let state = StateManager::new();
+        let mut game = make_game_with_round();
+        let session = live_match_manager::create_live_match(&game, 0, MatchMode::Instant, false)
+            .expect("scheduled fixture creates a session");
+        // Keep the same fixture ID and Scheduled status so only the team
+        // identity check can reject this swapped authoritative fixture.
+        game.competitions[0].fixtures[0].home_team_id = "team3".to_string();
+        state.set_game(game);
+        state.set_live_match(session);
+        let before = state.get_game(|game| game.clone()).unwrap();
+
+        let error =
+            finish_live_match_internal(&state, ofm_core::state::Career::Active).unwrap_err();
+        assert_eq!(error, "be.error.liveMatch.fixtureNotFound");
+        let after = state.get_game(|game| game.clone()).unwrap();
+        assert_eq!(after.clock.current_date, before.clock.current_date);
+        assert_eq!(after.competitions[0].fixtures[0].home_team_id, "team3");
+        assert_eq!(
+            after.competitions[0].fixtures[0].status,
+            FixtureStatus::Scheduled
+        );
+        assert!(after.competitions[0].fixtures[0].result.is_none());
+    }
+
+    #[test]
+    fn live_match_refuses_finish_when_fixture_was_completed_elsewhere() {
+        let state = StateManager::new();
+        let mut game = make_game_with_round();
+        let session = live_match_manager::create_live_match(&game, 0, MatchMode::Instant, false)
+            .expect("scheduled fixture creates a session");
+        game.league.as_mut().unwrap().fixtures[0].status = FixtureStatus::Completed;
+        game.competitions[0].fixtures[0].status = FixtureStatus::Completed;
+        state.set_game(game);
+        state.set_live_match(session);
+        let before = state.get_game(|game| game.clone()).unwrap();
+
+        let error =
+            finish_live_match_internal(&state, ofm_core::state::Career::Active).unwrap_err();
+        assert_eq!(error, "be.error.liveMatch.fixtureNotScheduled");
+        let after = state.get_game(|game| game.clone()).unwrap();
+        assert_eq!(after.clock.current_date, before.clock.current_date);
+        assert_eq!(
+            serde_json::to_value(&after.competitions[0].standings).unwrap(),
+            serde_json::to_value(&before.competitions[0].standings).unwrap()
+        );
     }
 
     fn make_knockout_cup(fixture_date: &str) -> League {
@@ -881,6 +1580,7 @@ mod tests {
                 ..CompetitionRules::default()
             },
             fixtures: vec![Fixture {
+                postponement: None,
                 id: "cupfix1".to_string(),
                 competition_id: "cup1".to_string(),
                 matchday: 1,
@@ -912,7 +1612,12 @@ mod tests {
     fn finish_live_match_applies_cup_result_to_the_cup_competition() {
         let state = StateManager::new();
         let mut game = make_game_with_round();
-        let cup = make_knockout_cup("2025-06-15");
+        let mut cup = make_knockout_cup("2025-06-15");
+        // A cup round is numbered independently of the league's. Keeping them different is what
+        // lets this test tell apart "the digest used the league's round context" from "it used
+        // the cup session's" — with both on matchday 1 the two are indistinguishable.
+        cup.fixtures[0].matchday = 2;
+        cup.participant_ids = vec!["team1".to_string(), "team3".to_string()];
         game.competitions.push(cup.clone());
 
         // Mimic the GUI match-day flow: the cup is swapped into game.league,
@@ -932,7 +1637,8 @@ mod tests {
         state.set_game(game);
         state.set_live_match(session);
 
-        let response = finish_live_match_internal(&state).expect("finish live match");
+        let response = finish_live_match_internal(&state, ofm_core::state::Career::Active)
+            .expect("finish live match");
 
         let cup = response
             .game
@@ -947,6 +1653,9 @@ mod tests {
         );
         assert!(cup.knockout_rounds[0].completed, "cup bracket advances");
 
+        // This league fixture is due the same day as the cup tie, so asserting it stayed
+        // Scheduled was also asserting #608's bug. The index-collision guard is now the pair
+        // above plus the standings count below: a leaked cup result gives a club two games.
         let league = response
             .game
             .competitions
@@ -955,14 +1664,63 @@ mod tests {
             .expect("league competition");
         assert_eq!(
             league.fixtures[0].status,
-            FixtureStatus::Scheduled,
-            "league fixture at the same index must be untouched"
+            FixtureStatus::Completed,
+            "a league fixture due the same day must be played, not stranded"
         );
-        assert!(league.fixtures[0].result.is_none());
         assert!(
-            league.standings.iter().all(|entry| entry.played == 0),
-            "league standings must not record the cup result"
+            league.fixtures[0].result.is_some(),
+            "the league fixture gets its own result"
         );
+        assert!(
+            league.standings.iter().all(|entry| entry.played == 1),
+            "the league had two fixtures today and four clubs, so each plays exactly once; \
+             a cup result leaking into the league table would give one of them two"
+        );
+
+        // The summary is built after the day's sweep, so it describes the round the response is
+        // actually carrying. Built before it, this came back `None` on exactly this shape — a cup
+        // day with domestic fixtures also due — and the digest read "unavailable".
+        let round_summary = response
+            .round_summary
+            .expect("the domestic round played today is summarised");
+        assert!(
+            round_summary.is_complete,
+            "both of today's league fixtures were played, so the round is complete"
+        );
+        // Identity, not just presence. The session played a cup tie, so its own
+        // `round_matchday`/`round_previous_standings` describe the cup — and a knockout cup has
+        // no table, so using them here would compute the league's deltas against an empty
+        // baseline. Both league fixtures are in this round, and neither is the cup tie.
+        assert_eq!(
+            round_summary.completed_results.len(),
+            2,
+            "the digest covers the league round, not the cup tie the user played"
+        );
+        assert!(
+            round_summary
+                .completed_results
+                .iter()
+                .all(|result| result.home_team_id != "team1" || result.away_team_id != "team3"),
+            "the cup tie must not appear in the league round digest"
+        );
+
+        // The cup tie the user played comes back as the cup's own summary. The day finishing
+        // advances the clock, so a summary dated by the clock after the sweep would be empty:
+        // the date has to be read before it.
+        assert_eq!(
+            response
+                .game
+                .clock
+                .current_date
+                .format("%Y-%m-%d")
+                .to_string(),
+            "2025-06-16"
+        );
+        let [cup_summary] = response.cup_round_summaries.as_slice() else {
+            panic!("the user's cup tie is summarised");
+        };
+        assert_eq!(cup_summary.results.len(), 1);
+        assert_eq!(cup_summary.results[0].result.home_team_id, "team1");
     }
 
     #[test]
@@ -981,7 +1739,7 @@ mod tests {
         state.set_game(game);
         state.set_live_match(session);
 
-        let result = finish_live_match_internal(&state);
+        let result = finish_live_match_internal(&state, ofm_core::state::Career::Active);
         assert!(
             result.is_err(),
             "out-of-range fixture index must error, not panic"
@@ -1035,5 +1793,796 @@ mod tests {
         let second = apply_team_talk_internal(&mut game, "motivational", "losing", 13).unwrap();
 
         assert!(delta_for(&second, "t1_mid0") <= delta_for(&first, "t1_mid0"));
+    }
+}
+
+#[cfg(test)]
+mod live_session_tests {
+    use crate::{
+        application::{live_match, time_advancement},
+        commands::{season, time, util},
+    };
+    use chrono::{TimeZone, Utc};
+    use domain::league::{Fixture, FixtureCompetition, FixtureStatus};
+    use domain::manager::Manager;
+    use domain::player::{Player, PlayerAttributes, Position};
+    use domain::team::Team;
+    use ofm_core::{clock::GameClock, game::Game, state::StateManager};
+    use serde_json::Value;
+
+    const KEY: &str = "be.error.liveMatch.inProgress";
+    fn default_attrs() -> PlayerAttributes {
+        PlayerAttributes {
+            pace: 60,
+            stamina: 60,
+            strength: 60,
+            agility: 60,
+            passing: 60,
+            shooting: 60,
+            tackling: 60,
+            dribbling: 60,
+            defending: 60,
+            positioning: 60,
+            vision: 60,
+            decisions: 60,
+            composure: 60,
+            aggression: 60,
+            teamwork: 60,
+            leadership: 60,
+            handling: 60,
+            reflexes: 60,
+            aerial: 60,
+        }
+    }
+
+    fn make_player(id: &str, name: &str, team_id: &str, position: Position) -> Player {
+        let mut player = Player::new(
+            id.to_string(),
+            name.to_string(),
+            name.to_string(),
+            "2000-01-01".to_string(),
+            "England".to_string(),
+            position,
+            default_attrs(),
+        );
+        player.team_id = Some(team_id.to_string());
+        player
+    }
+
+    fn make_game(roster_size: usize) -> Game {
+        let clock = GameClock::new(Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap());
+        let mut manager = Manager::new(
+            "mgr1".to_string(),
+            "Alex".to_string(),
+            "Manager".to_string(),
+            "1980-01-01".to_string(),
+            "England".to_string(),
+        );
+        manager.hire("team1".to_string());
+
+        let players: Vec<Player> = (1..=roster_size)
+            .map(|idx| {
+                let position = if idx == 1 {
+                    Position::Goalkeeper
+                } else if idx <= 5 {
+                    Position::Defender
+                } else if idx <= 9 {
+                    Position::Midfielder
+                } else {
+                    Position::Forward
+                };
+
+                make_player(
+                    &format!("p{}", idx),
+                    &format!("Player {}", idx),
+                    "team1",
+                    position,
+                )
+            })
+            .collect();
+
+        let mut team = Team::new(
+            "team1".to_string(),
+            "Test FC".to_string(),
+            "TST".to_string(),
+            "England".to_string(),
+            "Testville".to_string(),
+            "Test Ground".to_string(),
+            20_000,
+        );
+        team.starting_xi_ids = players
+            .iter()
+            .take(11)
+            .map(|player| player.id.clone())
+            .collect();
+
+        Game::new(clock, manager, vec![team], players, vec![], vec![])
+    }
+
+    fn make_game_with_matchday() -> Game {
+        let mut game = make_game(22);
+        let today = game.clock.current_date.format("%Y-%m-%d").to_string();
+        let mut opponent_team = Team::new(
+            "team2".to_string(),
+            "Rival FC".to_string(),
+            "RIV".to_string(),
+            "England".to_string(),
+            "Rivaltown".to_string(),
+            "Rival Ground".to_string(),
+            21_000,
+        );
+        opponent_team.starting_xi_ids = game
+            .players
+            .iter()
+            .skip(11)
+            .take(11)
+            .map(|p| p.id.clone())
+            .collect();
+        game.teams.push(opponent_team);
+
+        for player in game.players.iter_mut().skip(11) {
+            player.team_id = Some("team2".to_string());
+        }
+
+        game.teams[0].starting_xi_ids =
+            game.players.iter().take(11).map(|p| p.id.clone()).collect();
+        game.league = Some(domain::league::League {
+            id: "league-1".to_string(),
+            name: "League".to_string(),
+            season: 2025,
+            fixtures: vec![Fixture {
+                postponement: None,
+                id: "fixture-1".to_string(),
+                competition_id: "league-1".to_string(),
+                matchday: 1,
+                date: today,
+                home_team_id: "team1".to_string(),
+                away_team_id: "team2".to_string(),
+                competition: FixtureCompetition::League,
+                status: FixtureStatus::Scheduled,
+                result: None,
+            }],
+            standings: vec![
+                domain::league::StandingEntry::new("team1".to_string()),
+                domain::league::StandingEntry::new("team2".to_string()),
+            ],
+            transfer_log: vec![],
+            transfer_rumours: vec![],
+            ..domain::league::League::default()
+        });
+        game.competitions = game.league.iter().cloned().collect();
+        game
+    }
+
+    fn state_at_minute_thirty() -> StateManager {
+        let state = StateManager::new();
+        state.set_game(make_game_with_matchday());
+        live_match::start_live_match_with_identity(
+            &state,
+            ofm_core::state::Career::Active,
+            0,
+            "spectator",
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        live_match::step_live_match(&state, ofm_core::state::Career::Active, 30).unwrap();
+        let minute = live_match::get_match_snapshot(&state)
+            .unwrap()
+            .current_minute;
+        if minute < 30 {
+            live_match::step_live_match(
+                &state,
+                ofm_core::state::Career::Active,
+                u16::from(30 - minute),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            live_match::get_match_snapshot(&state)
+                .unwrap()
+                .current_minute,
+            30
+        );
+        state
+    }
+
+    /// Given a live match at minute 30 and a screen holding another career's token
+    /// When the screen's step arrives through the command
+    /// Then it is refused with the career-changed key and the match is still at minute 30.
+    #[test]
+    fn the_step_command_for_a_replaced_career_is_refused_and_the_match_stays() {
+        use crate::commands::wrapper_testkit::WrapperApp;
+        let app = WrapperApp::around(state_at_minute_thirty(), 0);
+
+        let refused = super::step_live_match(app.state(), 10, 5);
+
+        assert_eq!(refused.err(), Some("be.error.careerChanged".to_string()));
+        assert_eq!(
+            live_match::get_match_snapshot(&app.state())
+                .unwrap()
+                .current_minute,
+            30
+        );
+    }
+
+    /// Given a live match at minute 30 and a screen holding a token that is not its career's (5)
+    /// When the screen's step, command and finish arrive
+    /// Then each is refused with the career-changed key, the match is still at minute 30 and
+    ///      still there to finish, and the game is untouched; the match's own career then
+    ///      finishes it.
+    #[test]
+    fn live_match_writes_for_a_replaced_career_are_refused_and_leave_the_match_alone() {
+        use ofm_core::state::Career;
+        let state = state_at_minute_thirty();
+        let before = checkpoint(&state);
+        let stale = Career::Token(5);
+        let key = Some("be.error.careerChanged".to_string());
+
+        assert_eq!(live_match::step_live_match(&state, stale, 10).err(), key);
+        assert_eq!(
+            live_match::apply_match_command(
+                &state,
+                stale,
+                engine::MatchCommand::ChangeFormation {
+                    side: engine::Side::Home,
+                    formation: "4-3-3".to_string(),
+                }
+            )
+            .err(),
+            key
+        );
+        assert_eq!(live_match::finish_live_match(&state, stale).err(), key);
+
+        assert_eq!(checkpoint(&state), before);
+        assert_eq!(
+            live_match::get_match_snapshot(&state)
+                .unwrap()
+                .current_minute,
+            30
+        );
+        assert!(live_match::finish_live_match(&state, Career::Active).is_ok());
+    }
+
+    /// Given a game in career 3 and a screen holding career 5's token
+    /// When a team talk and a press conference arrive
+    /// Then both are refused with the career-changed key and the game is untouched; the right
+    ///      token reaches the team talk and applies it.
+    #[test]
+    fn a_team_talk_and_a_press_conference_for_a_replaced_career_are_refused() {
+        use ofm_core::state::Career;
+        let state = StateManager::new();
+        let mut game = make_game_with_matchday();
+        game.career_token = 3;
+        state.set_game(game);
+        let game_json = |state: &StateManager| {
+            serde_json::to_value(state.get_game(|g| g.clone()).unwrap()).unwrap()
+        };
+        let before = game_json(&state);
+        let key = Some("be.error.careerChanged".to_string());
+
+        assert_eq!(
+            super::apply_team_talk_on(&state, Career::Token(5), "calm", "drawing").err(),
+            key
+        );
+        assert_eq!(
+            super::submit_press_conference_on(&state, Career::Token(5), &[]).err(),
+            key
+        );
+
+        assert_eq!(game_json(&state), before);
+        assert!(super::apply_team_talk_on(&state, Career::Token(3), "calm", "drawing").is_ok());
+        assert_ne!(
+            super::submit_press_conference_on(&state, Career::Token(3), &[]).err(),
+            key,
+            "the right token reaches the press conference itself"
+        );
+    }
+
+    /// Given a game in career 3 with no match under way and a screen holding career 5's token
+    /// When the screen asks to start a match
+    /// Then it is refused with the career-changed key and no match begins.
+    #[test]
+    fn starting_a_match_for_a_replaced_career_is_refused() {
+        use ofm_core::state::Career;
+        let state = StateManager::new();
+        let mut game = make_game_with_matchday();
+        game.career_token = 3;
+        state.set_game(game);
+
+        let result = live_match::start_live_match_with_identity(
+            &state,
+            Career::Token(5),
+            0,
+            "spectator",
+            false,
+            None,
+            None,
+        );
+
+        assert_eq!(result.err(), Some("be.error.careerChanged".to_string()));
+        assert!(state.take_live_match().is_none());
+    }
+
+    fn checkpoint(state: &StateManager) -> Value {
+        serde_json::json!({
+            "game": state.get_game(|game| serde_json::to_value(game).unwrap()),
+            "stats": state.get_stats_state(|stats| serde_json::to_value(stats).unwrap()),
+            "snapshot": live_match::get_match_snapshot(state).unwrap(),
+            "identity": state.with_live_match(|session| (session.competition_id.clone(), session.fixture_id.clone(), session.fixture_index)),
+            "save_id": state.get_save_id(),
+        })
+    }
+
+    macro_rules! refused_advance {
+        ($name:ident, $operation:expr) => {
+            /// Given a live session at minute 30, when this date route is requested,
+            /// then the live-match key is returned and game, stats and session are unchanged.
+            #[test]
+            fn $name() {
+                let state = state_at_minute_thirty();
+                let before = checkpoint(&state);
+                assert_eq!(($operation)(&state).err().as_deref(), Some(KEY));
+                assert_eq!(checkpoint(&state), before);
+            }
+        };
+    }
+    refused_advance!(plain_advancing_during_a_live_match_is_refused, |s| {
+        time::advance_time_internal(s, ofm_core::state::Career::Active)
+    });
+    refused_advance!(mode_advancing_during_a_live_match_is_refused, |s| {
+        time_advancement::advance_time_with_mode(s, ofm_core::state::Career::Active, "delegate")
+    });
+    refused_advance!(live_mode_advancing_during_a_live_match_is_refused, |s| {
+        time_advancement::advance_time_with_mode(s, ofm_core::state::Career::Active, "live")
+    });
+    refused_advance!(skipping_during_a_live_match_is_refused, |s| {
+        time::skip_to_match_day_internal(s, ofm_core::state::Career::Active)
+    });
+    refused_advance!(one_day_advancing_during_a_live_match_is_refused, |s| {
+        time::advance_one_day_internal(s, ofm_core::state::Career::Active)
+    });
+    refused_advance!(event_advancing_during_a_live_match_is_refused, |s| {
+        time::advance_to_next_event_internal(s, ofm_core::state::Career::Active)
+    });
+    refused_advance!(season_advancing_during_a_live_match_is_refused, |s| {
+        season::advance_to_next_season_internal(s, ofm_core::state::Career::Active)
+    });
+
+    /// Given a live session, when another match is started, then the first session is unchanged.
+    #[test]
+    fn starting_a_second_match_is_refused() {
+        let state = state_at_minute_thirty();
+        let before = checkpoint(&state);
+        assert_eq!(
+            live_match::start_live_match_with_identity(
+                &state,
+                ofm_core::state::Career::Active,
+                0,
+                "live",
+                false,
+                None,
+                None
+            )
+            .err()
+            .as_deref(),
+            Some(KEY)
+        );
+        assert_eq!(checkpoint(&state), before);
+    }
+
+    fn save_directory() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("ofm-live-save-")
+            .tempdir()
+            .unwrap()
+    }
+
+    fn file_bytes(
+        path: &std::path::Path,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(file_bytes(&path));
+            } else {
+                files.insert(path.clone(), std::fs::read(path).unwrap());
+            }
+        }
+        files
+    }
+
+    /// Given a live session at minute 30, when save is requested, then no file changes and the session continues.
+    #[test]
+    fn saving_during_a_live_match_is_refused() {
+        let state = state_at_minute_thirty();
+        let directory = save_directory();
+        let path = directory.path();
+        let mut saves = db::save_manager::SaveManager::init(path).unwrap();
+        let id = saves
+            .create_save(&state.get_game(Clone::clone).unwrap(), "Live refusal")
+            .unwrap();
+        state.set_save_id(id);
+        state.update_game(|game| game.teams[0].finance += 1234);
+        let before = checkpoint(&state);
+        let files = file_bytes(path);
+        let result = util::persist_active_game(&state, &mut saves, ofm_core::state::Career::Active);
+        assert_eq!(result.err().as_deref(), Some(KEY));
+        assert_eq!(file_bytes(path), files);
+        assert_eq!(checkpoint(&state), before);
+        assert!(live_match::step_live_match(&state, ofm_core::state::Career::Active, 1).is_ok());
+        drop(saves);
+    }
+
+    /// Given a session completed through finish, when saving, then the persisted fixture holds the full result.
+    #[test]
+    fn saving_after_the_match_finishes_works() {
+        let state = state_at_minute_thirty();
+        let directory = save_directory();
+        let path = directory.path();
+        let mut saves = db::save_manager::SaveManager::init(path).unwrap();
+        let id = saves
+            .create_save(&state.get_game(Clone::clone).unwrap(), "Finished match")
+            .unwrap();
+        state.set_save_id(id.clone());
+        live_match::finish_live_match(&state, ofm_core::state::Career::Active).unwrap();
+        let expected = state
+            .get_game(|game| {
+                serde_json::to_value(&game.league.as_ref().unwrap().fixtures[0]).unwrap()
+            })
+            .unwrap();
+        util::persist_active_game(&state, &mut saves, ofm_core::state::Career::Active).unwrap();
+        let game = saves.load_game(&id).unwrap();
+        let fixture = &game.league.unwrap().fixtures[0];
+        assert_eq!(fixture.status, FixtureStatus::Completed);
+        assert_eq!(serde_json::to_value(fixture).unwrap(), expected);
+        assert!(
+            fixture
+                .result
+                .as_ref()
+                .unwrap()
+                .report
+                .as_ref()
+                .unwrap()
+                .total_minutes
+                >= 90
+        );
+        assert!(state.with_live_match(|_| ()).is_none());
+        drop(saves);
+    }
+
+    /// Given a match started in career A, when a saved career B replaces A and is saved,
+    /// then saving succeeds and A's session cannot finish or alter B's fixtures.
+    #[test]
+    fn loading_another_career_during_a_match_allows_saving() {
+        let state = state_at_minute_thirty();
+        let old_stats = domain::stats::StatsState {
+            player_matches: vec![],
+            team_matches: vec![domain::stats::TeamMatchStatsRecord {
+                fixture_id: "previous-a".to_string(),
+                season: 2025,
+                matchday: 0,
+                date: "2025-06-14".to_string(),
+                competition: FixtureCompetition::League,
+                team_id: "team1".to_string(),
+                opponent_team_id: "team2".to_string(),
+                home_team_id: "team1".to_string(),
+                away_team_id: "team2".to_string(),
+                goals_for: 1,
+                goals_against: 0,
+                possession_pct: 55,
+                shots: 8,
+                shots_on_target: 4,
+                passes_completed: 300,
+                passes_attempted: 350,
+                tackles_won: 9,
+                interceptions: 5,
+                fouls_committed: 3,
+                yellow_cards: 1,
+                red_cards: 0,
+            }],
+        };
+        let mut other_stats = old_stats.clone();
+        other_stats.team_matches[0].fixture_id = "previous-b".to_string();
+        other_stats.team_matches[0].goals_for = 4;
+        state.set_stats_state(old_stats);
+        let directory = save_directory();
+        let path = directory.path();
+        let mut saves = db::save_manager::SaveManager::init(path).unwrap();
+        let mut other = make_game_with_matchday();
+        other.manager.id = "career-b".to_string();
+        other.manager_id = other.manager.id.clone();
+        let id = saves
+            .create_save_with_stats(&other, &other_stats, "Career B")
+            .unwrap();
+        let loaded = saves.load_game(&id).unwrap();
+        crate::application::career::install_career(
+            &state,
+            loaded,
+            saves.load_stats_state(&id).unwrap(),
+            Some(id.clone()),
+        );
+        state.update_game(|game| game.teams[0].finance += 1234);
+        util::persist_active_game(&state, &mut saves, ofm_core::state::Career::Active).unwrap();
+        let expected = state
+            .get_game(|game| serde_json::to_value(game).unwrap())
+            .unwrap();
+        assert_eq!(
+            live_match::finish_live_match(&state, ofm_core::state::Career::Active)
+                .err()
+                .as_deref(),
+            Some("be.error.noActiveLiveMatch")
+        );
+        assert_eq!(
+            state
+                .get_game(|game| serde_json::to_value(game).unwrap())
+                .unwrap(),
+            expected
+        );
+        drop(saves);
+        let mut reader = db::save_manager::SaveManager::init(path).unwrap();
+        let restored = reader.load_game(&id).unwrap();
+        assert_eq!(
+            reader.load_stats_state(&id).unwrap().team_matches,
+            other_stats.team_matches
+        );
+        assert_eq!(restored.manager.id, "career-b");
+        assert_eq!(restored.teams[0].finance, other.teams[0].finance + 1234);
+        assert_eq!(
+            restored.league.unwrap().fixtures[0].status,
+            FixtureStatus::Scheduled
+        );
+        drop(reader);
+    }
+
+    /// Given a live match and an old save identity, when a new unsaved career is installed,
+    /// then both the old session and save identity are discarded.
+    #[test]
+    fn creating_an_unsaved_career_discards_the_previous_session() {
+        let state = state_at_minute_thirty();
+        state.set_save_id("previous-save".to_string());
+        crate::application::career::install_career(
+            &state,
+            make_game_with_matchday(),
+            Default::default(),
+            None,
+        );
+        assert!(state.with_live_match(|_| ()).is_none());
+        assert!(state.get_save_id().is_none());
+        assert_eq!(
+            live_match::finish_live_match(&state, ofm_core::state::Career::Active)
+                .err()
+                .as_deref(),
+            Some("be.error.noActiveLiveMatch")
+        );
+    }
+
+    /// Given an in-flight lifecycle operation, when another caller replaces the career,
+    /// then replacement queues until the operation releases the shared lock.
+    #[test]
+    fn career_replacement_waits_for_an_in_flight_operation() {
+        let state = std::sync::Arc::new(state_at_minute_thirty());
+        let operation = crate::application::live_session::operation();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let other = state.clone();
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            crate::application::career::install_career(
+                &other,
+                make_game_with_matchday(),
+                Default::default(),
+                None,
+            );
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let queued = matches!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(operation);
+        handle.join().unwrap();
+        assert!(
+            queued,
+            "career replacement must wait for the current start/finish/save/advance operation"
+        );
+    }
+    /// Given an idle saved career with changed finances, when returning to the menu,
+    /// then the changes reach a fresh save reader before the active state is cleared.
+    #[test]
+    fn exiting_saves_before_clearing_the_career() {
+        let state = StateManager::new();
+        let game = make_game_with_matchday();
+        let expected = game.teams[0].finance + 4321;
+        let directory = save_directory();
+        let path = directory.path();
+        let mut saves = db::save_manager::SaveManager::init(path).unwrap();
+        let id = saves.create_save(&game, "Exit career").unwrap();
+        state.set_game(game);
+        state.set_stats_state(Default::default());
+        state.set_save_id(id.clone());
+        state.update_game(|game| game.teams[0].finance = expected);
+        assert!(crate::application::saving::exit_to_menu(&state, &mut saves).unwrap());
+        assert!(state.get_game(|_| ()).is_none());
+        assert!(state.get_stats_state(|_| ()).is_none());
+        assert!(state.get_save_id().is_none());
+        drop(saves);
+        let mut reader = db::save_manager::SaveManager::init(path).unwrap();
+        assert_eq!(reader.load_game(&id).unwrap().teams[0].finance, expected);
+        drop(reader);
+    }
+
+    /// Given a career whose save cannot be written, when returning to the menu,
+    /// then the error leaves the career and its save identity intact.
+    #[test]
+    fn a_failed_exit_keeps_the_career() {
+        let state = StateManager::new();
+        state.set_game(make_game_with_matchday());
+        state.set_save_id("missing-save".to_string());
+        let expected = state
+            .get_game(|game| serde_json::to_value(game).unwrap())
+            .unwrap();
+        let directory = save_directory();
+        let path = directory.path();
+        let mut saves = db::save_manager::SaveManager::init(path).unwrap();
+        assert!(crate::application::saving::exit_to_menu(&state, &mut saves).is_err());
+        assert_eq!(
+            state
+                .get_game(|game| serde_json::to_value(game).unwrap())
+                .unwrap(),
+            expected
+        );
+        assert_eq!(state.get_save_id().as_deref(), Some("missing-save"));
+        drop(saves);
+    }
+
+    /// Given an unsaved live career, when returning to the menu,
+    /// then the same live-session gate refuses and retains the career and session.
+    #[test]
+    fn exiting_an_unsaved_live_career_is_refused() {
+        let state = state_at_minute_thirty();
+        let before = checkpoint(&state);
+        let directory = save_directory();
+        let path = directory.path();
+        let mut saves = db::save_manager::SaveManager::init(path).unwrap();
+        assert_eq!(
+            crate::application::saving::exit_to_menu(&state, &mut saves)
+                .err()
+                .as_deref(),
+            Some("be.error.liveMatch.inProgress")
+        );
+        assert_eq!(checkpoint(&state), before);
+        drop(saves);
+    }
+
+    /// Given an exit blocked while clearing stats, when a match starts concurrently,
+    /// then start queues until the entire exit has cleared the career.
+    #[test]
+    fn exiting_holds_the_operation_until_the_career_is_cleared() {
+        let state = std::sync::Arc::new(StateManager::new());
+        state.set_game(make_game_with_matchday());
+        state.set_stats_state(Default::default());
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let stats_state = state.clone();
+        let stats_lock = std::thread::spawn(move || {
+            stats_state.get_stats_state(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        locked_rx.recv().unwrap();
+        let exit_state = state.clone();
+        let exit = std::thread::spawn(move || {
+            let directory = save_directory();
+            let path = directory.path();
+            let mut saves = db::save_manager::SaveManager::init(path).unwrap();
+            let result = crate::application::saving::exit_to_menu(&exit_state, &mut saves);
+            drop(saves);
+            result
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state.get_game(|_| ()).is_some() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let clearing = state.get_game(|_| ()).is_none();
+        let start_state = state.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let start = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = live_match::start_live_match_with_identity(
+                &start_state,
+                ofm_core::state::Career::Active,
+                0,
+                "spectator",
+                false,
+                None,
+                None,
+            );
+            done_tx.send(()).unwrap();
+            result
+        });
+        started_rx.recv().unwrap();
+        let queued = matches!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        release_tx.send(()).unwrap();
+        stats_lock.join().unwrap();
+        assert!(!exit.join().unwrap().unwrap());
+        assert_eq!(
+            start.join().unwrap().err().as_deref(),
+            Some("be.error.noActiveGameSession")
+        );
+        assert!(clearing, "exit must reach the blocked clear");
+        assert!(queued, "start must wait until exit finishes clearing stats");
+    }
+
+    /// Given one scheduled fixture and two callers released together, when both start,
+    /// then exactly one starts and the other is refused without replacing the session.
+    #[test]
+    fn concurrent_match_starts_keep_the_first_session() {
+        let state = std::sync::Arc::new(StateManager::new());
+        state.set_game(make_game_with_matchday());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    live_match::start_live_match_with_identity(
+                        &state,
+                        ofm_core::state::Career::Active,
+                        0,
+                        "spectator",
+                        false,
+                        None,
+                        None,
+                    )
+                })
+            })
+            .collect();
+        barrier.wait();
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .find_map(|result| result.as_ref().err())
+                .unwrap(),
+            KEY
+        );
+        assert_eq!(
+            live_match::get_match_snapshot(&state)
+                .unwrap()
+                .current_minute,
+            0
+        );
+    }
+
+    /// Given a full-time snapshot whose result has not yet been applied, when advancing,
+    /// then the session still blocks the clock until finish is called.
+    #[test]
+    fn a_finished_snapshot_still_blocks_advancement_until_finish() {
+        let state = state_at_minute_thirty();
+        state
+            .with_live_match(|session| session.run_to_completion())
+            .unwrap();
+        let before = checkpoint(&state);
+        assert_eq!(
+            time::advance_time_internal(&state, ofm_core::state::Career::Active)
+                .err()
+                .as_deref(),
+            Some(KEY)
+        );
+        assert_eq!(checkpoint(&state), before);
     }
 }

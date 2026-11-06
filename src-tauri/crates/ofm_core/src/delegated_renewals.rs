@@ -1,11 +1,11 @@
-use crate::contract_wage_policy::renewal_wage_policy_allows;
+use crate::contract_wage_policy::{WagePolicyVerdict, wage_policy_verdict};
 use crate::contracts::{
     ContractWarningStage, DelegatedRenewalCase, DelegatedRenewalOptions, DelegatedRenewalReport,
     DelegatedRenewalResultStatus, contract_warning_stage, expected_contract_years, expected_wage,
     has_active_manager_block, has_let_expire_intent, round_up_to_nearest_thousand,
 };
 use crate::game::Game;
-use chrono::{Months, NaiveDate};
+use chrono::NaiveDate;
 use domain::message::{
     DelegatedRenewalCaseData as DelegatedRenewalCaseMessageData, DelegatedRenewalReportData,
     InboxMessage, MessageCategory, MessageContext, MessagePriority,
@@ -15,8 +15,6 @@ use domain::staff::StaffRole;
 use std::collections::{HashMap, HashSet};
 
 const ERR_NO_ASSISTANT_MANAGER_ASSIGNED: &str = "be.error.contracts.noAssistantManagerAssigned";
-const ERR_UNABLE_TO_CALCULATE_CONTRACT_END_DATE: &str =
-    "be.error.contracts.unableToCalculateContractEndDate";
 
 pub fn delegate_renewals(
     game: &mut Game,
@@ -53,7 +51,8 @@ pub fn delegate_renewals(
         .iter()
         .enumerate()
         .filter_map(|(index, player)| {
-            if player.team_id.as_deref() != Some(team.id.as_str()) || player.contract_end.is_none()
+            if player.team_id.as_deref() != Some(team.id.as_str())
+                || player.contract_end().is_none()
             {
                 return None;
             }
@@ -70,7 +69,7 @@ pub fn delegate_renewals(
                 return None;
             }
 
-            if contract_warning_stage(player.contract_end.as_deref(), current_date).is_some() {
+            if contract_warning_stage(player.contract_end(), current_date).is_some() {
                 return Some(index);
             }
 
@@ -91,7 +90,7 @@ pub fn delegate_renewals(
         let agreed_years = expected_years.min(max_years);
         let max_wage = round_up_to_nearest_thousand(
             player
-                .wage
+                .wage()
                 .saturating_mul(100 + options.max_wage_increase_pct)
                 / 100,
         );
@@ -149,7 +148,9 @@ pub fn delegate_renewals(
 
         if delegation_score >= 95 {
             let agreed_wage = expected_wage.min(max_wage);
-            if !renewal_wage_policy_allows(game, &team, player.wage, agreed_wage) {
+            let player_for_policy = player.clone();
+            let verdict = wage_policy_verdict(game, &team, &player_for_policy, agreed_wage);
+            if !verdict.permits() {
                 report.stalled_count += 1;
                 case.status = DelegatedRenewalResultStatus::Stalled;
                 case.note = String::new();
@@ -169,29 +170,29 @@ pub fn delegate_renewals(
                 continue;
             }
 
-            let new_contract_end = current_date
-                .checked_add_months(Months::new(agreed_years * 12))
-                .ok_or(ERR_UNABLE_TO_CALCULATE_CONTRACT_END_DATE.to_string())?;
-            let player = &mut game.players[player_index];
-            player.wage = agreed_wage;
-            player.contract_end = Some(new_contract_end.format("%Y-%m-%d").to_string());
-            let state = player
-                .morale_core
-                .renewal_state
-                .get_or_insert_with(ContractRenewalState::default);
-            state.status = RenewalSessionStatus::Agreed;
-            state.manager_blocked_until = None;
-            state.last_assistant_attempt_date = Some(today.clone());
-            state.last_outcome = Some(RenewalSessionOutcome::AcceptedByAssistant);
-            state.conversation_round = 0;
-            state.exit_intent = None;
+            crate::contracts::apply_agreed_renewal(
+                &mut game.players[player_index],
+                &team,
+                agreed_wage,
+                agreed_years,
+                current_date,
+                crate::contracts::RenewalAgreedBy::Assistant,
+            )?;
+            let player = &game.players[player_index];
 
             report.success_count += 1;
             case.status = DelegatedRenewalResultStatus::Successful;
-            case.agreed_wage = Some(player.wage);
+            case.agreed_wage = Some(player.wage());
             case.agreed_years = Some(agreed_years);
             case.note = String::new();
-            case.note_key = Some("be.msg.delegatedRenewals.notes.completed".to_string());
+            case.note_key = Some(
+                if verdict == WagePolicyVerdict::OverPolicyToKeepSquadFloor {
+                    "be.msg.delegatedRenewals.notes.completedToKeepSquadFloor"
+                } else {
+                    "be.msg.delegatedRenewals.notes.completed"
+                }
+                .to_string(),
+            );
             report.cases.push(case);
             continue;
         }
@@ -259,13 +260,10 @@ fn assistant_delegation_score(
     player: &Player,
     current_date: NaiveDate,
 ) -> i32 {
-    let assistant_quality = (i32::from(assistant.attributes.coaching) * 4
-        + i32::from(assistant.attributes.judging_ability) * 3
-        + i32::from(assistant.attributes.judging_potential) * 3)
-        / 10;
+    let assistant_quality = crate::staff_rating::assistant_quality(assistant);
     let trust_bonus = i32::from(player.morale_core.manager_trust) / 3;
     let morale_bonus = i32::from(player.morale) / 2;
-    let urgency_bonus = match contract_warning_stage(player.contract_end.as_deref(), current_date) {
+    let urgency_bonus = match contract_warning_stage(player.contract_end(), current_date) {
         Some(ContractWarningStage::FinalWeeks) => 18,
         Some(ContractWarningStage::ThreeMonths) => 14,
         Some(ContractWarningStage::SixMonths) => 10,
@@ -352,4 +350,73 @@ fn delegated_renewal_report_message(
         }),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::player::{PlayerAttributes, Position};
+    use domain::staff::{Staff, StaffAttributes};
+
+    /// Given an assistant rated 82 coaching, 76 and 74 judging (quality 77), and a player with
+    ///       trust 60 (20), morale 70 (35), 75 days left (14) and a value of 1,000,000 (less 10)
+    /// When the assistant weighs taking the renewal on
+    /// Then the score is 136: each part counted once, in its own weight
+    #[test]
+    fn the_delegation_score_adds_assistant_quality_trust_morale_and_urgency_less_penalties() {
+        let assistant = Staff::new(
+            "assistant".to_string(),
+            "A".to_string(),
+            "Assistant".to_string(),
+            "1985-01-01".to_string(),
+            StaffRole::AssistantManager,
+            StaffAttributes {
+                coaching: 82,
+                judging_ability: 76,
+                judging_potential: 74,
+                physiotherapy: 30,
+            },
+        );
+        let mut player = Player::new(
+            "p".to_string(),
+            "P".to_string(),
+            "P".to_string(),
+            "2000-01-01".to_string(),
+            "England".to_string(),
+            Position::Forward,
+            PlayerAttributes {
+                pace: 60,
+                stamina: 60,
+                strength: 60,
+                agility: 60,
+                passing: 60,
+                shooting: 60,
+                tackling: 60,
+                dribbling: 60,
+                defending: 60,
+                positioning: 60,
+                vision: 60,
+                decisions: 60,
+                composure: 60,
+                aggression: 60,
+                teamwork: 60,
+                leadership: 60,
+                handling: 30,
+                reflexes: 30,
+                aerial: 60,
+            },
+        );
+        player.morale_core.manager_trust = 60;
+        player.morale = 70;
+        player.market_value = 1_000_000;
+        player.stage_contract_end(Some("2026-10-15".to_string()));
+
+        let score = assistant_delegation_score(
+            &assistant,
+            &player,
+            NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+        );
+
+        assert_eq!(score, 136);
+    }
 }

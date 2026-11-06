@@ -11,7 +11,6 @@
 
 use domain::{
     league::{FixtureCompetition, League},
-    manager::Manager,
     news::{NewsArticle, NewsCategory},
     stats::{PlayerMatchStatsRecord, TeamMatchStatsRecord},
     world_history::{HistoricalSeasonAwardsRecord, WorldHistoryArchive},
@@ -23,33 +22,6 @@ use ofm_core::{
 };
 
 use super::start_date_for_year;
-
-pub(super) fn manager_for(team_id: &str) -> Manager {
-    let mut manager = Manager::new(
-        "mgr".to_string(),
-        "A".to_string(),
-        "B".to_string(),
-        "1980-01-01".to_string(),
-        "England".to_string(),
-    );
-    manager.hire(team_id.to_string());
-    manager
-}
-
-pub(super) fn nation_team(id: &str, nation: &str, reputation: u32) -> domain::team::Team {
-    let mut team = domain::team::Team::new(
-        id.to_string(),
-        id.to_string(),
-        id.to_string(),
-        nation.to_string(),
-        "City".to_string(),
-        "Stadium".to_string(),
-        10_000,
-    );
-    team.football_nation = nation.to_string();
-    team.reputation = reputation;
-    team
-}
 
 pub(super) fn default_player_attributes() -> domain::player::PlayerAttributes {
     domain::player::PlayerAttributes {
@@ -308,6 +280,27 @@ pub(super) fn make_imported_baseline_world_without_staff() -> WorldData {
                 "1997-01-01",
             ));
         }
+        // Enough seniors in every group for a sound club, so a career built
+        // from this world starts above the squad floor and nobody has to be
+        // promoted out of the academy the backfill is about to seed.
+        for (index, position) in [
+            domain::player::Position::Goalkeeper,
+            domain::player::Position::Midfielder,
+            domain::player::Position::Midfielder,
+            domain::player::Position::Midfielder,
+            domain::player::Position::Midfielder,
+            domain::player::Position::Forward,
+            domain::player::Position::Forward,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            players.push(make_player(
+                format!("{}-depth-{index}", team.id),
+                position,
+                "1996-01-01",
+            ));
+        }
     }
 
     WorldData {
@@ -388,6 +381,8 @@ pub(super) fn make_historical_snapshot_world() -> WorldData {
         players: base_game.players,
         staff: base_game.staff,
         managers: vec![incumbent],
+        retired_managers: Vec::new(),
+        retired_players: Vec::new(),
         competitions: Vec::new(),
         competition_definitions: None,
         national_teams: Vec::new(),
@@ -414,5 +409,6 @@ pub(super) fn make_historical_snapshot_world() -> WorldData {
         },
         extra_translations: std::collections::HashMap::new(),
         build_notices: Vec::new(),
+        generation_seed: None,
     }
 }
